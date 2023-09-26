@@ -91,6 +91,7 @@ namespace Sciencetopia.Controllers
         }
 
         // 注册用户的逻辑
+        [HttpPost("CreateUser")]
         public async Task<bool> CreateUserAsync(ApplicationUser user)
         {
             using (var session = _driver.AsyncSession())
@@ -113,6 +114,7 @@ namespace Sciencetopia.Controllers
             }
         }
 
+        [HttpPost("HashPassword")]
         public string HashPassword(string password, string salt)
         {
             if (string.IsNullOrEmpty(password) || string.IsNullOrEmpty(salt))
@@ -126,6 +128,7 @@ namespace Sciencetopia.Controllers
         }
 
         // 验证用户的逻辑
+        [HttpPost("ValidateUserAsync")]
         public async Task<ApplicationUser> ValidateUserAsync(string userName, string password)
         {
             if (string.IsNullOrEmpty(userName) || string.IsNullOrEmpty(password))
