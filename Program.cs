@@ -25,7 +25,7 @@ builder.Services.AddSwaggerGen(c =>
 // Setup CORS in .NET Web API
 builder.Services.AddCors(options =>
 {
-    options.AddDefaultPolicy(builder =>
+    options.AddPolicy("VueCorsPolicy", builder =>
     {
         builder.WithOrigins("http://localhost:8080") // Replace with the URL of your Vue.js app
                .AllowAnyMethod()
