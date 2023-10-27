@@ -1,9 +1,8 @@
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Hosting;
 using Neo4j.Driver;
 using Microsoft.OpenApi.Models;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using OpenAI.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,6 +43,12 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 
 // Add authorization service
 builder.Services.AddAuthorization();
+
+// Add OpenAI Service
+builder.Services.AddOpenAIService(options => {
+    options.ApiKey = builder.Configuration["OpenAIServiceOptions:ApiKey"];
+    options.DefaultModelId = OpenAI.ObjectModels.Models.Davinci;
+});
 
 // Integrate other services like distributed memory cache
 builder.Services.AddDistributedMemoryCache();

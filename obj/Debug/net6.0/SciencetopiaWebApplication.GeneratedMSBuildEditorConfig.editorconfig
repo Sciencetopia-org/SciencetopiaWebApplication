@@ -1,4 +1,5 @@
 is_global = true
+build_property.RefitInternalNamespace = SciencetopiaWebApplication
 build_property.TargetFramework = net6.0
 build_property.TargetPlatformMinVersion = 
 build_property.UsingMicrosoftNETSdkWeb = true
@@ -9,9 +10,9 @@ build_property.EnforceExtendedAnalyzerRules =
 build_property._SupportedPlatformList = Linux,macOS,Windows
 build_property.RootNamespace = SciencetopiaWebApplication
 build_property.RootNamespace = SciencetopiaWebApplication
-build_property.ProjectDir = c:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\
+build_property.ProjectDir = C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\
 build_property.RazorLangVersion = 6.0
 build_property.SupportLocalizedComponentNames = 
 build_property.GenerateRazorMetadataSourceChecksumAttributes = 
-build_property.MSBuildProjectDirectory = c:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication
+build_property.MSBuildProjectDirectory = C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication
 build_property._RazorSourceGeneratorDebug = 

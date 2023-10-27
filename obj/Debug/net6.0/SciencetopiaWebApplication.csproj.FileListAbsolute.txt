@@ -32,3 +32,8 @@ C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Scienceto
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net6.0\SciencetopiaWebApplication.pdb
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net6.0\SciencetopiaWebApplication.genruntimeconfig.cache
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net6.0\ref\SciencetopiaWebApplication.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net6.0\Refit.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net6.0\System.Net.Http.Json.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net6.0\System.Text.Encodings.Web.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net6.0\System.Text.Json.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net6.0\runtimes\browser\lib\net6.0\System.Text.Encodings.Web.dll
