@@ -44,7 +44,7 @@ namespace Sciencetopia.Controllers
 
             if (await CreateUserAsync(newUser))
             {
-                return Ok();
+                return Ok((new { success = true }));
             }
             else
             {
@@ -59,8 +59,8 @@ namespace Sciencetopia.Controllers
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
 
-            var user = await ValidateUserAsync(model.UserName, model.Password);
-            if (user != null)
+            var result = await ValidateUserAsync(model.UserName, model.Password);
+            if (result is OkObjectResult okResult && okResult.Value is Dictionary<string, object> response && response["Status"].ToString() == "Success" && response["User"] is ApplicationUser user)
             {
                 var claims = new List<Claim>
                 {
@@ -104,8 +104,8 @@ namespace Sciencetopia.Controllers
                         return false;
                     }
 
-                    await tx.RunAsync("CREATE (u:User {Id: $Id, UserName: $UserName, Email: $Email, Password: $Password})",
-                        new { Id = user.Id, UserName = user.UserName, Email = user.Email, Password = user.Password });
+                    await tx.RunAsync("CREATE (u:User {Id: $Id, UserName: $UserName, Email: $Email, Password: $Password, Salt: $Salt})",
+                        new { Id = user.Id, UserName = user.UserName, Email = user.Email, Password = user.Password, Salt = user.Salt });
 
                     return true;
                 });
@@ -129,47 +129,79 @@ namespace Sciencetopia.Controllers
 
         // 验证用户的逻辑
         [HttpPost("ValidateUserAsync")]
-        public async Task<ApplicationUser> ValidateUserAsync(string userName, string password)
+        public async Task<IActionResult> ValidateUserAsync(string userName, string password)
         {
+            // Check if inputs are valid
             if (string.IsNullOrEmpty(userName) || string.IsNullOrEmpty(password))
             {
-                return null; // 或抛出适当的异常
+                return BadRequest(new { error = "用户名或密码不能为空" });
             }
 
-            using (var session = _driver.AsyncSession())
+            IRecord userNode = null;
+            // Fetch the user node from the database
+            using var session = _driver.AsyncSession();
+            await session.ExecuteReadAsync(async tx =>
             {
-                var user = await session.ReadTransactionAsync(async tx =>
-                {
-                    var result = await tx.RunAsync("MATCH (u:User {UserName: $UserName}) RETURN u",
-                        new { UserName = userName });
+                var result = await tx.RunAsync("MATCH (u:User {UserName: $UserName}) RETURN u", new { UserName = userName });
+                userNode = await result.PeekAsync(); // Take the first record, if available
+            });
 
-                    return await result.PeekAsync();
-                });
+            // For debugging: Return the content of userNode
+            // return Ok(new { DebugUserNode = userNode });
 
-                if (user != null)
-                {
-                    string salt = user["Salt"].As<string>() ?? string.Empty;
-                    string hashedPassword = HashPassword(password, salt);
-
-                    string userId = user["Id"].As<string>() ?? string.Empty;
-                    string userPassword = user["Password"].As<string>() ?? string.Empty;
-                    string userEmail = user["Email"].As<string>() ?? string.Empty;
-
-                    if (hashedPassword == userPassword)
-                    {
-                        return new ApplicationUser
-                        {
-                            Id = userId,
-                            UserName = userName,
-                            Email = userEmail,
-                            Password = userPassword,
-                            Salt = salt
-                        };
-                    }
-                }
-
-                return null;
+            // If no user node found, return an unauthorized error
+            if (userNode == null)
+            {
+                return Unauthorized(new { error = "无效的登录尝试。" });
             }
+
+            // Extract properties from the node
+            var userProperties = userNode["u"].As<INode>().Properties;
+            string salt = userProperties["Salt"].As<string>();
+            string userId = userProperties["Id"]?.As<string>();
+            string userPassword = userProperties["Password"]?.As<string>();
+            string userEmail = userProperties["Email"]?.As<string>();
+
+            // Validate the salt and hashed password
+            if (string.IsNullOrEmpty(salt) || string.IsNullOrEmpty(userPassword))
+            {
+                // Log this error internally and return a generic error to the user.
+                return Unauthorized(new { error = "无效的登录尝试。" });
+            }
+
+            string hashedPassword = HashPassword(password, salt);
+            if (hashedPassword != userPassword)
+            {
+                return Unauthorized(new { error = "无效的登录尝试。" });
+            }
+
+            // If everything is valid, create the application user and return success
+            var appUser = new ApplicationUser
+            {
+                Id = userId,
+                UserName = userName,
+                Email = userEmail,
+                Password = userPassword,
+                Salt = salt
+            };
+
+            var response = new Dictionary<string, object>
+    {
+        { "Status", "Success" },
+        { "User", appUser }
+    };
+
+            return Ok(response);
+        }
+        
+        [HttpGet("IsAuthenticated")]
+        public IActionResult IsAuthenticated()
+        {
+            if (User.Identity.IsAuthenticated)
+            {
+                return Ok(new { isAuthenticated = true });
+            }
+            return Ok(new { isAuthenticated = false });
         }
 
     }
