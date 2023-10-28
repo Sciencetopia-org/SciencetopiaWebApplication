@@ -32,6 +32,9 @@ C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Scienceto
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net7.0\SciencetopiaWebApplication.pdb
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net7.0\SciencetopiaWebApplication.genruntimeconfig.cache
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\obj\Debug\net7.0\ref\SciencetopiaWebApplication.dll
-C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Refit.dll
-C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\System.Text.Json.dll
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\OpenAI.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.Abstractions.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.JsonWebTokens.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.Logging.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.Tokens.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\System.IdentityModel.Tokens.Jwt.dll
