@@ -44,7 +44,7 @@ namespace Sciencetopia.Controllers
                 {
                     source = new
                     {
-                        Identity = sourceNode.ElementId,
+                        Identity = sourceNode.Id,
                         Labels = sourceNode.Labels.ToList(),
                         Properties = new
                         {

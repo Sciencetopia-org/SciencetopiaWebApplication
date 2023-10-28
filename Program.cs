@@ -27,8 +27,9 @@ builder.Services.AddCors(options =>
     options.AddPolicy("VueCorsPolicy", builder =>
     {
         builder.WithOrigins("http://localhost:8080") // Replace with the URL of your Vue.js app
-               .AllowAnyMethod()
-               .AllowAnyHeader();
+            .AllowCredentials()
+            .AllowAnyMethod()
+            .AllowAnyHeader();
     });
 });
 
@@ -45,7 +46,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 builder.Services.AddAuthorization();
 
 // Add OpenAI Service
-builder.Services.AddOpenAIService(options => {
+builder.Services.AddOpenAIService(options =>
+{
     options.ApiKey = builder.Configuration["OpenAIServiceOptions:ApiKey"];
     options.DefaultModelId = OpenAI.ObjectModels.Models.Davinci;
 });
