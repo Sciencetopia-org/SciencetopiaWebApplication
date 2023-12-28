@@ -17,18 +17,19 @@ namespace Sciencetopia.Controllers
             _driver = driver;
         }
 
-        [HttpGet]
+        [HttpGet("GetNodes")]
         public async Task<IActionResult> GetKnowledgeGraph()
         {
             using var session = _driver.AsyncSession();
             var result = await session.RunAsync(@"
                 MATCH (n)
-                WITH n, SIZE([(n)-[:LINKS_TO]-() | 1]) AS degree
+                WHERE n:Topic OR n:Keyword OR n:Tag
+                WITH n, SIZE([(n)-[]-() | 1]) AS degree
                 ORDER BY degree DESC
-                LIMIT 20
+                LIMIT 1000
                 WITH COLLECT(n) AS topNodes
                 UNWIND topNodes AS n
-                MATCH (n)-[r:LINKS_TO]->(m)
+                MATCH (n)-[r]->(m)
                 WHERE m IN topNodes
                 RETURN n, r, m
             ");
@@ -75,6 +76,46 @@ namespace Sciencetopia.Controllers
             }
 
             return Ok(data);
+        }
+
+        [HttpGet("Search")]
+        public async Task<IActionResult> SearchNode([FromQuery] string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return BadRequest("Search query is required.");
+            }
+
+            string lowerCaseQuery = query.ToLower();
+
+            using var session = _driver.AsyncSession();
+            var result = await session.RunAsync(@"
+        MATCH (n)
+        WHERE (n:Topic OR n:Keyword OR n:Tag) AND toLower(n.name) CONTAINS $lowerCaseQuery
+        RETURN n, 
+               CASE WHEN toLower(n.name) STARTS WITH $lowerCaseQuery THEN 1 ELSE 0 END AS startsWithScore,
+               CASE WHEN toLower(n.name) = $lowerCaseQuery THEN 1 ELSE 0 END AS exactMatchScore
+        ORDER BY exactMatchScore DESC, startsWithScore DESC, n.name
+        LIMIT 1
+    ", new { lowerCaseQuery });
+
+            if (await result.FetchAsync())
+            {
+                var node = result.Current["n"].As<INode>();
+                return Ok(new
+                {
+                    Identity = node.Id,
+                    Labels = node.Labels.ToList(),
+                    Properties = new
+                    {
+                        Link = node.Properties.GetValueOrDefault("link", null)?.As<string>(),
+                        Name = node.Properties.GetValueOrDefault("name", null)?.As<string>(),
+                        Description = node.Properties.GetValueOrDefault("description", null)?.As<string>()
+                    }
+                });
+            }
+
+            return NotFound("No node found matching the query.");
         }
     }
 }
