@@ -9,10 +9,12 @@
       "SciencetopiaWebApplication/1.0.0": {
         "dependencies": {
           "Betalgo.OpenAI": "7.3.1",
+          "HtmlAgilityPack": "1.11.57",
           "Microsoft.AspNetCore.Cors": "2.2.0",
           "Neo4j.Driver": "5.12.0",
           "Swashbuckle.AspNetCore": "6.5.0",
-          "System.IdentityModel.Tokens.Jwt": "7.0.2"
+          "System.IdentityModel.Tokens.Jwt": "7.0.2",
+          "System.Text.Encoding.CodePages": "8.0.0"
         },
         "runtime": {
           "SciencetopiaWebApplication.dll": {}
@@ -27,6 +29,14 @@
           "lib/net7.0/OpenAI.dll": {
             "assemblyVersion": "7.3.1.0",
             "fileVersion": "7.3.1.0"
+          }
+        }
+      },
+      "HtmlAgilityPack/1.11.57": {
+        "runtime": {
+          "lib/netstandard2.0/HtmlAgilityPack.dll": {
+            "assemblyVersion": "1.11.57.0",
+            "fileVersion": "1.11.57.0"
           }
         }
       },
@@ -239,6 +249,22 @@
           }
         }
       },
+      "System.Text.Encoding.CodePages/8.0.0": {
+        "runtime": {
+          "lib/net7.0/System.Text.Encoding.CodePages.dll": {
+            "assemblyVersion": "8.0.0.0",
+            "fileVersion": "8.0.23.53103"
+          }
+        },
+        "runtimeTargets": {
+          "runtimes/win/lib/net7.0/System.Text.Encoding.CodePages.dll": {
+            "rid": "win",
+            "assetType": "runtime",
+            "assemblyVersion": "8.0.0.0",
+            "fileVersion": "8.0.23.53103"
+          }
+        }
+      },
       "System.Text.Encodings.Web/4.5.0": {},
       "System.ValueTuple/4.5.0": {}
     }
@@ -255,6 +281,13 @@
       "sha512": "sha512-8ehNqM7JIvLzLs6/xknb+3rnzBP2/tOWfpQkLkAL+42ghCnqBfewRB8x/AFfDaQ7O+qBzOFJ3YaNvKWvA1meLA==",
       "path": "betalgo.openai/7.3.1",
       "hashPath": "betalgo.openai.7.3.1.nupkg.sha512"
+    },
+    "HtmlAgilityPack/1.11.57": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-zDxnHcAvi+qhZG602eKaPJKmzm0T8npKVML0RMwjrRBabpmTRtu2OVpfNkMUfYMgQ+5EllOkSeGxu0uFVV2zFw==",
+      "path": "htmlagilitypack/1.11.57",
+      "hashPath": "htmlagilitypack.1.11.57.nupkg.sha512"
     },
     "Microsoft.AspNetCore.Cors/2.2.0": {
       "type": "package",
@@ -465,6 +498,13 @@
       "sha512": "sha512-szV62kSg47xg7ZL8wbpR90j+han0YG+rnK4S30xPEkMQHRkQTz30mir2xMkEclaiLNVuKozaNne+sptoSwelGA==",
       "path": "system.identitymodel.tokens.jwt/7.0.2",
       "hashPath": "system.identitymodel.tokens.jwt.7.0.2.nupkg.sha512"
+    },
+    "System.Text.Encoding.CodePages/8.0.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-OZIsVplFGaVY90G2SbpgU7EnCoOO5pw1t4ic21dBF3/1omrJFpAGoNAVpPyMVOC90/hvgkGG3VFqR13YgZMQfg==",
+      "path": "system.text.encoding.codepages/8.0.0",
+      "hashPath": "system.text.encoding.codepages.8.0.0.nupkg.sha512"
     },
     "System.Text.Encodings.Web/4.5.0": {
       "type": "package",

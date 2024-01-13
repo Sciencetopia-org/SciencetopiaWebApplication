@@ -38,3 +38,6 @@ C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Scienceto
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.Logging.dll
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\Microsoft.IdentityModel.Tokens.dll
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\System.IdentityModel.Tokens.Jwt.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\HtmlAgilityPack.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\System.Text.Encoding.CodePages.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net7.0\runtimes\win\lib\net7.0\System.Text.Encoding.CodePages.dll
