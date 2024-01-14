@@ -31,6 +31,7 @@ builder.Services.AddSingleton(x =>
 });
 
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
+builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
 
 // Add ASP.NET Core Identity
 builder.Services.AddDbContext<ApplicationDbContext>(options =>

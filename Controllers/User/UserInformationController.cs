@@ -60,7 +60,7 @@ public class UserInformationController : ControllerBase
             // Update user properties
             user.SelfIntroduction = model.SelfIntroduction;
             user.Gender = model.Gender;
-            user.BirthDate = model.BirthDate;
+            user.BirthDate = new DateTime(model.BirthDate.Year, model.BirthDate.Month, model.BirthDate.Day);
 
             // Update user in the database
             var result = await _userManager.UpdateAsync(user);
