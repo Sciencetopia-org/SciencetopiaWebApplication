@@ -25,7 +25,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value; // 获取当前登录用户的唯一标识符
 
             var query = @"
-            MATCH (u:User {Id: $userId}), (n)
+            MATCH (u:User {id: $userId}), (n)
             WHERE id(n) = $nodeId
             MERGE (u)-[:FAVORITED]->(n)
             RETURN n
@@ -58,7 +58,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value; // 获取当前登录用户的唯一标识符
 
             var query = @"
-        MATCH (u:User {Id: $userId})-[:FAVORITED]->(favNode)
+        MATCH (u:User {id: $userId})-[:FAVORITED]->(favNode)
         OPTIONAL MATCH (favNode)-[rel]-(relatedNode)
         WHERE (relatedNode)-[:FAVORITED]-(u)
         RETURN favNode, rel, relatedNode
@@ -116,7 +116,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-        MATCH (u:User {Id: $userId})-[r:FAVORITED]->(n)
+        MATCH (u:User {id: $userId})-[r:FAVORITED]->(n)
         WHERE id(n) = $nodeId
         DELETE r
         RETURN n

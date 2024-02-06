@@ -19,6 +19,9 @@ Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 // Add services to the container.
 builder.Services.AddTransient<IEmailSender, EmailSender>();
 builder.Services.AddTransient<ISmsSender, SmsSender>();
+builder.Services.AddScoped<StudyPlanService>();
+builder.Services.AddScoped<StudyGroupService>();
+builder.Services.AddScoped<LearningService>();
 
 // Integrate Neo4j configuration
 var neo4jConfig = builder.Configuration.GetSection("Neo4j");

@@ -4,8 +4,8 @@ public class VerifyPhoneNumberDTO
 {
     [Required]
     [Phone]
-    public string PhoneNumber { get; set; }
+    public string? PhoneNumber { get; set; }
 
     [Required]
-    public string Token { get; set; }
+    public string? Token { get; set; }
 }

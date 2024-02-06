@@ -4,5 +4,5 @@ public class ChangePhoneNumberDTO
 {
     [Required]
     [Phone]
-    public string NewPhoneNumber { get; set; }
+    public string? NewPhoneNumber { get; set; }
 }

@@ -53,7 +53,7 @@ public class UserInformationController : ControllerBase
     public async Task<IActionResult> UpdateUserInformation([FromBody] UserUpdateDTO model)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier); // Get user ID from the token
-        var user = await _userManager.FindByIdAsync(userId);
+        var user = await _userManager.FindByIdAsync(userId ?? string.Empty);
 
         if (user != null)
         {
@@ -113,6 +113,11 @@ public class UserInformationController : ControllerBase
         }
 
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (userId == null)
+        {
+            return BadRequest("User ID not found.");
+        }
+
         var user = await _userManager.FindByIdAsync(userId);
         if (user == null)
         {

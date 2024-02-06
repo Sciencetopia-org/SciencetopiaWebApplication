@@ -40,7 +40,7 @@ namespace Sciencetopia.Controllers
             if (!ModelState.IsValid) return BadRequest(ModelState);
 
             var user = new ApplicationUser { UserName = model.UserName, Email = model.Email };
-            var result = await _userManager.CreateAsync(user, model.Password);
+            var result = await _userManager.CreateAsync(user, model.Password ?? throw new ArgumentNullException(nameof(model.Password)));
 
             if (result.Succeeded)
             {
@@ -83,16 +83,20 @@ namespace Sciencetopia.Controllers
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
 
-            var result = await _signInManager.PasswordSignInAsync(model.UserName, model.Password, model.RememberMe, lockoutOnFailure: false);
+            if (model.UserName == null)
+            {
+                return BadRequest("User name is required.");
+            }
+
+            var result = await _signInManager.PasswordSignInAsync(model.UserName, model.Password!, model.RememberMe, lockoutOnFailure: false);
 
             if (result.Succeeded)
             {
-                // Additional Neo4j checks or operations can go here
                 return Ok(new { success = true });
             }
             else
             {
-                return Unauthorized(new { error = "无效的登录尝试。" });
+                return BadRequest("Invalid login attempt.");
             }
         }
 
@@ -157,6 +161,11 @@ namespace Sciencetopia.Controllers
             var user = await _userManager.GetUserAsync(User);
             if (user == null) return NotFound("User not found.");
 
+            if (model.NewEmail == null)
+            {
+                return BadRequest("New email is required.");
+            }
+
             var token = await _userManager.GenerateChangeEmailTokenAsync(user, model.NewEmail);
             var callbackUrl = Url.Action("ConfirmEmailChange", "UserInformation",
                 new { userId = user.Id, email = model.NewEmail, token = token }, protocol: HttpContext.Request.Scheme);
@@ -186,9 +195,9 @@ namespace Sciencetopia.Controllers
         [HttpPost("ChangePhoneNumber")]
         public async Task<IActionResult> ChangePhoneNumber(ChangePhoneNumberDTO model)
         {
-            if (!ModelState.IsValid)
+            if (model.NewPhoneNumber == null)
             {
-                return BadRequest(ModelState);
+                return BadRequest("New phone number is required.");
             }
 
             var user = await _userManager.GetUserAsync(User);
@@ -217,6 +226,16 @@ namespace Sciencetopia.Controllers
                 return NotFound("User not found.");
             }
 
+            if (model.PhoneNumber == null)
+            {
+                return BadRequest("Phone number is required.");
+            }
+
+            if (model.Token == null)
+            {
+                return BadRequest("Token is required.");
+            }
+
             var result = await _userManager.ChangePhoneNumberAsync(user, model.PhoneNumber, model.Token);
             if (result.Succeeded)
             {
@@ -242,6 +261,16 @@ namespace Sciencetopia.Controllers
                 return NotFound("User not found.");
             }
 
+            if (model.CurrentPassword == null)
+            {
+                return BadRequest("Current password is required.");
+            }
+
+            if (model.NewPassword == null)
+            {
+                return BadRequest("New password is required.");
+            }
+
             var result = await _userManager.ChangePasswordAsync(user, model.CurrentPassword, model.NewPassword);
             if (result.Succeeded)
             {
@@ -256,14 +285,21 @@ namespace Sciencetopia.Controllers
         [HttpPost("ForgotUsername")]
         public async Task<IActionResult> ForgotUsername(ForgotUsernameDTO model)
         {
-            var user = await _userManager.FindByEmailAsync(model.Email) ??
-                       await _userManager.FindByPhoneNumberAsync(model.PhoneNumber);
+            var user = await _userManager.FindByEmailAsync(model.Email ?? string.Empty) ??
+                       (!string.IsNullOrEmpty(model.PhoneNumber) ? await _userManager.FindByPhoneNumberAsync(model.PhoneNumber) : null);
 
             if (user != null)
             {
-                // Send the username via email or SMS
-                await _emailSender.SendEmailAsync(user.Email, "Your Username", $"Your username is: {user.UserName}");
-                // If using SMS, implement similar logic
+                if (user.Email != null)
+                {
+                    // Send the username via email or SMS
+                    await _emailSender.SendEmailAsync(user.Email, "Your Username", $"Your username is: {user.UserName}");
+                    // If using SMS, implement similar logic
+                }
+                else
+                {
+                    return BadRequest("User email is null.");
+                }
             }
             else
             {
@@ -276,19 +312,26 @@ namespace Sciencetopia.Controllers
         [HttpPost("ForgotPassword")]
         public async Task<IActionResult> ForgotPassword(ForgotPasswordDTO model)
         {
-            var user = await _userManager.FindByEmailAsync(model.Email) ??
-                       await _userManager.FindByPhoneNumberAsync(model.PhoneNumber);
+            var user = await _userManager.FindByEmailAsync(model.Email ?? string.Empty) ??
+                       (model.PhoneNumber != null ? await _userManager.FindByPhoneNumberAsync(model.PhoneNumber) : null);
 
             if (user != null)
             {
-                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+                if (user.Email != null)
+                {
+                    var token = await _userManager.GeneratePasswordResetTokenAsync(user);
 
-                // Send password reset email or SMS
-                var callbackUrl = Url.Action("ResetPassword", "Account",
-                    new { userId = user.Id, token = token }, protocol: Request.Scheme);
-                await _emailSender.SendEmailAsync(user.Email, "Reset Password",
-                    $"Please reset your password by clicking here: <a href='{callbackUrl}'>link</a>");
-                // If using SMS, send token or URL
+                    // Send password reset email or SMS
+                    var callbackUrl = Url.Action("ResetPassword", "Account",
+                        new { userId = user.Id, token = token }, protocol: Request.Scheme);
+                    await _emailSender.SendEmailAsync(user.Email, "Reset Password",
+                        $"Please reset your password by clicking here: <a href='{callbackUrl}'>link</a>");
+                    // If using SMS, send token or URL
+                }
+                else
+                {
+                    return BadRequest("User email is null.");
+                }
             }
             else
             {
@@ -301,7 +344,7 @@ namespace Sciencetopia.Controllers
         [HttpGet("AuthStatus")]
         public IActionResult GetAuthenticationStatus()
         {
-            var isAuthenticated = User.Identity.IsAuthenticated;
+            var isAuthenticated = User?.Identity?.IsAuthenticated ?? false;
             return Ok(new { isAuthenticated });
         }
 
@@ -309,6 +352,11 @@ namespace Sciencetopia.Controllers
         public async Task<IActionResult> GetAvatarUrl()
         {
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (string.IsNullOrEmpty(userId))
+            {
+                return BadRequest("Invalid user ID.");
+            }
+
             var user = await _userManager.FindByIdAsync(userId);
             if (user == null)
             {
@@ -322,9 +370,9 @@ namespace Sciencetopia.Controllers
                 return Ok(new { AvatarUrl = avatarSasUrl });
             }
 
-            // If no avatar is set, you can return a default image or a null/empty response
+            // If no avatar is set, you can return a default image or an empty string response
             // Example: return Ok(new { AvatarUrl = "path/to/default/avatar.jpg" });
-            return Ok(new { AvatarUrl = (string)null });
+            return Ok(new { AvatarUrl = string.Empty });
         }
 
         private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, int validMinutes = 30)
@@ -360,7 +408,7 @@ namespace Sciencetopia.Controllers
                         return false;
                     }
 
-                    await tx.RunAsync("CREATE (u:User {Id: $Id})",
+                    await tx.RunAsync("CREATE (u:User {id: $Id})",
                         new { Id = user.Id });
 
                     return true;

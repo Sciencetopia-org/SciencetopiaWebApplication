@@ -42,7 +42,7 @@ namespace Sciencetopia.Controllers
 
             using (var session = _driver.AsyncSession())
             {
-                var result = await session.ReadTransactionAsync(async tx =>
+                var result = await session.ExecuteReadAsync(async tx =>
                 {
                     // 在这里编写您的推荐查询逻辑
                     // 例如：找出用户最常访问的资源类型，并返回与之相关的推荐资源

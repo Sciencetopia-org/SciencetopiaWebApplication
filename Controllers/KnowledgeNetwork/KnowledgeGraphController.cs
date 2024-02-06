@@ -22,24 +22,26 @@ namespace Sciencetopia.Controllers
         {
             using var session = _driver.AsyncSession();
             var result = await session.RunAsync(@"
-                MATCH (n)
-                WHERE n:Topic OR n:Keyword OR n:People OR n:Works OR n:Event
-                WITH n, SIZE([(n)-[]-() | 1]) AS degree
-                ORDER BY degree DESC
-                LIMIT 1000
-                WITH COLLECT(n) AS topNodes
-                UNWIND topNodes AS n
-                MATCH (n)-[r]->(m)
-                WHERE m IN topNodes
-                RETURN n, r, m
-            ");
+        // Fetch knowledge nodes and their relationships
+        MATCH (n)-[r]->(m)
+        WHERE (n:Field OR n:Topic OR n:Keyword OR n:People OR n:Works OR n:Event) AND
+              (m:Field OR m:Topic OR m:Keyword OR m:People OR m:Works OR m:Event)
+        // Optionally match resources linked to these nodes
+        OPTIONAL MATCH (n)-[:HAS_RESOURCE]->(nr:Resource)
+        OPTIONAL MATCH (m)-[:HAS_RESOURCE]->(mr:Resource)
+        WITH n, m, r, COLLECT(DISTINCT nr.link) AS nResources, COLLECT(DISTINCT mr.link) AS mResources
+        RETURN n AS sourceNode, m AS targetNode, r AS relationship, nResources, mResources
+        LIMIT 1000
+    ");
             var data = new List<object>();
 
             await foreach (var record in result)
             {
-                var sourceNode = record["n"].As<INode>();
-                var targetNode = record["m"].As<INode>();
-                var relationship = record["r"].As<IRelationship>();
+                var sourceNode = record["sourceNode"].As<INode>();
+                var targetNode = record["targetNode"].As<INode>();
+                var relationship = record["relationship"].As<IRelationship>();
+                var nResources = record["nResources"].As<List<string>>();
+                var mResources = record["mResources"].As<List<string>>();
 
                 data.Add(new
                 {
@@ -49,10 +51,10 @@ namespace Sciencetopia.Controllers
                         Labels = sourceNode.Labels.ToList(),
                         Properties = new
                         {
-                            Link = sourceNode.Properties["link"].As<string>(),
                             Name = sourceNode.Properties["name"].As<string>(),
-                            description = sourceNode.Properties["description"].As<string>()
-                        }
+                            Description = sourceNode.Properties["description"].As<string>(),
+                        },
+                        Resources = nResources.Select(link => new { Link = link }).ToList()
                     },
                     target = new
                     {
@@ -60,10 +62,10 @@ namespace Sciencetopia.Controllers
                         Labels = targetNode.Labels.ToList(),
                         Properties = new
                         {
-                            Link = targetNode.Properties["link"].As<string>(),
                             Name = targetNode.Properties["name"].As<string>(),
-                            description = targetNode.Properties["description"].As<string>()
-                        }
+                            Description = targetNode.Properties["description"].As<string>(),
+                        },
+                        Resources = mResources.Select(link => new { Link = link }).ToList()
                     },
                     relationship = new
                     {
@@ -77,6 +79,7 @@ namespace Sciencetopia.Controllers
 
             return Ok(data);
         }
+
 
         [HttpGet("Search")]
         public async Task<IActionResult> SearchNode([FromQuery] string query)

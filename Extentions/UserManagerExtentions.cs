@@ -8,8 +8,15 @@ namespace Sciencetopia.Extensions
     {
         public static async Task<ApplicationUser> FindByPhoneNumberAsync(this UserManager<ApplicationUser> userManager, string phoneNumber)
         {
-            return await userManager?.Users?.FirstOrDefaultAsync(x => x.PhoneNumber == phoneNumber);
+            if (userManager != null && userManager.Users != null)
+            {
+                var user = await userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == phoneNumber);
+                if (user != null)
+                {
+                    return user;
+                }
+            }
+            return null;
         }
     }
-
 }
