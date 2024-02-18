@@ -23,6 +23,28 @@ public class StudyGroupController : ControllerBase
         return Ok(groups);
     }
 
+    [HttpGet("GetStudyGroupById/{groupId}")]
+    public async Task<ActionResult<StudyGroup>> GetStudyGroupById(string groupId)
+    {
+        var group = await _studyGroupService.GetStudyGroupByIdAsync(groupId);
+        if (group == null)
+        {
+            return NotFound("Study group not found.");
+        }
+        return Ok(group);
+    }
+
+    [HttpGet("GetStudyGroupMembers/{groupId}")]
+    public async Task<ActionResult<IEnumerable<GroupMember>>> GetStudyGroupMembers(string groupId)
+    {
+        var members = await _studyGroupService.GetStudyGroupMembers(groupId);
+        if (members == null)
+        {
+            return NotFound("Study group not found.");
+        }
+        return Ok(members);
+    }
+
     [HttpPost("CreateStudyGroup")]
     public async Task<ActionResult<StudyGroup>> CreateStudyGroupAsync([FromBody] StudyGroupDTO studyGroupDTO)
     {
@@ -67,6 +89,59 @@ public class StudyGroupController : ControllerBase
         else
         {
             return BadRequest("Error deleting study group or permission denied.");
+        }
+    }
+
+    [HttpPost("ApplyToJoin")]
+    [Authorize] // Ensure only authenticated users can apply
+    public async Task<IActionResult> ApplyToJoin([FromBody] ApplyToJoinRequest request)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
+        // Retrieve the user's ID from the ClaimsPrincipal
+        string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the user is authenticated
+        if (string.IsNullOrEmpty(userId))
+        {
+            return Unauthorized("User is not authenticated.");
+        }
+
+        if (string.IsNullOrEmpty(request.StudyGroupId))
+        {
+            return BadRequest("Study group ID is required.");
+        }
+
+        var result = await _studyGroupService.ApplyToJoin(userId, request.StudyGroupId);
+        if (result)
+        {
+            return Ok("Application submitted successfully.");
+        }
+        else
+        {
+            return BadRequest("Failed to submit application. The group may not exist, or you may have already applied.");
+        }
+    }
+
+    [HttpPost("UpdateApplicationStatus")]
+    public async Task<IActionResult> UpdateApplicationStatus([FromBody] UpdateStatusRequest request)
+    {
+        if (string.IsNullOrEmpty(request.UserId) || string.IsNullOrEmpty(request.StudyGroupId) || request.Status == null)
+        {
+            return BadRequest("User ID, Study Group ID, and Status are required.");
+        }
+
+        var result = await _studyGroupService.UpdateApplicationStatusAsync(request.UserId, request.StudyGroupId, request.Status);
+        if (result)
+        {
+            return Ok("Application status updated successfully.");
+        }
+        else
+        {
+            return BadRequest("Could not update the application status.");
         }
     }
 

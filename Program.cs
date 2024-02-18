@@ -22,6 +22,7 @@ builder.Services.AddTransient<ISmsSender, SmsSender>();
 builder.Services.AddScoped<StudyPlanService>();
 builder.Services.AddScoped<StudyGroupService>();
 builder.Services.AddScoped<LearningService>();
+builder.Services.AddScoped<UserService>();
 
 // Integrate Neo4j configuration
 var neo4jConfig = builder.Configuration.GetSection("Neo4j");
@@ -83,10 +84,13 @@ builder.Services.ConfigureApplicationCookie(options =>
 // Add authorization service
 builder.Services.AddAuthorization();
 
+// Add logging service
+builder.Services.AddLogging();
+
 // Add OpenAI Service
 builder.Services.AddOpenAIService(options =>
 {
-    options.ApiKey = builder.Configuration["OpenAIServiceOptions:ApiKey"];
+    options.ApiKey = builder.Configuration["OpenAIServiceOptions:ApiKey"] ?? string.Empty;
     options.DefaultModelId = OpenAI.ObjectModels.Models.Davinci;
 });
 

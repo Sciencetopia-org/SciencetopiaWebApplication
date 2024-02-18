@@ -41,10 +41,10 @@ public class StudyGroupService
                     var groupIdRecord = await groupResult.SingleAsync();
                     var groupId = groupIdRecord["groupId"].As<string>();
 
-                    // Step 2: Create the [:LEADER] relationship
+                    // Step 2: Create the [:MEMBER_OF] relationship and assign a manager role to it
                     var createRelationQuery = @"
                         MATCH (u:User {id: $userId}), (s:StudyGroup {id: $groupId})
-                        CREATE (u)-[:LEADER]->(s)";
+                        CREATE (u)-[:MEMBER_OF {role: 'manager'}]->(s)";
                     var relationParams = new Dictionary<string, object>
                     {
                         {"userId", userId},
@@ -65,6 +65,39 @@ public class StudyGroupService
         }
     }
 
+    // public async Task<StudyGroup> GetStudyGroupById(string groupId)
+    // {
+    //     using (var session = _neo4jDriver.AsyncSession())
+    //     {
+    //         var result = await session.ExecuteReadAsync(async tx =>
+    //         {
+    //             var query = @"
+    //                 MATCH (s:StudyGroup {id: $groupId})
+    //                 RETURN s";
+    //             var parameters = new Dictionary<string, object>
+    //             {
+    //                 {"groupId", groupId}
+    //             };
+
+    //             var cursor = await tx.RunAsync(query, parameters);
+    //             return await cursor.ToListAsync();
+    //         });
+
+    //         var studyGroup = new StudyGroup();
+    //         foreach (var record in result)
+    //         {
+    //             // Assuming 's' is a node returned in the record
+    //             var studyGroupNode = record["s"].As<INode>();
+
+    //             studyGroup.Id = studyGroupNode.Properties["id"].As<string>();
+    //             studyGroup.Name = studyGroupNode.Properties["name"].As<string>();
+    //             studyGroup.Description = studyGroupNode.Properties["description"].As<string>();
+    //         }
+
+    //         return studyGroup;
+    //     }
+    // }
+
     public async Task<List<StudyGroup>> GetAllStudyGroups()
     {
         using (var session = _neo4jDriver.AsyncSession())
@@ -84,17 +117,57 @@ public class StudyGroupService
             {
                 // Assuming 's' is a node returned in the record
                 var studyGroupNode = record["s"].As<INode>();
+                var studyGroupId = studyGroupNode.Properties["id"].As<string>();
+
+                // Fetch the members' info from the connected user node
+                var members = await GetStudyGroupMembers(studyGroupId);
 
                 var studyGroup = new StudyGroup
                 {
-                    Id = studyGroupNode.Properties["id"].As<string>(),
+                    Id = studyGroupId,
                     Name = studyGroupNode.Properties["name"].As<string>(),
-                    Description = studyGroupNode.Properties["description"].As<string>()
+                    Description = studyGroupNode.Properties["description"].As<string>(),
+                    MemberIds = members
                 };
                 studyGroups.Add(studyGroup);
             }
 
             return studyGroups;
+        }
+    }
+
+    public async Task<List<GroupMember>> GetStudyGroupMembers(string groupId)
+    {
+        using (var session = _neo4jDriver.AsyncSession())
+        {
+            var result = await session.ExecuteReadAsync(async tx =>
+            {
+                var query = @"
+                    MATCH (u:User)-[:MEMBER_OF]->(s:StudyGroup {id: $groupId})
+                    RETURN u";
+                var parameters = new Dictionary<string, object>
+                {
+                    {"groupId", groupId}
+                };
+
+                var cursor = await tx.RunAsync(query, parameters);
+                return await cursor.ToListAsync();
+            });
+
+            var members = new List<GroupMember>();
+            foreach (var record in result)
+            {
+                // Assuming 'u' is a node returned in the record
+                var userNode = record["u"].As<INode>();
+
+                var user = new GroupMember
+                {
+                    Id = userNode.Properties["id"].As<string>(),
+                };
+                members.Add(user);
+            }
+
+            return members;
         }
     }
 
@@ -109,12 +182,12 @@ public class StudyGroupService
             return false;
         }
 
-        // Check if the user is the leader of the group
-        if (studyGroup.LeaderId != userId)
-        {
-            // User is not the leader, so they cannot delete the group
-            return false;
-        }
+        // // Check if the user is the leader of the group
+        // if (studyGroup.LeaderId != userId)
+        // {
+        //     // User is not the leader, so they cannot delete the group
+        //     return false;
+        // }
 
         // Logic to delete the study group
         await DeleteStudyGroupFromDatabaseAsync(groupId);
@@ -122,7 +195,7 @@ public class StudyGroupService
         return true; // Return true if deletion is successful
     }
 
-    private async Task<StudyGroup> GetStudyGroupByIdAsync(string groupId)
+    public async Task<StudyGroup> GetStudyGroupByIdAsync(string groupId)
     {
         using (var session = _neo4jDriver.AsyncSession())
         {
@@ -145,24 +218,27 @@ public class StudyGroupService
                 }
 
                 var studyGroupNode = record["s"].As<INode>();
+                var studyGroupId = studyGroupNode.Properties["id"].As<string>();
 
-                // Fetch the leader's info from the connected user node
-                var leaderQuery = @"
-            MATCH (u:User)-[:LEADER]->(s)
-            WHERE s.id = $groupId
-            RETURN u";
-                var leaderCursor = await tx.RunAsync(leaderQuery, parameters);
-                var leaderRecords = await leaderCursor.ToListAsync();
-                var leaderRecord = leaderRecords.SingleOrDefault(); // Consider handling null here
+                // Fetch the members' info from the connected user node
+                var members = await GetStudyGroupMembers(studyGroupId);
+            //     var memberQuery = @"
+            // MATCH (u:User)-[:MEMBER_OF]->(s:StudyGroup)
+            // WHERE s.id = $groupId
+            // RETURN u";
+            //     var memberCursor = await tx.RunAsync(memberQuery, parameters);
+            //     var memberRecords = await memberCursor.ToListAsync();
+            //     var memberRecord = memberRecords.SingleOrDefault(); // Consider handling null here
 
-                var leaderNode = leaderRecord?["u"].As<INode>();
+            //     var memberNode = memberRecord?["u"].As<INode>();
 
                 return new StudyGroup
                 {
-                    Id = studyGroupNode.Properties["id"].As<string>(),
+                    Id = studyGroupId,
                     Name = studyGroupNode.Properties["name"].As<string>(),
                     Description = studyGroupNode.Properties["description"].As<string>(),
-                    LeaderId = leaderNode?.Properties["id"].As<string>() // Handle potential null
+                    MemberIds = members,
+                    // MemberId = memberNode?.Properties["id"].As<string>() // Handle potential null
                 };
             });
 
@@ -210,7 +286,59 @@ public class StudyGroupService
             return result;
         }
     }
-    
+
+    public async Task<bool> ApplyToJoin(string userId, string studyGroupId)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.ExecuteWriteAsync(async tx =>
+            {
+                var cursor = await tx.RunAsync(
+                    "MERGE (u:User {id: $userId}) " +
+                    "MERGE (sg:StudyGroup {id: $studyGroupId}) " +
+                    "MERGE (u)-[r:APPLIED_TO {status: 'Pending', appliedOn: $appliedOn}]->(sg) " +
+                    "RETURN r",
+                    new { userId, studyGroupId, appliedOn = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") });
+                return await cursor.SingleAsync() != null;
+            });
+            return result;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task<bool> UpdateApplicationStatusAsync(string userId, string studyGroupId, string status)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.ExecuteWriteAsync(async tx =>
+            {
+                var cursor = await tx.RunAsync(
+                    "MATCH (u:User {id: $userId})-[r:APPLIED_TO]->(sg:StudyGroup {id: $studyGroupId}) " +
+                    "SET r.status = $status " +
+                    "RETURN r",
+                    new { userId, studyGroupId, status });
+                return await cursor.SingleAsync() != null;
+            });
+
+            // If the application was approved and successfully updated, add the user to the group
+            if (status == "Approved" && result)
+            {
+                return await JoinGroupAsync(studyGroupId, userId);
+            }
+
+            return result;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
     internal async Task<bool> JoinGroupAsync(string groupId, string userId)
     {
         using (var session = _neo4jDriver.AsyncSession())
@@ -220,7 +348,7 @@ public class StudyGroupService
                 var checkQuery = @"
                 MATCH (s:StudyGroup {id: $groupId})
                 MATCH (u:User {id: $userId})
-                RETURN EXISTS((u)-[:MEMBER_OF|LEADER_OF]->(s))";
+                RETURN EXISTS((u)-[:MEMBER_OF]->(s))";
                 var checkParameters = new Dictionary<string, object>
                 {
                     {"groupId", groupId},
@@ -228,9 +356,9 @@ public class StudyGroupService
                 };
 
                 var checkCursor = await tx.RunAsync(checkQuery, checkParameters);
-                var isMemberOrLeader = await checkCursor.SingleAsync(record => record[0].As<bool>());
+                var isMember = await checkCursor.SingleAsync(record => record[0].As<bool>());
 
-                if (!isMemberOrLeader)
+                if (!isMember)
                 {
                     var query = @"
                     MATCH (s:StudyGroup {id: $groupId})

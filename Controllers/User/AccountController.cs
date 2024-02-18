@@ -23,7 +23,9 @@ namespace Sciencetopia.Controllers
         private readonly BlobServiceClient _blobServiceClient;
         private readonly IDriver _driver;
 
-        public AccountController(UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver)
+        private readonly UserService _userService;
+
+        public AccountController(UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver, UserService userService)
         {
             _userManager = userManager;
             _signInManager = signInManager;
@@ -31,6 +33,7 @@ namespace Sciencetopia.Controllers
             _smsSender = smsSender;
             _blobServiceClient = blobServiceClient;
             _driver = driver;
+            _userService = userService;
         }
 
         // POST: api/Account/Register
@@ -357,43 +360,17 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Invalid user ID.");
             }
 
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
+            // Use the extracted method to fetch the avatar URL
+            var avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(userId);
+
+            if (string.IsNullOrEmpty(avatarUrl))
             {
-                return NotFound("User not found.");
+                // Handle cases where no avatar is set, if necessary
+                return Ok(new { AvatarUrl = string.Empty });
             }
 
-            // Assuming avatar URL is stored in the user entity
-            if (!string.IsNullOrEmpty(user.AvatarUrl))
-            {
-                var avatarSasUrl = GenerateBlobSasUri(_blobServiceClient, "avatars", $"{userId}.jpg");
-                return Ok(new { AvatarUrl = avatarSasUrl });
-            }
-
-            // If no avatar is set, you can return a default image or an empty string response
-            // Example: return Ok(new { AvatarUrl = "path/to/default/avatar.jpg" });
-            return Ok(new { AvatarUrl = string.Empty });
-        }
-
-        private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, int validMinutes = 30)
-        {
-            var containerClient = blobServiceClient.GetBlobContainerClient(containerName);
-            var blobClient = containerClient.GetBlobClient(blobName);
-
-            var sasBuilder = new BlobSasBuilder()
-            {
-                BlobContainerName = containerClient.Name,
-                BlobName = blobClient.Name,
-                Resource = "b", // b for blob
-                StartsOn = DateTimeOffset.UtcNow,
-                ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(validMinutes)
-            };
-
-            sasBuilder.SetPermissions(BlobSasPermissions.Read);
-
-            var sasToken = blobClient.GenerateSasUri(sasBuilder).Query;
-
-            return blobClient.Uri + sasToken;
+            // Return the avatar URL
+            return Ok(new { AvatarUrl = avatarUrl });
         }
 
         private async Task<bool> AddUserNodeToNeo4j(ApplicationUser user)

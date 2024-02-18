@@ -9,23 +9,20 @@ public class StudyPlanDTO
 public class StudyPlanDetail
 {
     public string? Title { get; set; }
-
     public List<Lesson>? Prerequisite { get; set; }
-
-    // [JsonProperty("main_curriculum")]
     public List<Lesson>? MainCurriculum { get; set; }
 }
-
 public class Lesson
 {
     public string? Name { get; set; }
     public string? Description { get; set; }
-    public List<Resource>? Resources { get; set; } = new List<Resource>();
+    public List<Resource>? Resources { get; set; }
+    public int FinishedResourcesCount { get; set; }
+    public float ProgressPercentage { get; set; }
 }
 
 public class Resource
 {
     public string? Link { get; set; }
-    // Add other properties for Resource if needed
+    public bool Learned { get; set; }
 }
-

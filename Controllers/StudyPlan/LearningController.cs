@@ -14,8 +14,8 @@ public class StudyPlanController : ControllerBase
         _learningService = learningService;
     }
 
-    [HttpPost("CreateOrUpdateFinishedLearning")]
-    public async Task<IActionResult> CreateOrUpdateFinishedLearning([FromBody] LessonResourceDTO lessonResource)
+    [HttpPost("ToggleFinishedLearning")]
+    public async Task<IActionResult> ToggleFinishedLearning([FromBody] LessonResourceDTO lessonResource)
     {
         // Retrieve the current user id (you need to implement this logic)
         string userId = GetCurrentUserId();
@@ -23,23 +23,23 @@ public class StudyPlanController : ControllerBase
         if (lessonResource.Name != null && lessonResource.ResourceLink != null) // Add null check for resourceName
         {
             // Forward the user id, lesson name, and resource link to the ManagePlanService
-            await _learningService.CreateFinishedLearningRelationship(lessonResource.Name, lessonResource.ResourceLink, userId);
+            await _learningService.ToggleFinishedLearningRelationship(lessonResource.Name, lessonResource.ResourceLink, userId);
         }
 
         return Ok();
     }
 
-    [HttpGet("GetFinishedLearning")]
-    public async Task<IActionResult> GetFinishedLearning()
-    {
-        // Retrieve the current user id (you need to implement this logic)
-        string userId = GetCurrentUserId();
+    // [HttpGet("GetFinishedLearning")]
+    // public async Task<IActionResult> GetFinishedLearning()
+    // {
+    //     // Retrieve the current user id (you need to implement this logic)
+    //     string userId = GetCurrentUserId();
 
-        // Forward the user id to the ManagePlanService
-        var finishedLearning = await _learningService.GetFinishedLearning(userId);
+    //     // Forward the user id to the ManagePlanService
+    //     var finishedLearning = await _learningService.GetFinishedLearning(userId);
 
-        return Ok(finishedLearning);
-    }
+    //     return Ok(finishedLearning);
+    // }
 
     private string GetCurrentUserId()
     {

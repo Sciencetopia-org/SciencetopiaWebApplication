@@ -1,14 +1,17 @@
 using Neo4j.Driver;
 using System.Linq;
 using Sciencetopia.Models;
+using Microsoft.Extensions.Logging;
 
 public class StudyPlanService
 {
     private readonly IDriver _neo4jDriver;
+    private readonly ILogger<StudyPlanService> _logger;
 
-    public StudyPlanService(IDriver neo4jDriver)
+    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger)
     {
         _neo4jDriver = neo4jDriver;
+        _logger = logger;
     }
 
     public async Task<bool> SaveStudyPlanAsync(StudyPlanDTO studyPlanDTO, string userId)
@@ -90,37 +93,36 @@ public class StudyPlanService
         {
             var studyPlanResults = new List<StudyPlanDTO>();
             var result = await session.RunAsync($@"
-            MATCH (u:User {{id: $userId}})-[:CREATED]->(sp:StudyPlan)
-OPTIONAL MATCH (sp)-[:HAS_PREREQUISITE]->(pr:Lesson)
-OPTIONAL MATCH (pr)-[:HAS_RESOURCE]->(prRes:Resource)
-OPTIONAL MATCH (sp)-[:HAS_MAIN_CURRICULUM]->(mc:Lesson)
-OPTIONAL MATCH (mc)-[:HAS_RESOURCE]->(mcRes:Resource)
-WITH sp, 
-     pr, 
-     collect(DISTINCT prRes.link) AS prResources, 
-     mc, 
-     collect(DISTINCT mcRes.link) AS mcResources
-RETURN sp AS StudyPlan, 
-       collect(DISTINCT {{lesson: pr, resources: prResources}}) AS Prerequisites, 
-       collect(DISTINCT {{lesson: mc, resources: mcResources}}) AS MainCurriculum
-",
-                new { userId });
+    MATCH (u:User {{id: $userId}})-[:CREATED]->(sp:StudyPlan)
+    OPTIONAL MATCH (sp)-[:HAS_PREREQUISITE]->(pr:Lesson)
+    OPTIONAL MATCH (pr)-[:HAS_RESOURCE]->(prRes:Resource)
+    OPTIONAL MATCH (sp)-[:HAS_MAIN_CURRICULUM]->(mc:Lesson)
+    OPTIONAL MATCH (mc)-[:HAS_RESOURCE]->(mcRes:Resource)
+    WITH sp, pr, prRes, mc, mcRes, 
+     EXISTS((pr)-[:FINISHED_LEARNING {{userId: u.id}}]->(prRes)) AS prLearned,
+     EXISTS((mc)-[:FINISHED_LEARNING {{userId: u.id}}]->(mcRes)) AS mcLearned
+    WITH sp, pr, mc, 
+         collect(DISTINCT {{resource: prRes.link, learned: prLearned}}) AS prResources,
+         collect(DISTINCT {{resource: mcRes.link, learned: mcLearned}}) AS mcResources
+    RETURN sp AS StudyPlan, 
+           collect(DISTINCT {{lesson: pr, resources: prResources}}) AS Prerequisites, 
+           collect(DISTINCT {{lesson: mc, resources: mcResources}}) AS MainCurriculum
+", new { userId });
 
             await foreach (var record in result)
             {
-                var studyPlanNode = record["StudyPlan"].As<INode>(); // Correctly cast to INode
-                var prerequisitesData = record["Prerequisites"].As<List<object>>(); // Handle as List<object>
-                var mainCurriculumData = record["MainCurriculum"].As<List<object>>(); // Handle as List<object>
+                var studyPlanNode = record["StudyPlan"].As<INode>();
+                var prerequisitesData = record["Prerequisites"].As<List<object>>();
+                var mainCurriculumData = record["MainCurriculum"].As<List<object>>();
 
-                // Process prerequisites and main curriculum, converting List<object> to the expected structure
-                var prerequisiteLessons = TransformLessons(prerequisitesData);
-                var mainCurriculumLessons = TransformLessons(mainCurriculumData);
+                var prerequisiteLessons = TransformLessonsWithProgress(prerequisitesData);
+                var mainCurriculumLessons = TransformLessonsWithProgress(mainCurriculumData);
 
                 studyPlanResults.Add(new StudyPlanDTO
                 {
                     StudyPlan = new StudyPlanDetail
                     {
-                        Title = studyPlanNode.Properties["Title"].As<string>(),
+                        Title = studyPlanNode.Properties["title"].As<string>(),
                         Prerequisite = prerequisiteLessons,
                         MainCurriculum = mainCurriculumLessons
                     }
@@ -128,7 +130,6 @@ RETURN sp AS StudyPlan,
             }
 
             return studyPlanResults;
-
         }
         finally
         {
@@ -136,36 +137,45 @@ RETURN sp AS StudyPlan,
         }
     }
 
-    private List<Lesson> TransformLessons(List<object> lessonData)
+private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
+{
+    return lessonData.Select(data =>
     {
-        return lessonData.Select(data =>
+        var lessonDict = (Dictionary<string, object>)data;
+        var lessonNode = lessonDict["lesson"] as INode;
+        
+        // Adjusted handling of resourcesData to accommodate List<object>
+        var resourcesRawData = lessonDict["resources"] as List<object>;
+        _logger.LogInformation("lessonDict: {lessonDict}", lessonDict);
+        _logger.LogInformation("resourcesData: {resourcesData}", resourcesRawData);
+
+        var resources = resourcesRawData?.Select(resRaw =>
         {
-            var lessonDict = (Dictionary<string, object>)data;
-            var lessonNode = (lessonDict["lesson"] as INode)!; // Assuming 'lesson' is directly an INode
-            var resourcesData = lessonDict["resources"] as List<object>; // Resources might be a list of strings or another structure
+            var resDict = resRaw as Dictionary<string, object>; // Safely cast each resource
+            if (resDict == null) return null; // Skip if the cast fails
 
-            var resources = resourcesData?.Select(res =>
+            return new Resource
             {
-                // Assuming resourcesData contains INode objects or strings; adjust based on actual structure
-                if (res is INode resNode)
-                {
-                    return new Resource { Link = resNode.Properties["Link"].As<string>() };
-                }
-                else if (res is string link)
-                {
-                    return new Resource { Link = link };
-                }
-                return null;
-            }).Where(res => res != null).Cast<Resource>().ToList() ?? new List<Resource>();
-
-            return new Lesson
-            {
-                Name = lessonNode.Properties["name"].As<string>(),
-                Description = lessonNode.Properties["description"].As<string>(),
-                Resources = resources
+                Link = resDict.ContainsKey("resource") ? resDict["resource"]?.ToString() : string.Empty,
+                Learned = resDict.ContainsKey("learned") && Convert.ToBoolean(resDict["learned"])
             };
-        }).ToList();
-    }
+        }).Where(r => r != null).ToList(); // Filter out any null resources
+
+        var finishedResourcesCount = resources.Count(r => r.Learned);
+        var totalResources = resources.Count;
+        var progressPercentage = totalResources > 0 ? (finishedResourcesCount / (float)totalResources) * 100 : 0;
+
+        return new Lesson
+        {
+            Name = lessonNode.Properties["name"]?.As<string>(),
+            Description = lessonNode.Properties["description"]?.As<string>(),
+            Resources = resources,
+            FinishedResourcesCount = finishedResourcesCount,
+            ProgressPercentage = progressPercentage
+        };
+    }).ToList();
+}
+
 
     public async Task<bool> DeleteStudyPlanAsync(string studyPlanTitle, string currentUserId)
     {
