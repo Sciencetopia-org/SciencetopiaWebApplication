@@ -55,7 +55,7 @@ public class StudyGroupService
                     return groupId != null;
                 });
 
-                return result != null;
+                return result;
             }
             catch (Exception)
             {
@@ -378,6 +378,48 @@ public class StudyGroupService
             });
 
             return result;
+        }
+    }
+
+    internal async Task<List<StudyGroup>> GetStudyGroupByUser(string userId)
+    {
+        using (var session = _neo4jDriver.AsyncSession())
+        {
+            var result = await session.ExecuteReadAsync(async tx =>
+            {
+                var query = @"
+                MATCH (u:User {id: $userId})-[:MEMBER_OF]->(s:StudyGroup)
+                RETURN s";
+                var parameters = new Dictionary<string, object>
+                {
+                    {"userId", userId}
+                };
+
+                var cursor = await tx.RunAsync(query, parameters);
+                return await cursor.ToListAsync();
+            });
+
+            var studyGroups = new List<StudyGroup>();
+            foreach (var record in result)
+            {
+                // Assuming 's' is a node returned in the record
+                var studyGroupNode = record["s"].As<INode>();
+                var studyGroupId = studyGroupNode.Properties["id"].As<string>();
+
+                // Fetch the members' info from the connected user node
+                var members = await GetStudyGroupMembers(studyGroupId);
+
+                var studyGroup = new StudyGroup
+                {
+                    Id = studyGroupId,
+                    Name = studyGroupNode.Properties["name"].As<string>(),
+                    Description = studyGroupNode.Properties["description"].As<string>(),
+                    MemberIds = members
+                };
+                studyGroups.Add(studyGroup);
+            }
+
+            return studyGroups;
         }
     }
 }

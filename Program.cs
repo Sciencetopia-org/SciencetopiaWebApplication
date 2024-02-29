@@ -7,9 +7,11 @@ using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Models;
+using Sciencetopia.Hubs;
 using OpenAI.Extensions;
 using System.Text;
 using Azure.Storage.Blobs;
+using Microsoft.AspNetCore.SignalR;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,6 +25,12 @@ builder.Services.AddScoped<StudyPlanService>();
 builder.Services.AddScoped<StudyGroupService>();
 builder.Services.AddScoped<LearningService>();
 builder.Services.AddScoped<UserService>();
+
+// Register the custom IUserIdProvider
+builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
+
+// Add SignalR service
+builder.Services.AddSignalR();
 
 // Integrate Neo4j configuration
 var neo4jConfig = builder.Configuration.GetSection("Neo4j");
@@ -139,5 +147,8 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+app.MapHub<ChatHub>("/chathub"); // Map your ChatHub
+app.MapHub<NotificationHub>("/notificationhub");
 
 app.Run();

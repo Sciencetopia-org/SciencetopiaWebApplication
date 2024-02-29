@@ -45,6 +45,38 @@ public class StudyGroupController : ControllerBase
         return Ok(members);
     }
 
+    [HttpGet("GetStudyGroupByUser/{userId}")]
+    public async Task<ActionResult<StudyGroup>> GetStudyGroupByUser(string userId)
+    {
+        var group = await _studyGroupService.GetStudyGroupByUser(userId);
+        if (group == null)
+        {
+            return NotFound("Study group not found.");
+        }
+        return Ok(group);
+    }
+
+    [HttpGet("GetMyStudyGroup")]
+    [Authorize] // Ensure only authenticated users can access this endpoint
+    public async Task<ActionResult<StudyGroup>> GetMyStudyGroup()
+    {
+        // Retrieve the user's ID from the ClaimsPrincipal
+        string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the user is authenticated
+        if (string.IsNullOrEmpty(userId))
+        {
+            return Unauthorized("User is not authenticated.");
+        }
+
+        var group = await _studyGroupService.GetStudyGroupByUser(userId);
+        if (group == null)
+        {
+            return NotFound("Study group not found.");
+        }
+        return Ok(group);
+    }
+
     [HttpPost("CreateStudyGroup")]
     public async Task<ActionResult<StudyGroup>> CreateStudyGroupAsync([FromBody] StudyGroupDTO studyGroupDTO)
     {

@@ -348,7 +348,7 @@ namespace Sciencetopia.Controllers
         public IActionResult GetAuthenticationStatus()
         {
             var isAuthenticated = User?.Identity?.IsAuthenticated ?? false;
-            return Ok(new { isAuthenticated });
+            return Ok(new { isAuthenticated, userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) });
         }
 
         [HttpGet("GetAvatarUrl")]
