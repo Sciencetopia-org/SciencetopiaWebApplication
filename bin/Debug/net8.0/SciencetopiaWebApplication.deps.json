@@ -10,6 +10,7 @@
         "dependencies": {
           "Azure.Storage.Blobs": "12.19.1",
           "Betalgo.OpenAI": "7.3.1",
+          "Elastic.Clients.Elasticsearch": "8.12.0",
           "HtmlAgilityPack": "1.11.57",
           "Microsoft.AspNetCore.Cors": "2.2.0",
           "Microsoft.AspNetCore.Identity.EntityFrameworkCore": "8.0.1",
@@ -93,6 +94,25 @@
           "lib/net7.0/OpenAI.dll": {
             "assemblyVersion": "7.3.1.0",
             "fileVersion": "7.3.1.0"
+          }
+        }
+      },
+      "Elastic.Clients.Elasticsearch/8.12.0": {
+        "dependencies": {
+          "Elastic.Transport": "0.4.17"
+        },
+        "runtime": {
+          "lib/net6.0/Elastic.Clients.Elasticsearch.dll": {
+            "assemblyVersion": "8.0.0.0",
+            "fileVersion": "8.12.0.0"
+          }
+        }
+      },
+      "Elastic.Transport/0.4.17": {
+        "runtime": {
+          "lib/net6.0/Elastic.Transport.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.4.17.0"
           }
         }
       },
@@ -1425,6 +1445,20 @@
       "sha512": "sha512-8ehNqM7JIvLzLs6/xknb+3rnzBP2/tOWfpQkLkAL+42ghCnqBfewRB8x/AFfDaQ7O+qBzOFJ3YaNvKWvA1meLA==",
       "path": "betalgo.openai/7.3.1",
       "hashPath": "betalgo.openai.7.3.1.nupkg.sha512"
+    },
+    "Elastic.Clients.Elasticsearch/8.12.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-AvKEIOGmM6RhH0qdU+SLu6FquA4VF0Tty3C7us2527PUwFB08Y/lZKIxmi4Xj0GiFD0T83g8A0bTstdbHSjQdQ==",
+      "path": "elastic.clients.elasticsearch/8.12.0",
+      "hashPath": "elastic.clients.elasticsearch.8.12.0.nupkg.sha512"
+    },
+    "Elastic.Transport/0.4.17": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-T8QGwTt3E+5b3YCkctyp+aUzJRZKiKZbbngCvell9tqhqfN4Po+Fbsw2ilX5Qm0JFnoIUzpIFJyTK6mCVf4rkg==",
+      "path": "elastic.transport/0.4.17",
+      "hashPath": "elastic.transport.0.4.17.nupkg.sha512"
     },
     "HtmlAgilityPack/1.11.57": {
       "type": "package",

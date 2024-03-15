@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SciencetopiaWebApplication")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8ac7bdfac0d0dc44b83b137ecd93d0186bc415ea")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+cb7a867ac6f3a5c71f26eb471ce0eee097cebcb7")]
 [assembly: System.Reflection.AssemblyProductAttribute("SciencetopiaWebApplication")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SciencetopiaWebApplication")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

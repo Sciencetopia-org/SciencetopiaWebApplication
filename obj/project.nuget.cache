@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "dgSpecHash": "I3o+feIFOMt8k2aKtlL0hWQSV3vaPyGwvmiGh+rpF27PC1x5nonSew36hUckbMU9aPy4NkgomsW5SEnNxxKwOg==",
+  "dgSpecHash": "ul6fyF90TCG+lLI7muutcmOw5+n3CHRqIYeXyhB10itQkJ2xGBcOMaHoaMRGKhbZmI/ElQ+ClqR+C0TPSDcxYA==",
   "success": true,
   "projectFilePath": "C:\\Users\\83035\\OneDrive - Washington University in St. Louis\\Documents\\Sciencetopia\\SciencetopiaWebApp\\SciencetopiaWebApplication\\SciencetopiaWebApplication.csproj",
   "expectedPackageFiles": [
@@ -9,6 +9,8 @@
     "C:\\Users\\83035\\.nuget\\packages\\azure.storage.blobs\\12.19.1\\azure.storage.blobs.12.19.1.nupkg.sha512",
     "C:\\Users\\83035\\.nuget\\packages\\azure.storage.common\\12.18.1\\azure.storage.common.12.18.1.nupkg.sha512",
     "C:\\Users\\83035\\.nuget\\packages\\betalgo.openai\\7.3.1\\betalgo.openai.7.3.1.nupkg.sha512",
+    "C:\\Users\\83035\\.nuget\\packages\\elastic.clients.elasticsearch\\8.12.0\\elastic.clients.elasticsearch.8.12.0.nupkg.sha512",
+    "C:\\Users\\83035\\.nuget\\packages\\elastic.transport\\0.4.17\\elastic.transport.0.4.17.nupkg.sha512",
     "C:\\Users\\83035\\.nuget\\packages\\htmlagilitypack\\1.11.57\\htmlagilitypack.1.11.57.nupkg.sha512",
     "C:\\Users\\83035\\.nuget\\packages\\humanizer.core\\2.14.1\\humanizer.core.2.14.1.nupkg.sha512",
     "C:\\Users\\83035\\.nuget\\packages\\microsoft.aspnetcore.authentication.abstractions\\2.2.0\\microsoft.aspnetcore.authentication.abstractions.2.2.0.nupkg.sha512",

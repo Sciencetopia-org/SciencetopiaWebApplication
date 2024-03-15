@@ -12,6 +12,7 @@ using OpenAI.Extensions;
 using System.Text;
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.SignalR;
+using Elastic.Clients.Elasticsearch;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -32,6 +33,22 @@ builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
 // Add SignalR service
 builder.Services.AddSignalR();
 
+// // 从 appsettings.json 或环境变量获取 Elasticsearch 配置
+// var elasticsearchUrl = builder.Configuration["Elasticsearch:Url"];
+// var defaultIndex = builder.Configuration["Elasticsearch:DefaultIndex"];
+
+// // 验证配置
+// if (string.IsNullOrEmpty(elasticsearchUrl))
+// {
+//     throw new Exception("Elasticsearch URL is not configured.");
+// }
+
+// var settings = new ElasticsearchClientSettings(new Uri(elasticsearchUrl))
+//     .DefaultIndex(defaultIndex);
+
+// // 注册 ElasticsearchClient 到服务容器
+// builder.Services.AddSingleton<ElasticsearchClient>(new ElasticsearchClient(settings));
+
 // Integrate Neo4j configuration
 var neo4jConfig = builder.Configuration.GetSection("Neo4j");
 builder.Services.AddSingleton(x => GraphDatabase.Driver(neo4jConfig["Uri"], AuthTokens.Basic(neo4jConfig["User"], neo4jConfig["Password"])));
@@ -44,6 +61,9 @@ builder.Services.AddSingleton(x =>
 
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
 builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
+
+// // 注册您的 DataSyncService 作为后台服务
+// builder.Services.AddHostedService<DataSyncService>();
 
 // Add ASP.NET Core Identity
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
