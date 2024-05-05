@@ -11,7 +11,7 @@ namespace Sciencetopia.Hubs
         {
             _context = context;
         }
-        
+
         // Sends a notification to a specific user
         public async Task SendNotificationToUser(string userId, string content)
         {
@@ -41,7 +41,7 @@ namespace Sciencetopia.Hubs
                 notification.IsRead = true;
                 await _context.SaveChangesAsync();
             }
-            
+
             // Notify the client (optional, based on your app's needs)
             await Clients.Caller.SendAsync("NotificationRead", notificationId);
         }
