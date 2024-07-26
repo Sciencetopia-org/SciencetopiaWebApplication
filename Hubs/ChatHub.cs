@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 using System.Threading.Tasks;
-using Sciencetopia.Models; // Ensure this using directive points to where your models are defined
+using Sciencetopia.Models;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.EntityFrameworkCore;
@@ -41,7 +41,7 @@ namespace Sciencetopia.Hubs
             {
                 Id = Guid.NewGuid().ToString(),
                 Content = content,
-                SentTime = DateTime.UtcNow,
+                SentTime = DateTimeOffset.UtcNow,
                 SenderId = senderId,
                 ReceiverId = receiverId,
                 ConversationId = conversation.Id,
@@ -52,17 +52,43 @@ namespace Sciencetopia.Hubs
             await _context.SaveChangesAsync();
 
             // After saving the message, convert it to DTO before sending
-            var messageDto = new MessageDTO
+            var messageDto = new MessageWithUserDetailsDTO
             {
                 Id = message.Id,
                 Content = message.Content,
                 SentTime = message.SentTime,
-                SenderId = message.SenderId,
-                ReceiverId = message.ReceiverId
+                Sender = new UserDetailsDTO
+                {
+                    Id = message.SenderId,
+                    UserName = await _context.Users
+                        .Where(u => u.Id == message.SenderId)
+                        .Select(u => u.UserName)
+                        .FirstOrDefaultAsync(),
+                    AvatarUrl = await _context.Users
+                        .Where(u => u.Id == message.SenderId)
+                        .Select(u => u.AvatarUrl)
+                        .FirstOrDefaultAsync()
+                }
             };
 
-            await Clients.User(senderId).SendAsync("ReceiveMessage", messageDto);
-            await Clients.User(receiverId).SendAsync("ReceiveMessage", messageDto);
+            var lastMessageSentTime = message.SentTime;
+
+            // Send the message to the receiver
+            await Clients.User(receiverId).SendAsync("ReceiveMessage", conversationId, messageDto);
+
+            // Update unread message count for the receiver
+            var unreadMessageCount = await _context.Messages
+                .Where(m => m.ReceiverId == receiverId && !m.IsRead)
+                .CountAsync();
+
+            // Notify client of updated message count per conversation
+            var conversationMessageCount = await _context.Messages
+                .Where(m => m.ReceiverId == receiverId && m.ConversationId == conversationId && !m.IsRead)
+                .CountAsync();
+
+            // Send notification to the receiver
+            await Clients.User(receiverId).SendAsync("updateMessages", unreadMessageCount);
+            await Clients.User(receiverId).SendAsync("updateConversationMessages", conversationId, conversationMessageCount);
         }
 
         public async Task JoinConversation(string conversationId)
@@ -74,15 +100,75 @@ namespace Sciencetopia.Hubs
                 .OrderBy(m => m.SentTime)
                 .Select(m => new MessageDTO
                 {
+                    Id = m.Id,
                     Content = m.Content,
                     SentTime = m.SentTime,
-                    SenderId = m.SenderId
-                    // Add other required fields but avoid circular references
+                    SenderId = m.SenderId,
+                    ReceiverId = m.ReceiverId
                 })
                 .ToListAsync();
 
             await Clients.Caller.SendAsync("LoadHistory", messages);
         }
 
+        public override async Task OnConnectedAsync()
+        {
+            var userId = Context.UserIdentifier;
+
+            if (userId != null)
+            {
+                // Retrieve all conversations where the user is involved
+                var conversations = await _context.Conversations
+                    .Where(c => c.Messages.Any(m => m.SenderId == userId || m.ReceiverId == userId))
+                    .ToListAsync();
+
+                // Loop through each conversation and get the count of unread messages for that conversation
+                foreach (var conversation in conversations)
+                {
+                    var unreadMessageCount = await _context.Messages
+                        .Where(m => m.ConversationId == conversation.Id && m.ReceiverId == userId && !m.IsRead)
+                        .CountAsync();
+
+                    // Send the unread message count for each conversation to the user
+                    await Clients.Caller.SendAsync("updateConversationMessages", conversation.Id, unreadMessageCount);
+                }
+
+                // Send the total unread message count to the connected user
+                var totalUnreadMessageCount = await _context.Messages
+                    .Where(m => m.ReceiverId == userId && !m.IsRead)
+                    .CountAsync();
+
+                await Clients.Caller.SendAsync("updateMessages", totalUnreadMessageCount);
+            }
+
+            await base.OnConnectedAsync();
+        }
+
+        public async Task MarkMessagesAsRead(string conversationId, string userId)
+        {
+            var messages = await _context.Messages
+                .Where(m => m.ConversationId == conversationId && m.ReceiverId == userId && !m.IsRead)
+                .ToListAsync();
+
+            foreach (var message in messages)
+            {
+                message.IsRead = true;
+            }
+
+            await _context.SaveChangesAsync();
+
+            // Notify client of updated message count
+            var receiverMessageCount = await _context.Messages
+                .Where(m => m.ReceiverId == userId && !m.IsRead)
+                .CountAsync();
+
+            // Notify client of updated message count per conversation
+            var conversationMessageCount = await _context.Messages
+                .Where(m => m.ReceiverId == userId && m.ConversationId == conversationId && !m.IsRead)
+                .CountAsync();
+
+            await Clients.User(userId).SendAsync("updateMessages", receiverMessageCount);
+            await Clients.User(userId).SendAsync("updateConversationMessages", conversationId, conversationMessageCount);
+        }
     }
 }

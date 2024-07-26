@@ -137,44 +137,44 @@ public class StudyPlanService
         }
     }
 
-private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
-{
-    return lessonData.Select(data =>
+    private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
     {
-        var lessonDict = (Dictionary<string, object>)data;
-        var lessonNode = lessonDict["lesson"] as INode;
-        
-        // Adjusted handling of resourcesData to accommodate List<object>
-        var resourcesRawData = lessonDict["resources"] as List<object>;
-        _logger.LogInformation("lessonDict: {lessonDict}", lessonDict);
-        _logger.LogInformation("resourcesData: {resourcesData}", resourcesRawData);
-
-        var resources = resourcesRawData?.Select(resRaw =>
+        return lessonData.Select(data =>
         {
-            var resDict = resRaw as Dictionary<string, object>; // Safely cast each resource
-            if (resDict == null) return null; // Skip if the cast fails
+            var lessonDict = (Dictionary<string, object>)data;
+            var lessonNode = lessonDict["lesson"] as INode;
 
-            return new Resource
+            // Adjusted handling of resourcesData to accommodate List<object>
+            var resourcesRawData = lessonDict["resources"] as List<object>;
+            _logger.LogInformation("lessonDict: {lessonDict}", lessonDict);
+            _logger.LogInformation("resourcesData: {resourcesData}", resourcesRawData);
+
+            var resources = resourcesRawData?.Select(resRaw =>
             {
-                Link = resDict.ContainsKey("resource") ? resDict["resource"]?.ToString() : string.Empty,
-                Learned = resDict.ContainsKey("learned") && Convert.ToBoolean(resDict["learned"])
+                var resDict = resRaw as Dictionary<string, object>; // Safely cast each resource
+                if (resDict == null) return null; // Skip if the cast fails
+
+                return new Resource
+                {
+                    Link = resDict.ContainsKey("resource") ? resDict["resource"]?.ToString() : string.Empty,
+                    Learned = resDict.ContainsKey("learned") && Convert.ToBoolean(resDict["learned"])
+                };
+            }).Where(r => r != null).ToList(); // Filter out any null resources
+
+            var finishedResourcesCount = resources.Count(r => r.Learned);
+            var totalResources = resources.Count;
+            var progressPercentage = totalResources > 0 ? (finishedResourcesCount / (float)totalResources) * 100 : 0;
+
+            return new Lesson
+            {
+                Name = lessonNode.Properties["name"]?.As<string>(),
+                Description = lessonNode.Properties["description"]?.As<string>(),
+                Resources = resources,
+                FinishedResourcesCount = finishedResourcesCount,
+                ProgressPercentage = progressPercentage
             };
-        }).Where(r => r != null).ToList(); // Filter out any null resources
-
-        var finishedResourcesCount = resources.Count(r => r.Learned);
-        var totalResources = resources.Count;
-        var progressPercentage = totalResources > 0 ? (finishedResourcesCount / (float)totalResources) * 100 : 0;
-
-        return new Lesson
-        {
-            Name = lessonNode.Properties["name"]?.As<string>(),
-            Description = lessonNode.Properties["description"]?.As<string>(),
-            Resources = resources,
-            FinishedResourcesCount = finishedResourcesCount,
-            ProgressPercentage = progressPercentage
-        };
-    }).ToList();
-}
+        }).ToList();
+    }
 
 
     public async Task<bool> DeleteStudyPlanAsync(string studyPlanTitle, string currentUserId)
@@ -193,6 +193,65 @@ private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
                 var summary = await result.ConsumeAsync();
                 return summary.Counters.NodesDeleted > 0;
             });
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task<bool> MarkStudyPlanAsCompletedAsync(string studyPlanTitle, string userId)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync($@"
+            MATCH (u:User {{id: $userId}})-[r:CREATED]->(p:StudyPlan {{title: $title}})
+            CREATE (u)-[rel:COMPLETED]->(p)
+            RETURN COUNT(rel) > 0",
+                new { userId, title = studyPlanTitle });
+
+            var summary = await result.ConsumeAsync();
+            return summary.Counters.RelationshipsCreated > 0;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task<bool> DisMarkStudyPlanAsCompletedAsync(string studyPlanTitle, string userId)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync($@"
+            MATCH (u:User {{id: $userId}})-[r:COMPLETED]->(p:StudyPlan {{title: $title}})
+            DELETE r
+            RETURN COUNT(r) > 0",
+                new { userId, title = studyPlanTitle });
+
+            var summary = await result.ConsumeAsync();
+            return summary.Counters.RelationshipsDeleted > 0;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task<int> CountCompletedStudyPlansAsync(string userId)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync($@"
+            MATCH (u:User {{id: $userId}})-[r:COMPLETED]->(p:StudyPlan)
+            RETURN COUNT(r)",
+                new { userId });
+    
+            var count = await result.SingleAsync();
+            return count[0].As<int>();
         }
         finally
         {

@@ -52,8 +52,8 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<string>("SenderId")
                         .HasColumnType("nvarchar(450)");
 
-                    b.Property<DateTime>("SentTime")
-                        .HasColumnType("datetime2");
+                    b.Property<DateTimeOffset>("SentTime")
+                        .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
 
@@ -207,8 +207,8 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<string>("Content")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
 
                     b.Property<bool>("IsRead")
                         .HasColumnType("bit");

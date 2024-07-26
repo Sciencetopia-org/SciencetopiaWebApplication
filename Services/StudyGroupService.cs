@@ -143,11 +143,11 @@ public class StudyGroupService
             var result = await session.ExecuteReadAsync(async tx =>
             {
                 var query = @"
-                    MATCH (u:User)-[:MEMBER_OF]->(s:StudyGroup {id: $groupId})
-                    RETURN u";
+                MATCH (u:User)-[r:MEMBER_OF]->(s:StudyGroup {id: $groupId})
+                RETURN u, r.role as role";
                 var parameters = new Dictionary<string, object>
                 {
-                    {"groupId", groupId}
+                {"groupId", groupId}
                 };
 
                 var cursor = await tx.RunAsync(query, parameters);
@@ -163,6 +163,7 @@ public class StudyGroupService
                 var user = new GroupMember
                 {
                     Id = userNode.Properties["id"].As<string>(),
+                    Role = record["role"].As<string>()  // Add role to the member info
                 };
                 members.Add(user);
             }
@@ -222,15 +223,15 @@ public class StudyGroupService
 
                 // Fetch the members' info from the connected user node
                 var members = await GetStudyGroupMembers(studyGroupId);
-            //     var memberQuery = @"
-            // MATCH (u:User)-[:MEMBER_OF]->(s:StudyGroup)
-            // WHERE s.id = $groupId
-            // RETURN u";
-            //     var memberCursor = await tx.RunAsync(memberQuery, parameters);
-            //     var memberRecords = await memberCursor.ToListAsync();
-            //     var memberRecord = memberRecords.SingleOrDefault(); // Consider handling null here
+                //     var memberQuery = @"
+                // MATCH (u:User)-[:MEMBER_OF]->(s:StudyGroup)
+                // WHERE s.id = $groupId
+                // RETURN u";
+                //     var memberCursor = await tx.RunAsync(memberQuery, parameters);
+                //     var memberRecords = await memberCursor.ToListAsync();
+                //     var memberRecord = memberRecords.SingleOrDefault(); // Consider handling null here
 
-            //     var memberNode = memberRecord?["u"].As<INode>();
+                //     var memberNode = memberRecord?["u"].As<INode>();
 
                 return new StudyGroup
                 {
@@ -388,11 +389,11 @@ public class StudyGroupService
             var result = await session.ExecuteReadAsync(async tx =>
             {
                 var query = @"
-                MATCH (u:User {id: $userId})-[:MEMBER_OF]->(s:StudyGroup)
-                RETURN s";
+            MATCH (u:User {id: $userId})-[r:MEMBER_OF]->(s:StudyGroup)
+            RETURN s, r.role as role";
                 var parameters = new Dictionary<string, object>
                 {
-                    {"userId", userId}
+                {"userId", userId}
                 };
 
                 var cursor = await tx.RunAsync(query, parameters);
@@ -414,7 +415,8 @@ public class StudyGroupService
                     Id = studyGroupId,
                     Name = studyGroupNode.Properties["name"].As<string>(),
                     Description = studyGroupNode.Properties["description"].As<string>(),
-                    MemberIds = members
+                    MemberIds = members,
+                    Role = record["role"].As<string>() // Set the role property here
                 };
                 studyGroups.Add(studyGroup);
             }

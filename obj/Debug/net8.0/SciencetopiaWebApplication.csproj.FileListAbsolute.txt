@@ -152,3 +152,13 @@ C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Scienceto
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\System.Net.WebSockets.WebSocketProtocol.dll
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\Elastic.Clients.Elasticsearch.dll
 C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\Elastic.Transport.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\BouncyCastle.Cryptography.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\itextsharp.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.Charting.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.Quality.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.Snippets.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.System.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.WPFonts.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\PdfSharp.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\de\PdfSharp.Charting.resources.dll
+C:\Users\83035\OneDrive - Washington University in St. Louis\Documents\Sciencetopia\SciencetopiaWebApp\SciencetopiaWebApplication\bin\Debug\net8.0\de\PdfSharp.resources.dll

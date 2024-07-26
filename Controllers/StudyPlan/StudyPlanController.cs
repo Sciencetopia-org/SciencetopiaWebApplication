@@ -63,6 +63,64 @@ namespace Sciencetopia.Controllers
             return Ok(studyPlan);
         }
 
+        [HttpPost("MarkStudyPlanAsCompleted")]
+        public async Task<IActionResult> MarkStudyPlanAsCompleted(string studyPlanTitle)
+        {
+            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+            // Ensure the user is authenticated
+            if (string.IsNullOrEmpty(userId))
+            {
+            return Unauthorized("User is not authenticated.");
+            }
+
+            var success = await _studyPlanService.MarkStudyPlanAsCompletedAsync(studyPlanTitle, userId);
+            if (success)
+            {
+            return Ok(new { message = "Study plan marked as completed." });
+            }
+            else
+            {
+            return NotFound(new { message = "Study plan not found or could not be marked as completed." });
+            }
+        }
+
+        [HttpDelete("DisMarkStudyPlanAsCompleted")]
+        public async Task<IActionResult> DisMarkStudyPlanAsCompleted(string studyPlanTitle)
+        {
+            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+            // Ensure the user is authenticated
+            if (string.IsNullOrEmpty(userId))
+            {
+            return Unauthorized("User is not authenticated.");
+            }
+
+            var success = await _studyPlanService.DisMarkStudyPlanAsCompletedAsync(studyPlanTitle, userId);
+            if (success)
+            {
+            return Ok(new { message = "Removed marking study plan as completed." });
+            }
+            else
+            {
+            return NotFound(new { message = "Study plan not found or mark of completion could not be removed." });
+            }
+        }
+
+        [HttpGet("CountCompletedStudyPlansByUserId")]
+        public async Task<IActionResult> CountCompletedStudyPlans(string userId)
+        {
+            // Ensure the user is authenticated
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized("User is not authenticated.");
+            }
+
+            var count = await _studyPlanService.CountCompletedStudyPlansAsync(userId);
+            
+            return Ok(count);
+        }
+
         [HttpDelete("DeleteStudyPlan")]
         public async Task<IActionResult> DeleteStudyPlan(string studyPlanTitle)
         {

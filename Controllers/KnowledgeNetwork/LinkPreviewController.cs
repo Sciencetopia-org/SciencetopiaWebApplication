@@ -1,9 +1,13 @@
 using System;
-using System.Text;
+using System.IO;
 using System.Net.Http;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using HtmlAgilityPack;
 using Microsoft.AspNetCore.Mvc;
+using HtmlAgilityPack;
+using PdfSharp.Pdf;
+using PdfSharp.Pdf.IO;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -19,57 +23,137 @@ public class LinkPreviewController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> Get(string url)
     {
-        var client = _clientFactory.CreateClient();
-        var response = await client.GetAsync(url);
-        if (response.IsSuccessStatusCode)
+        var extractedUrl = ExtractURL(url);
+        if (extractedUrl == null)
         {
-            var contentBytes = await response.Content.ReadAsByteArrayAsync();
-            var utf8String = Encoding.UTF8.GetString(contentBytes);
-
-            var doc = new HtmlDocument();
-            doc.LoadHtml(utf8String);
-
-            // 尝试从 HTML meta 标签获取字符集
-            var metaCharset = doc.DocumentNode.SelectSingleNode("//meta[@http-equiv='Content-Type']")
-                ?.GetAttributeValue("content", string.Empty);
-            var charset = metaCharset?.Split("charset=")[1];
-
-            // 如果找到特定字符集，则重新解析 HTML
-            if (!string.IsNullOrEmpty(charset))
-            {
-                var correctEncoding = Encoding.GetEncoding(charset);
-                var correctString = correctEncoding.GetString(contentBytes);
-                doc = new HtmlDocument();
-                doc.LoadHtml(correctString);
-            }
-
-            var title = doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']")?.GetAttributeValue("content", string.Empty);
-            if (string.IsNullOrEmpty(title))
-            {
-                // 尝试获取常规的 <title> 标签内容
-                title = doc.DocumentNode.SelectSingleNode("//title")?.InnerText;
-            }
-
-            var description = doc.DocumentNode.SelectSingleNode("//meta[@property='og:description']")?.GetAttributeValue("content", string.Empty);
-            if (string.IsNullOrEmpty(description))
-            {
-                // 尝试获取常规的 <meta name="description"> 标签内容
-                description = doc.DocumentNode.SelectSingleNode("//meta[@name='description']")?.GetAttributeValue("content", string.Empty);
-            }
-
-            var image = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']")?.GetAttributeValue("content", string.Empty);
-            // 图片可能需要更复杂的逻辑来确定合适的回退方案
-
-            var preview = new
-            {
-                Title = title,
-                Description = description,
-                Image = image
-            };
-
-            return Ok(preview);
+            return BadRequest("No URL found in the text.");
         }
 
-        return NotFound();
+        var client = _clientFactory.CreateClient();
+        var response = await client.GetAsync(extractedUrl);
+        if (!response.IsSuccessStatusCode)
+        {
+            return NotFound("Failed to fetch the URL.");
+        }
+
+        if (response.Content.Headers.ContentType?.MediaType == "application/pdf")
+        {
+            var pdfStream = await response.Content.ReadAsStreamAsync();
+            string pdfTitle;
+
+            if (extractedUrl.AbsolutePath.EndsWith(".pdf"))
+            {
+                pdfTitle = await ExtractTitleFromPdfUsingTika(pdfStream);
+            }
+            else
+            {
+                pdfTitle = ExtractTitleFromPdfMetadata(pdfStream);
+                if (string.IsNullOrEmpty(pdfTitle))
+                {
+                    pdfTitle = await ExtractTitleFromPdfUsingTika(pdfStream);
+                }
+            }
+
+            var pdfPreview = new
+            {
+                Title = pdfTitle
+            };
+
+            return Ok(pdfPreview);
+        }
+
+        var contentBytes = await response.Content.ReadAsByteArrayAsync();
+        var utf8String = Encoding.UTF8.GetString(contentBytes);
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(utf8String);
+
+        var metaCharset = doc.DocumentNode.SelectSingleNode("//meta[@http-equiv='Content-Type']")
+            ?.GetAttributeValue("content", string.Empty);
+        var charset = metaCharset?.Split("charset=")[1];
+
+        if (!string.IsNullOrEmpty(charset))
+        {
+            var correctEncoding = Encoding.GetEncoding(charset);
+            var correctString = correctEncoding.GetString(contentBytes);
+            doc = new HtmlDocument();
+            doc.LoadHtml(correctString);
+        }
+
+        var title = doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']")?.GetAttributeValue("content", string.Empty);
+        if (string.IsNullOrEmpty(title))
+        {
+            title = doc.DocumentNode.SelectSingleNode("//title")?.InnerText;
+        }
+
+        var description = doc.DocumentNode.SelectSingleNode("//meta[@property='og:description']")?.GetAttributeValue("content", string.Empty);
+        if (string.IsNullOrEmpty(description))
+        {
+            description = doc.DocumentNode.SelectSingleNode("//meta[@name='description']")?.GetAttributeValue("content", string.Empty);
+        }
+
+        var image = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']")?.GetAttributeValue("content", string.Empty);
+
+        var preview = new
+        {
+            Title = title,
+            Description = description,
+            Image = image
+        };
+
+        return Ok(preview);
+    }
+
+    private Uri? ExtractURL(string text)
+    {
+        var regex = new Regex(@"https?://\S+");
+        var match = regex.Match(text);
+        return match.Success ? new Uri(match.Value) : null;
+    }
+
+    private string ExtractTitleFromPdfMetadata(Stream pdfStream)
+    {
+        try
+        {
+            using (var memoryStream = new MemoryStream())
+            {
+                pdfStream.CopyTo(memoryStream);
+                memoryStream.Position = 0;
+
+                using (var document = PdfReader.Open(memoryStream, PdfDocumentOpenMode.Import))
+                {
+                    return document.Info.Title;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private async Task<string> ExtractTitleFromPdfUsingTika(Stream pdfStream)
+    {
+        using (var client = _clientFactory.CreateClient())
+        {
+            var content = new StreamContent(pdfStream);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/pdf");
+
+            var response = await client.PutAsync("http://localhost:9998/tika", content);
+            response.EnsureSuccessStatusCode();
+
+            var text = await response.Content.ReadAsStringAsync();
+
+            return ExtractTitleFromText(text);
+        }
+    }
+
+    private string ExtractTitleFromText(string text)
+    {
+        var doc = new HtmlDocument();
+        doc.LoadHtml(text);
+
+        var titleNode = doc.DocumentNode.SelectSingleNode("//body//div[@class='page']//p/following-sibling::p[1]");
+        return titleNode?.InnerText.Trim() ?? "Untitled PDF";
     }
 }

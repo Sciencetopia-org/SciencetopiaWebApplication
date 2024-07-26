@@ -59,7 +59,7 @@
             },
             "HtmlAgilityPack": {
               "target": "Package",
-              "version": "[1.11.57, )"
+              "version": "[1.11.61, )"
             },
             "Microsoft.AspNetCore.Cors": {
               "target": "Package",
@@ -87,6 +87,10 @@
               "target": "Package",
               "version": "[5.12.0, )"
             },
+            "PdfSharp": {
+              "target": "Package",
+              "version": "[6.1.0, )"
+            },
             "Swashbuckle.AspNetCore": {
               "target": "Package",
               "version": "[6.5.0, )"
@@ -102,6 +106,10 @@
             "Twilio": {
               "target": "Package",
               "version": "[6.15.2, )"
+            },
+            "iTextSharp": {
+              "target": "Package",
+              "version": "[5.5.13.4, )"
             }
           },
           "imports": [
@@ -123,7 +131,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.104/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.107/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

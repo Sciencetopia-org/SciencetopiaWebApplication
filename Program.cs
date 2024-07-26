@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.HttpOverrides;
 using Neo4j.Driver;
 using Microsoft.OpenApi.Models;
-using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
@@ -12,7 +11,6 @@ using OpenAI.Extensions;
 using System.Text;
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.SignalR;
-using Elastic.Clients.Elasticsearch;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +24,7 @@ builder.Services.AddScoped<StudyPlanService>();
 builder.Services.AddScoped<StudyGroupService>();
 builder.Services.AddScoped<LearningService>();
 builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<KnowledgeGraphService>();
 
 // Register the custom IUserIdProvider
 builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
@@ -86,8 +85,24 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Sciencetopia API", Version = "v1" });
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "JWT Authorization header using the Bearer scheme."
+    });
+
+    // Remove any global security requirements if present
+    // This ensures that security is only applied where explicitly specified
+    c.OperationFilter<AuthorizeCheckOperationFilter>(); // Ensure this is added
 });
+
+
 
 // Setup CORS in .NET Web API
 builder.Services.AddCors(options =>
@@ -95,6 +110,13 @@ builder.Services.AddCors(options =>
     options.AddPolicy("VueCorsPolicy", builder =>
     {
         builder.WithOrigins("http://localhost:8080") // Replace with the URL of your Vue.js app
+            .AllowCredentials()
+            .AllowAnyMethod()
+            .AllowAnyHeader();
+    });
+    options.AddPolicy("AdminCorsPolicy", builder =>
+    {
+        builder.WithOrigins("http://localhost:8848") // Replace with the URL of your desired origin
             .AllowCredentials()
             .AllowAnyMethod()
             .AllowAnyHeader();
@@ -109,8 +131,12 @@ builder.Services.ConfigureApplicationCookie(options =>
     options.AccessDeniedPath = "/Account/AccessDenied";
 });
 
-// Add authorization service
-builder.Services.AddAuthorization();
+// Add authorization service with role policy
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("RequireAdministratorRole", policy => policy.RequireRole("Administrator"));
+});
+
 
 // Add logging service
 builder.Services.AddLogging();
@@ -142,6 +168,7 @@ var app = builder.Build();
 
 // Use CORS policy
 app.UseCors("VueCorsPolicy");
+app.UseCors("AdminCorsPolicy");
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
@@ -156,6 +183,15 @@ else
 {
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
 });
+}
+
+// Ensure you create roles before running the application
+using var scope = app.Services.CreateScope();
+var services = scope.ServiceProvider;
+var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
+if (!await roleManager.RoleExistsAsync("Administrator"))
+{
+    await roleManager.CreateAsync(new IdentityRole("Administrator"));
 }
 
 app.UseMiddleware<UserActivityMiddleware>();

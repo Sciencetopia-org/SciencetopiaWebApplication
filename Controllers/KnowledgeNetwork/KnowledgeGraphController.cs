@@ -2,6 +2,11 @@ using Microsoft.AspNetCore.Mvc;
 using Neo4j.Driver;
 using System.Security.Claims;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.Authorization;
+using Sciencetopia.Services;
+using Sciencetopia.Data;
+using Microsoft.EntityFrameworkCore;
+
 
 namespace Sciencetopia.Controllers
 {
@@ -10,74 +15,30 @@ namespace Sciencetopia.Controllers
     public class KnowledgeGraphController : ControllerBase
     {
         private readonly IDriver _driver;
+        private readonly ApplicationDbContext _context;
+        private readonly KnowledgeGraphService _knowledgeGraphService;
 
-        public KnowledgeGraphController(IDriver driver)
+        public KnowledgeGraphController(IDriver driver, ApplicationDbContext context, KnowledgeGraphService knowledgeGraphService)
         {
             // Initialize Neo4j driver
             _driver = driver;
+            _context = context;
+            _knowledgeGraphService = knowledgeGraphService;
         }
 
         [HttpGet("GetNodes")]
         public async Task<IActionResult> GetKnowledgeGraph()
         {
-            using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(@"
-        // Fetch knowledge nodes and their relationships
-        MATCH (n)-[r]->(m)
-        WHERE (n:Subject OR n:Field OR n:Topic OR n:Keyword OR n:People OR n:Works OR n:Event) AND
-              (m:Subject OR m:Field OR m:Topic OR m:Keyword OR m:People OR m:Works OR m:Event)
-        // Optionally match resources linked to these nodes
-        OPTIONAL MATCH (n)-[:HAS_RESOURCE]->(nr:Resource)
-        OPTIONAL MATCH (m)-[:HAS_RESOURCE]->(mr:Resource)
-        WITH n, m, r, COLLECT(DISTINCT nr.link) AS nResources, COLLECT(DISTINCT mr.link) AS mResources
-        RETURN n AS sourceNode, m AS targetNode, r AS relationship, nResources, mResources
-        LIMIT 1000
-    ");
-            var data = new List<object>();
-
-            await foreach (var record in result)
+            // Determine if the user is authenticated
+            string userId = User?.Identity?.IsAuthenticated == true ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty : string.Empty;
+            var data = await _knowledgeGraphService.FetchKnowledgeGraphData();
+            if (userId != string.Empty)
             {
-                var sourceNode = record["sourceNode"].As<INode>();
-                var targetNode = record["targetNode"].As<INode>();
-                var relationship = record["relationship"].As<IRelationship>();
-                var nResources = record["nResources"].As<List<string>>();
-                var mResources = record["mResources"].As<List<string>>();
-
-                data.Add(new
-                {
-                    source = new
-                    {
-                        Identity = sourceNode.Id,
-                        Labels = sourceNode.Labels.ToList(),
-                        Properties = new
-                        {
-                            Name = sourceNode.Properties["name"].As<string>(),
-                            Description = sourceNode.Properties["description"].As<string>(),
-                        },
-                        Resources = nResources.Select(link => new { Link = link }).ToList()
-                    },
-                    target = new
-                    {
-                        Identity = targetNode.Id,
-                        Labels = targetNode.Labels.ToList(),
-                        Properties = new
-                        {
-                            Name = targetNode.Properties["name"].As<string>(),
-                            Description = targetNode.Properties["description"].As<string>(),
-                        },
-                        Resources = mResources.Select(link => new { Link = link }).ToList()
-                    },
-                    relationship = new
-                    {
-                        Identity = relationship.Id,
-                        Start = relationship.StartNodeId,
-                        End = relationship.EndNodeId,
-                        Type = relationship.Type
-                    }
-                });
+                var data_pending = await _knowledgeGraphService.GetPendingNodesByUserIdAsync(userId);
+                return Ok(new { data, data_pending });
             }
-
-            return Ok(data);
+            // var data = await _knowledgeGraphService.FetchKnowledgeGraphData(userId);
+            return Ok(new { data });
         }
 
 
@@ -89,43 +50,25 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Search query is required.");
             }
 
-            string lowerCaseQuery = query.ToLower();
-
-            using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(@"
-        MATCH (n)
-        WHERE (n:Subject OR n:Topic OR n:Keyword OR n:Tag) AND toLower(n.name) CONTAINS $lowerCaseQuery
-        RETURN n, 
-               CASE WHEN toLower(n.name) STARTS WITH $lowerCaseQuery THEN 1 ELSE 0 END AS startsWithScore,
-               CASE WHEN toLower(n.name) = $lowerCaseQuery THEN 1 ELSE 0 END AS exactMatchScore
-        ORDER BY exactMatchScore DESC, startsWithScore DESC, n.name
-        LIMIT 1
-    ", new { lowerCaseQuery });
-
-            if (await result.FetchAsync())
+            try
             {
-                var node = result.Current["n"].As<INode>();
-                return Ok(new
+                var result = await _knowledgeGraphService.SearchNodeAsync(query);
+                if (result != null)
                 {
-                    Identity = node.Id,
-                    Labels = node.Labels.ToList(),
-                    Properties = new
-                    {
-                        Link = node.Properties.GetValueOrDefault("link", null)?.As<string>(),
-                        Name = node.Properties.GetValueOrDefault("name", null)?.As<string>(),
-                        Description = node.Properties.GetValueOrDefault("description", null)?.As<string>()
-                    }
-                });
-            }
+                    return Ok(result);
+                }
 
-            return NotFound("No node found matching the query.");
+                return NotFound("No node found matching the query.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
 
         [HttpPost("CreateNode")]
         public async Task<IActionResult> CreateNode([FromBody] CreateNodeRequest request)
         {
-            using var session = _driver.AsyncSession();
-
             if (request == null)
             {
                 return BadRequest("Request body is required.");
@@ -136,39 +79,52 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Node name is required.");
             }
 
-            // Check if the node name already exists
-            var nameExistsResult = await session.RunAsync(@"
-                MATCH (n:" + request.Label + @")
-                WHERE toLower(n.name) = toLower($name)
-                RETURN n",
-                new { name = request.Name });
-
-            if (await nameExistsResult.FetchAsync())
+            try
             {
-                return Conflict("Node name already exists.");
+                string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                var responseMessage = await _knowledgeGraphService.CreateNodeAsync(request, userId);
+                return Ok(responseMessage);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("CreateRelationship")]
+        public async Task<IActionResult> CreateRelationship([FromBody] CreateRelationshipRequest request)
+        {
+            if (request == null)
+            {
+                return BadRequest("Request body is required.");
             }
 
-            // Retrieve the user's ID from the ClaimsPrincipal
-            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(request.SourceNodeName) || string.IsNullOrWhiteSpace(request.TargetNodeName) || string.IsNullOrWhiteSpace(request.RelationshipType))
+            {
+                return BadRequest("Source node name, target node name, and relationship type are all required.");
+            }
 
-            var result = await session.RunAsync(@"
-                CREATE (n:" + request.Label + @" {name: $name, description: $description})
-                SET n:pending_approval
-                WITH n
-                UNWIND $link AS l
-                CREATE (r:Resource {link: l})
-                CREATE (n)-[:HAS_RESOURCE]->(r)
-                SET r:pending_approval
-                WITH n
-                MATCH (u:User {id: $userId})
-                CREATE (u)-[:CREATED]->(n)
-                RETURN n",
-                new { name = request.Name, description = request.Description, link = request.Link, userId });
-
-            return Ok(); // Add this line to return a response.
+            try
+            {
+                string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                bool success = await _knowledgeGraphService.CreateRelationshipAsync(request.SourceNodeName, request.TargetNodeName, request.RelationshipType, userId);
+                if (success)
+                    return Ok();
+                else
+                    return NotFound("Source node or target node not found.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
 
         [HttpPost("ApproveNode")]
+        [Authorize(Roles = "Administrator")]
         public async Task<IActionResult> ApproveNode(string nodeName)
         {
             if (string.IsNullOrWhiteSpace(nodeName))
@@ -176,19 +132,22 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Node name is required.");
             }
 
-            using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(@"
-                MATCH (n)-[:HAS_RESOURCE]->(r)
-                WHERE n.name = $nodeName
-                REMOVE n:pending_approval
-                REMOVE r:pending_approval
-                RETURN n",
-                new { nodeName });
-
-            return Ok(); // Add this line to return a response.
+            try
+            {
+                bool success = await _knowledgeGraphService.ApproveNodeAsync(nodeName);
+                if (success)
+                    return Ok("Node approval successful.");
+                else
+                    return NotFound("Node not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
 
-        [HttpPost("disapproveNode")]
+        [HttpPost("RejectNode")]
+        [Authorize(Roles = "Administrator")]
         public async Task<IActionResult> DisapproveNode(string nodeName)
         {
             if (string.IsNullOrWhiteSpace(nodeName))
@@ -196,21 +155,21 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Node name is required.");
             }
 
-            using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(@"
-                MATCH (n)-[:HAS_RESOURCE]->(r)
-                WHERE n.name = $nodeName
-                REMOVE n:pending_approval
-                REMOVE r:pending_approval
-                SET n:disapproved
-                SET r:disapproved
-                RETURN n",
-                new { nodeName });
-
-            return Ok(); // Add this line to return a response.
+            try
+            {
+                bool success = await _knowledgeGraphService.DisapproveNodeAsync(nodeName);
+                if (success)
+                    return Ok("Node disapproval successful.");
+                else
+                    return NotFound("Node not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
 
-        [HttpPost("resubmitNode")]
+        [HttpPost("ResubmitNode")]
         public async Task<IActionResult> ResubmitNode(string nodeName)
         {
             if (string.IsNullOrWhiteSpace(nodeName))
@@ -218,50 +177,168 @@ namespace Sciencetopia.Controllers
                 return BadRequest("Node name is required.");
             }
 
-            using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(@"
-                MATCH (n)-[:HAS_RESOURCE]->(r)
-                WHERE n.name = $nodeName
-                REMOVE n:disapproved
-                REMOVE r:disapproved
-                SET n:pending_approval
-                SET r:pending_approval
-                RETURN n",
-                new { nodeName });
-
-            return Ok(); // Add this line to return a response.
+            try
+            {
+                bool success = await _knowledgeGraphService.ResubmitNodeAsync(nodeName);
+                if (success)
+                    return Ok("Node resubmission successful.");
+                else
+                    return NotFound("Node not found or not marked as disapproved.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
 
-        [HttpPost("addResource")]
+        [HttpPost("ApproveRelationship")]
+        [Authorize(Roles = "Administrator")]
+        public async Task<IActionResult> ApproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        {
+            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+            {
+                return BadRequest("Source node name, target node name, and relationship type are all required.");
+            }
+
+            try
+            {
+                bool success = await _knowledgeGraphService.ApproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+                if (success)
+                    return Ok("Relationship approval successful.");
+                else
+                    return NotFound("Relationship not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("RejectRelationship")]
+        [Authorize(Roles = "Administrator")]
+        public async Task<IActionResult> DisapproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        {
+            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+            {
+                return BadRequest("Source node name, target node name, and relationship type are all required.");
+            }
+
+            try
+            {
+                bool success = await _knowledgeGraphService.DisapproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+                if (success)
+                    return Ok("Relationship disapproval successful.");
+                else
+                    return NotFound("Relationship not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("ResubmitRelationship")]
+        public async Task<IActionResult> ResubmitRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        {
+            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+            {
+                return BadRequest("Source node name, target node name, and relationship type are all required.");
+            }
+
+            try
+            {
+                bool success = await _knowledgeGraphService.ResubmitRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+                if (success)
+                    return Ok("Relationship resubmission successful.");
+                else
+                    return NotFound("Relationship not found or not marked as disapproved.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("AddResource")]
         public async Task<IActionResult> AddResource([FromBody] AddResourceRequest request)
         {
-            using var session = _driver.AsyncSession();
-
             if (request == null)
             {
                 return BadRequest("Request body is required.");
             }
 
-            if (string.IsNullOrWhiteSpace(request.NodeName))
+            if (string.IsNullOrWhiteSpace(request.NodeName) || string.IsNullOrWhiteSpace(request.Link))
             {
-                return BadRequest("Node name is required.");
+                return BadRequest("Node name and resource link are both required.");
             }
 
-            if (string.IsNullOrWhiteSpace(request.Link))
+            try
             {
-                return BadRequest("Resource link is required.");
+                bool success = await _knowledgeGraphService.AddResourceAsync(request.NodeName, request.Link);
+                if (success)
+                    return Ok();
+                else
+                    return NotFound("Node not found.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpGet("GetPendingNodes")]
+        public async Task<IActionResult> GetPendingNodes()
+        {
+            try
+            {
+                var data = await _knowledgeGraphService.GetPendingNodesAsync();
+                return Ok(data);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("GetPendingNodeByUserId")]
+        public async Task<IActionResult> GetPendingNodeByUserId(string userId)
+        {
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return BadRequest("User ID is required.");
             }
 
-            var result = await session.RunAsync(@"
-                MATCH (n)
-                WHERE n.name = $nodeName
-                CREATE (r:Resource {link: $link})
-                CREATE (n)-[:HAS_RESOURCE]->(r)
-                SET r:pending_approval
-                RETURN n",
-                new { nodeName = request.NodeName, link = request.Link });
+            try
+            {
+                var data = await _knowledgeGraphService.GetPendingNodesByUserIdAsync(userId);
+                return Ok(data);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
 
-            return Ok(); // Add this line to return a response.
+        [HttpGet("CountContributedNodesAndLinksByUserId")]
+        public async Task<IActionResult> CountContributedNodesAndLinks(string userId)
+        {
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return BadRequest("User ID is required.");
+            }
+
+            try
+            {
+                var data = await _knowledgeGraphService.CountContributedNodesAndLinks(userId);
+                return Ok(data);
+            }
+            catch (Exception ex)
+            {
+                // Log the detailed error
+                Console.WriteLine($"Controller error in CountContributedNodesAndLinks: {ex.Message}");
+                Console.WriteLine($"Stack Trace: {ex.StackTrace}");
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
         }
     }
 }
