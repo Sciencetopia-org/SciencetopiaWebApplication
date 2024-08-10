@@ -34,6 +34,28 @@ public class StudyGroupController : ControllerBase
         return Ok(group);
     }
 
+    [HttpGet("GetUserRoleInGroup/{groupId}")]
+    [Authorize] // This endpoint requires user authorization
+    public async Task<ActionResult<string>> GetUserRoleInGroup(string groupId)
+    {
+        // Retrieve the user's ID from the ClaimsPrincipal
+        string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the user is authenticated
+        if (string.IsNullOrEmpty(userId))
+        {
+            return Unauthorized("User is not authenticated.");
+        }
+
+        string userRole = await _studyGroupService.GetUserRoleInGroupAsync(groupId, userId);
+        if (userRole == null)
+        {
+            return NotFound("User role not found.");
+        }
+
+        return Ok(userRole);
+    }
+
     [HttpGet("GetStudyGroupMembers/{groupId}")]
     public async Task<ActionResult<IEnumerable<GroupMember>>> GetStudyGroupMembers(string groupId)
     {
@@ -78,9 +100,9 @@ public class StudyGroupController : ControllerBase
     }
 
     [HttpPost("CreateStudyGroup")]
-    public async Task<ActionResult<StudyGroup>> CreateStudyGroupAsync([FromBody] StudyGroupDTO studyGroupDTO)
+    [Authorize] // Ensure only authenticated users can access this endpoint
+    public async Task<ActionResult> CreateStudyGroupAsync([FromBody] StudyGroupDTO studyGroupDTO)
     {
-        // Logic to create a new group
         // Retrieve the user's ID from the ClaimsPrincipal
         string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -93,7 +115,7 @@ public class StudyGroupController : ControllerBase
         var result = await _studyGroupService.CreateStudyGroupAsync(studyGroupDTO, userId);
         if (result)
         {
-            return Ok(); // Plan saved successfully
+            return Ok("创建学习小组的申请已经成功提交审核！");
         }
         else
         {
@@ -101,7 +123,77 @@ public class StudyGroupController : ControllerBase
         }
     }
 
+    [HttpPost("ApproveStudyGroup")]
+    [Authorize(Roles = "Administrator")]
+    public async Task<ActionResult> ApproveStudyGroupAsync([FromBody] string groupId)
+    {
+        // Retrieve the admin's ID from the ClaimsPrincipal
+        string adminUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the admin is authenticated
+        if (string.IsNullOrEmpty(adminUserId))
+        {
+            return Unauthorized("Admin is not authenticated.");
+        }
+
+        var result = await _studyGroupService.ApproveStudyGroupAsync(groupId);
+        if (result)
+        {
+            return Ok("Study group has been approved successfully.");
+        }
+        else
+        {
+            return BadRequest("Failed to approve the study group.");
+        }
+    }
+
+    [HttpPost("RejectStudyGroup")]
+    [Authorize(Roles = "Administrator")]
+    public async Task<ActionResult> RejectStudyGroupAsync([FromBody] string groupId)
+    {
+        // Retrieve the admin's ID from the ClaimsPrincipal
+        string adminUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the admin is authenticated
+        if (string.IsNullOrEmpty(adminUserId))
+        {
+            return Unauthorized("Admin is not authenticated.");
+        }
+
+        var result = await _studyGroupService.RejectStudyGroupAsync(groupId);
+        if (result)
+        {
+            return Ok("Study group has been rejected successfully.");
+        }
+        else
+        {
+            return BadRequest("Failed to reject the study group.");
+        }
+    }
+
+    [HttpPost("ViewCreateStudyGroupRequests")]
+    [Authorize(Roles = "Administrator")]
+    public async Task<ActionResult> ViewCreateStudyGroupRequests()
+    {
+        // Retrieve the admin's ID from the ClaimsPrincipal
+        string adminUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+
+        // Ensure the admin is authenticated
+        if (string.IsNullOrEmpty(adminUserId))
+        {
+            return Unauthorized("Admin is not authenticated.");
+        }
+
+        var requests = await _studyGroupService.ViewCreateStudyGroupRequestsAsync();
+        if (requests == null || !requests.Any())
+        {
+            return NotFound("No pending study group requests found.");
+        }
+        return Ok(requests);
+    }
+
     [HttpDelete("DeleteStudyGroup/{groupId}")]
+    [Authorize] // Ensure only authenticated users can access this endpoint
     public async Task<IActionResult> DeleteStudyGroup(string groupId)
     {
         // Retrieve the user's ID from the ClaimsPrincipal
@@ -201,4 +293,25 @@ public class StudyGroupController : ControllerBase
     }
 
     // Other endpoints like JoinGroup, PostUpdate, etc.
+    [HttpGet("GetJoinRequests/{groupId}")]
+    public async Task<ActionResult<IEnumerable<JoinRequest>>> GetJoinRequests(string groupId)
+    {
+        var requests = await _studyGroupService.GetJoinRequests(groupId);
+        if (requests == null)
+        {
+            return NotFound("Join requests not found.");
+        }
+        return Ok(requests);
+    }
+
+    [HttpGet("GetActivityLogs/{groupId}")]
+    public async Task<ActionResult<IEnumerable<ActivityLog>>> GetActivityLogs(string groupId)
+    {
+        var logs = await _studyGroupService.GetActivityLogs(groupId);
+        if (logs == null)
+        {
+            return NotFound("Activity logs not found.");
+        }
+        return Ok(logs);
+    }
 }

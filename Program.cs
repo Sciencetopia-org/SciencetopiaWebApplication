@@ -7,6 +7,7 @@ using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Models;
 using Sciencetopia.Hubs;
+using Sciencetopia.Authorization;
 using OpenAI.Extensions;
 using System.Text;
 using Azure.Storage.Blobs;
@@ -25,6 +26,8 @@ builder.Services.AddScoped<StudyGroupService>();
 builder.Services.AddScoped<LearningService>();
 builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<KnowledgeGraphService>();
+
+builder.Services.AddScoped<GroupManagerAuthorizeAttribute>(); // Register the custom authorization attribute
 
 // Register the custom IUserIdProvider
 builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
@@ -101,7 +104,6 @@ builder.Services.AddSwaggerGen(c =>
     // This ensures that security is only applied where explicitly specified
     c.OperationFilter<AuthorizeCheckOperationFilter>(); // Ensure this is added
 });
-
 
 
 // Setup CORS in .NET Web API
