@@ -7,7 +7,7 @@ using Sciencetopia.Data;
 
 public interface INodeApprovalRepository
 {
-    Task<bool> ApproveNodeAsync(Guid nodeId);
+    Task<bool> ApproveNodeAsync(Guid nodeId, string reviewerId);
     Task<bool> DisapproveNodeAsync(string nodeId);
     Task<bool> ResubmitNodeAsync(string nodeId);
     Task<List<KnowledgeNodeDraft>> GetPendingNodesAsync();
@@ -15,6 +15,7 @@ public interface INodeApprovalRepository
     Task<List<TagDraft>> GetPendingTagsAsync();
     Task<List<TagDraft>> GetPendingTagsByUserIdAsync(string userId);
     Task<Guid> CreateDraftAsync(CreateNodeRequest request, string userId);
+    Task<Guid> CreateNodeEditDraftAsync(EditNodeRequest request, string userId);
     Task<int> CountApprovedNodeDraftsAsync(string userId);
 }
 
@@ -27,7 +28,7 @@ public class NodeApprovalRepository : INodeApprovalRepository
         _context = context;
     }
 
-    public async Task<bool> ApproveNodeAsync(Guid nodeId)
+    public async Task<bool> ApproveNodeAsync(Guid nodeId, string reviewerId)
     {
         // 获取最新的 pending 草稿
         var draft = await _context.KnowledgeNodeDrafts
@@ -54,6 +55,27 @@ public class NodeApprovalRepository : INodeApprovalRepository
         }
         else
         {
+            // 获取当前最大版本号（为空时从 0 开始）
+            var lastVersion = await _context.KnowledgeNodeVersions
+                .Where(v => v.NodeId == nodeId)
+                .OrderByDescending(v => v.VersionNumber)
+                .FirstOrDefaultAsync();
+
+            int newVersionNumber = lastVersion?.VersionNumber + 1 ?? 1;
+
+            // ✅ 保存旧版本
+            _context.KnowledgeNodeVersions.Add(new KnowledgeNodeVersion
+            {
+                Id = Guid.NewGuid(),
+                NodeId = node.Id ?? throw new InvalidOperationException("Node ID cannot be null"),
+                Name = node.Name,
+                Description = node.Description,
+                CreatedDate = DateTimeOffset.UtcNow,
+                PublishedBy = reviewerId,
+                PublishedAt = DateTimeOffset.UtcNow,
+                VersionNumber = newVersionNumber
+            });
+
             // 已存在，则更新原有节点
             node.Name = draft.Name;
             node.Description = draft.Description;
@@ -72,6 +94,7 @@ public class NodeApprovalRepository : INodeApprovalRepository
         {
             other.ReviewStatus = ReviewStatus.Rejected;
             other.ReviewedAt = DateTimeOffset.UtcNow;
+            other.ReviewedBy = reviewerId;
         }
 
         return await _context.SaveChangesAsync() > 0;
@@ -159,7 +182,25 @@ public class NodeApprovalRepository : INodeApprovalRepository
 
         return nodeId;
     }
-    
+
+    public async Task<Guid> CreateNodeEditDraftAsync(EditNodeRequest request, string userId)
+    {
+        var draftId = Guid.NewGuid();
+
+        var draft = new KnowledgeNodeDraft
+        {
+            Id = draftId,
+            NodeId = request.NodeId,
+            Name = request.Name,
+            Description = request.Description,
+            SubmittedBy = userId,
+            SubmittedAt = DateTimeOffset.UtcNow,
+            ReviewStatus = ReviewStatus.Pending
+        };
+
+        await _context.KnowledgeNodeDrafts.AddAsync(draft);
+        return draftId;
+    }
 
     public async Task<int> CountApprovedNodeDraftsAsync(string userId)
     {

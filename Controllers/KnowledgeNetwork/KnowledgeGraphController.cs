@@ -17,13 +17,17 @@ namespace Sciencetopia.Controllers
         private readonly IDriver _driver;
         private readonly ApplicationDbContext _context;
         private readonly KnowledgeGraphService _knowledgeGraphService;
+        private readonly ITagRepository _tagRepository;
+        private readonly IGraphRepository _graphRepository;
 
-        public KnowledgeGraphController(IDriver driver, ApplicationDbContext context, KnowledgeGraphService knowledgeGraphService)
+        public KnowledgeGraphController(IDriver driver, ApplicationDbContext context, KnowledgeGraphService knowledgeGraphService, ITagRepository tagRepository, IGraphRepository graphRepository)
         {
             // Initialize Neo4j driver
             _driver = driver;
             _context = context;
             _knowledgeGraphService = knowledgeGraphService;
+            _tagRepository = tagRepository;
+            _graphRepository = graphRepository;
         }
 
         /// <summary>
@@ -50,24 +54,29 @@ namespace Sciencetopia.Controllers
             return Ok(result);
         }
 
-        // [HttpGet("GetNodes")]
-        // public async Task<IActionResult> GetKnowledgeGraph([FromQuery] string? tagSystem)
-        // {
-        //     // Determine if the user is authenticated
-        //     string userId = User?.Identity?.IsAuthenticated == true ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty : string.Empty;
-        //     // Get all Tag Ids related to Tag System
-        //     var allTagIds = tagSystem != null ? await _knowledgeGraphService.GetTagIdsByTagTypeAsync(tagSystem) : await _knowledgeGraphService.GetTagIdsByTagTypeAsync("MainTag");
-        //     // Get all node Ids related to Tag Ids 
-        //     var allNodeIds = await _knowledgeGraphService.GetAllNodesRelatedToTags(allTagIds);
-        //     // Get knowledge graph data from all node Ids
-        //     var data = await _knowledgeGraphService.GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds);
-        //     if (userId != string.Empty)
-        //     {
-        //         var data_pending = await _knowledgeGraphService.GetPendingNodesByUserIdAsync(userId);
-        //         return Ok(new { data, data_pending });
-        //     }
-        //     return Ok(new { data });
-        // }
+        [HttpGet("GetNodeDetails")]
+        public async Task<IActionResult> GetNodeDetails(string nodeId)
+        {
+            if (string.IsNullOrWhiteSpace(nodeId))
+            {
+                return BadRequest("Node ID is required.");
+            }
+
+            try
+            {
+                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(nodeId);
+                if (data != null)
+                {
+                    return Ok(data);
+                }
+
+                return NotFound("Node not found.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
 
         [HttpGet("FilterByTags")]
         public async Task<IActionResult> FilterByTags([FromQuery] List<string> tags, string? tagSystem)
@@ -144,27 +153,76 @@ namespace Sciencetopia.Controllers
             }
         }
 
-        [HttpPost("CreateRelationship")]
-        public async Task<IActionResult> CreateRelationship([FromBody] CreateRelationshipRequest request)
-        {
-            if (request == null)
-            {
-                return BadRequest("Request body is required.");
-            }
+        // [HttpPost("CreateRelationship")]
+        // public async Task<IActionResult> CreateRelationship([FromBody] CreateRelationshipRequest request)
+        // {
+        //     if (request == null)
+        //     {
+        //         return BadRequest("Request body is required.");
+        //     }
 
-            if (string.IsNullOrWhiteSpace(request.SourceNodeName) || string.IsNullOrWhiteSpace(request.TargetNodeName) || string.IsNullOrWhiteSpace(request.RelationshipType))
+        //     if (string.IsNullOrWhiteSpace(request.SourceNodeName) || string.IsNullOrWhiteSpace(request.TargetNodeName) || string.IsNullOrWhiteSpace(request.RelationshipType))
+        //     {
+        //         return BadRequest("Source node name, target node name, and relationship type are all required.");
+        //     }
+
+        //     try
+        //     {
+        //         string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+        //         bool success = await _knowledgeGraphService.CreateRelationshipAsync(request.SourceNodeName, request.TargetNodeName, request.RelationshipType, userId);
+        //         if (success)
+        //             return Ok();
+        //         else
+        //             return NotFound("Source node or target node not found.");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         return StatusCode(500, $"Internal server error: {ex.Message}");
+        //     }
+        // }
+
+        [HttpPost("CreateTag")]
+        public async Task<IActionResult> CreateTag([FromBody] CreateTagRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Name))
             {
-                return BadRequest("Source node name, target node name, and relationship type are all required.");
+                return BadRequest("Tag name is required.");
             }
 
             try
             {
                 string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
-                bool success = await _knowledgeGraphService.CreateRelationshipAsync(request.SourceNodeName, request.TargetNodeName, request.RelationshipType, userId);
-                if (success)
-                    return Ok();
-                else
-                    return NotFound("Source node or target node not found.");
+
+                var tagId = await _tagRepository.CreateTagDraftAsync(request.Name, request.Description, userId);
+
+                await _graphRepository.CreatePendingTagNodeAsync(tagId);
+
+                // 无论是否重复，CreateTagDraftAsync 已处理好，我们统一返回成功提示
+                return Ok("Tag draft submitted (new or already exists).");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("EditNode")]
+        public async Task<IActionResult> EditNode([FromBody] EditNodeRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.NodeId.ToString()) || string.IsNullOrWhiteSpace(request.Name))
+            {
+                return BadRequest("Node ID and name are required.");
+            }
+
+            try
+            {
+                string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                var responseMessage = await _knowledgeGraphService.EditNodeAsync(request, userId);
+                return Ok(responseMessage);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Conflict(ex.Message);
             }
             catch (Exception ex)
             {
@@ -183,7 +241,9 @@ namespace Sciencetopia.Controllers
 
             try
             {
-                bool success = await _knowledgeGraphService.ApproveNodeAsync(nodeName);
+                string adminId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                // 这里的 adminId 是从 JWT 中获取的，假设你已经在 JWT 中存储了管理员的 ID
+                bool success = await _knowledgeGraphService.ApproveNodeAsync(nodeName, adminId);
                 if (success)
                     return Ok("Node approval successful.");
                 else
@@ -240,73 +300,73 @@ namespace Sciencetopia.Controllers
             }
         }
 
-        [HttpPost("ApproveRelationship")]
-        [Authorize(Roles = "administrator")]
-        public async Task<IActionResult> ApproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
-        {
-            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            {
-                return BadRequest("Source node name, target node name, and relationship type are all required.");
-            }
+        // [HttpPost("ApproveRelationship")]
+        // [Authorize(Roles = "administrator")]
+        // public async Task<IActionResult> ApproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        // {
+        //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+        //     {
+        //         return BadRequest("Source node name, target node name, and relationship type are all required.");
+        //     }
 
-            try
-            {
-                bool success = await _knowledgeGraphService.ApproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
-                if (success)
-                    return Ok("Relationship approval successful.");
-                else
-                    return NotFound("Relationship not found or not marked as pending approval.");
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
-            }
-        }
+        //     try
+        //     {
+        //         bool success = await _knowledgeGraphService.ApproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+        //         if (success)
+        //             return Ok("Relationship approval successful.");
+        //         else
+        //             return NotFound("Relationship not found or not marked as pending approval.");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         return StatusCode(500, $"Internal server error: {ex.Message}");
+        //     }
+        // }
 
-        [HttpPost("RejectRelationship")]
-        [Authorize(Roles = "administrator")]
-        public async Task<IActionResult> DisapproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
-        {
-            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            {
-                return BadRequest("Source node name, target node name, and relationship type are all required.");
-            }
+        // [HttpPost("RejectRelationship")]
+        // [Authorize(Roles = "administrator")]
+        // public async Task<IActionResult> DisapproveRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        // {
+        //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+        //     {
+        //         return BadRequest("Source node name, target node name, and relationship type are all required.");
+        //     }
 
-            try
-            {
-                bool success = await _knowledgeGraphService.DisapproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
-                if (success)
-                    return Ok("Relationship disapproval successful.");
-                else
-                    return NotFound("Relationship not found or not marked as pending approval.");
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
-            }
-        }
+        //     try
+        //     {
+        //         bool success = await _knowledgeGraphService.DisapproveRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+        //         if (success)
+        //             return Ok("Relationship disapproval successful.");
+        //         else
+        //             return NotFound("Relationship not found or not marked as pending approval.");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         return StatusCode(500, $"Internal server error: {ex.Message}");
+        //     }
+        // }
 
-        [HttpPost("ResubmitRelationship")]
-        public async Task<IActionResult> ResubmitRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
-        {
-            if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            {
-                return BadRequest("Source node name, target node name, and relationship type are all required.");
-            }
+        // [HttpPost("ResubmitRelationship")]
+        // public async Task<IActionResult> ResubmitRelationship(string sourceNodeName, string targetNodeName, string relationshipType)
+        // {
+        //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+        //     {
+        //         return BadRequest("Source node name, target node name, and relationship type are all required.");
+        //     }
 
-            try
-            {
-                bool success = await _knowledgeGraphService.ResubmitRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
-                if (success)
-                    return Ok("Relationship resubmission successful.");
-                else
-                    return NotFound("Relationship not found or not marked as disapproved.");
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
-            }
-        }
+        //     try
+        //     {
+        //         bool success = await _knowledgeGraphService.ResubmitRelationshipAsync(sourceNodeName, targetNodeName, relationshipType);
+        //         if (success)
+        //             return Ok("Relationship resubmission successful.");
+        //         else
+        //             return NotFound("Relationship not found or not marked as disapproved.");
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         return StatusCode(500, $"Internal server error: {ex.Message}");
+        //     }
+        // }
 
         [HttpPost("AddResource")]
         public async Task<IActionResult> AddResource([FromBody] AddResourceRequest request)

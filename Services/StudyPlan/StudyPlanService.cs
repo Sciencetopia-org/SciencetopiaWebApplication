@@ -442,13 +442,13 @@ public class StudyPlanService
                         return null; // Skip resource if both link and name are null
                     }
 
-                    return new Resource
+                    return new ResourceDTO
                     {
                         Link = link,
                         Name = name,
                         Learned = learned
                     };
-                }).Where(r => r != null).ToList() ?? new List<Resource>(); // Return an empty list if no valid resources
+                }).Where(r => r != null).ToList() ?? new List<ResourceDTO>(); // Return an empty list if no valid resources
 
                 var finishedResourcesCount = resources?.Count(r => r.Learned) ?? 0;
                 var totalResources = resources?.Count ?? 0;

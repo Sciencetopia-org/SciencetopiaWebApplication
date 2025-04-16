@@ -15,15 +15,15 @@ public class StudyPlanController : ControllerBase
     }
 
     [HttpPost("ToggleFinishedLearning")]
-    public async Task<IActionResult> ToggleFinishedLearning([FromBody] LessonResourceDTO lessonResource)
+    public async Task<IActionResult> ToggleFinishedLearning(Resource lessonResource)
     {
         // Retrieve the current user id (you need to implement this logic)
         string userId = GetCurrentUserId();
 
-        if (lessonResource.Name != null && lessonResource.ResourceLink != null) // Add null check for resourceName
+        if (lessonResource.Name != null && lessonResource.Link != null) // Add null check for resourceName
         {
             // Forward the user id, lesson name, and resource link to the ManagePlanService
-            await _learningService.ToggleFinishedLearningRelationship(lessonResource.Name, lessonResource.ResourceLink, userId);
+            await _learningService.ToggleFinishedLearningRelationship(lessonResource.Name, lessonResource.Link, userId);
         }
 
         return Ok();

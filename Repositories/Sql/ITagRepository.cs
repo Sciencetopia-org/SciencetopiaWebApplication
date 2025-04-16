@@ -1,5 +1,6 @@
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
+using Sciencetopia.Models;
 
 public interface ITagRepository
 {
@@ -8,6 +9,9 @@ public interface ITagRepository
     Task<List<TagDTO>> GetTagsByNameAsync(IEnumerable<string> inputTagNames);
     Task<Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<string> ids);
     Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds);
+    Task<Guid> CreateIfNotExistsAsync(string tagName);
+    Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy);
+    Task<bool> ApproveTagDraftIfPendingAsync(Guid tagId, string reviewerId);
 }
 
 public class TagRepository : ITagRepository
@@ -112,5 +116,88 @@ public class TagRepository : ITagRepository
             }
         }
         return dict;
+    }
+
+    public async Task<Guid> CreateIfNotExistsAsync(string tagName)
+    {
+        var tag = await _context.Tags.FirstOrDefaultAsync(t => t.Name == tagName);
+        if (tag != null && tag.Id.HasValue) return tag.Id.Value;
+
+        var newTag = new Tags
+        {
+            Name = tagName,
+            CreatedDate = DateTimeOffset.UtcNow,
+            UpdatedDate = DateTimeOffset.UtcNow
+        };
+        // Id 是 Guid 类型，EF Core 会自动生成
+        _context.Tags.Add(newTag);
+        await _context.SaveChangesAsync();
+        return newTag.Id ?? throw new InvalidOperationException("The new tag ID is null.");
+    }
+
+    public async Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy)
+    {
+        // 是否存在同名、未审的草稿（可避免重复提交）
+        var existingDraft = await _context.TagDrafts
+            .FirstOrDefaultAsync(td =>
+                td.Name == name &&
+                td.SubmittedBy == submittedBy &&
+                td.ReviewStatus == ReviewStatus.Pending);
+
+        if (existingDraft != null)
+        {
+            return existingDraft.TagId != Guid.Empty ? existingDraft.TagId : Guid.Empty; // 返回已存在的草稿 ID
+        }
+
+        var tagId = Guid.NewGuid(); // 生成新的 TagId
+
+        var draft = new TagDraft
+        {
+            Id = Guid.NewGuid(),
+            TagId = tagId,
+            Name = name,
+            Description = description,
+            SubmittedBy = submittedBy,
+            SubmittedAt = DateTimeOffset.UtcNow,
+            ReviewStatus = ReviewStatus.Pending,
+            ReviewedBy = null,
+            ReviewedAt = null,
+            ReviewComment = null
+        };
+
+        _context.TagDrafts.Add(draft);
+        await _context.SaveChangesAsync();
+
+        return tagId;
+    }
+
+    public async Task<bool> ApproveTagDraftIfPendingAsync(Guid tagId, string reviewerId)
+    {
+        var draft = await _context.TagDrafts
+            .Where(d => d.TagId == tagId && d.ReviewStatus == ReviewStatus.Pending)
+            .OrderByDescending(d => d.SubmittedAt)
+            .FirstOrDefaultAsync();
+
+        if (draft == null)
+            return false;
+
+        var exists = await _context.Tags.AnyAsync(t => t.Id == tagId);
+        if (!exists)
+        {
+            _context.Tags.Add(new Tags
+            {
+                Id = tagId,
+                Name = draft.Name,
+                Description = draft.Description,
+                CreatedDate = draft.SubmittedAt
+            });
+        }
+
+        draft.ReviewStatus = ReviewStatus.Approved;
+        draft.ReviewedAt = DateTimeOffset.UtcNow;
+        draft.ReviewedBy = reviewerId;
+
+        await _context.SaveChangesAsync();
+        return true;
     }
 }

@@ -38,18 +38,17 @@ public class ResourceRepository : IResourceRepository
             .FirstOrDefaultAsync(r => r.Link == link);
 
         if (existing != null)
-            return existing.Id;
+            return existing.Id.ToString()!;
 
         var newResource = new Resource
         {
-            Id = Guid.NewGuid().ToString(),
+            Id = Guid.NewGuid(),
             Name = name,
             Link = link,
-            Learned = false
         };
 
         _context.Resources.Add(newResource);
         await _context.SaveChangesAsync();
-        return newResource.Id;
+        return newResource.Id.ToString()!;
     }
 }

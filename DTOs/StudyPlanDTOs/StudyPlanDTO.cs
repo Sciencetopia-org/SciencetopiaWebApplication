@@ -32,7 +32,7 @@ public class Lesson
     public string? Name { get; set; }
     public string? Description { get; set; }
     public List<string>? Keywords { get; set; }
-    public List<Resource>? Resources { get; set; }
+    public List<ResourceDTO>? Resources { get; set; }
     public int FinishedResourcesCount { get; set; }
     public float ProgressPercentage { get; set; }
 }

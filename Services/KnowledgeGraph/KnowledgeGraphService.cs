@@ -1,9 +1,13 @@
 using System.Collections;
+using Microsoft.EntityFrameworkCore;
 using Neo4j.Driver;
+using Sciencetopia.Data;
+using Sciencetopia.Models;
 
 public class KnowledgeGraphService
 {
     private readonly IDriver _driver;
+    private readonly ApplicationDbContext _context;
     private readonly IGraphRepository _graphRepository;
     private readonly IKnowledgeNodeRepository _knowledgeRepo;
     private readonly ITagRepository _tagRepo;
@@ -12,6 +16,7 @@ public class KnowledgeGraphService
 
     public KnowledgeGraphService(
         IDriver driver,
+        ApplicationDbContext context,
         IGraphRepository graphRepository,
         IKnowledgeNodeRepository knowledgeRepo,
         ITagRepository tagRepo,
@@ -19,6 +24,7 @@ public class KnowledgeGraphService
         IResourceRepository resourceRepo)
     {
         _driver = driver;
+        _context = context;
         _graphRepository = graphRepository;
         _knowledgeRepo = knowledgeRepo;
         _tagRepo = tagRepo;
@@ -234,7 +240,8 @@ public class KnowledgeGraphService
 
         // 处理 TAGGED_WITH（taggedRelations）关系
         var topicNodesByName = sqlNodes
-            .Where(n => n.TagLevel == "Topic" && !string.IsNullOrEmpty(n.Name))
+            // .Where(n => n.TagLevel == "Topic" && !string.IsNullOrEmpty(n.Name))
+            .Where(n => !string.IsNullOrEmpty(n.Name))
             .GroupBy(n => n.Name)
             .ToDictionary(g => g.Key, g => g.First().Id);
 
@@ -327,6 +334,30 @@ public class KnowledgeGraphService
         return Enumerable.Empty<string>();
     }
 
+    public async Task<object> GetNodeDetailsByIdAsync(string nodeId)
+    {
+        // Fetch node details from the knowledge repository
+        var nodeDetails = await _knowledgeRepo.GetNodeDetailsByIdAsync(nodeId);
+
+        if (!nodeDetails.HasValue)
+        {
+            throw new KeyNotFoundException($"Node with ID {nodeId} not found.");
+        }
+
+        // Fetch related tags from the graph repository
+        var relatedTags = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId);
+
+        return new
+        {
+            Id = nodeId,
+            Name = nodeDetails.Value.Name,
+            Description = nodeDetails.Value.Description,
+            CreatedDate = nodeDetails.Value.CreatedDate,
+            UpdatedDate = nodeDetails.Value.UpdatedDate,
+            Tags = relatedTags
+        };
+    }
+
     public async Task<object> SearchNodeAsync(string query)
     {
         int skip = 0; // Define the starting point for pagination
@@ -339,36 +370,90 @@ public class KnowledgeGraphService
         return await CreateNodeWithResourcesAsync(request, userId);
     }
 
-    public async Task<bool> CreateRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType, string userId)
-    {
-        if (sourceNodeName == null || targetNodeName == null || relationshipType == null)
-            throw new ArgumentNullException("Source node name, target node name, and relationship type are all required.");
+    // public async Task<bool> CreateRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType, string userId)
+    // {
+    //     if (sourceNodeName == null || targetNodeName == null || relationshipType == null)
+    //         throw new ArgumentNullException("Source node name, target node name, and relationship type are all required.");
 
-        using var session = _driver.AsyncSession();
+    //     using var session = _driver.AsyncSession();
 
-        // Construct the query dynamically with the relationship type
-        var query = $@"
-        MATCH (source), (target)
-        WHERE source.name = $sourceNodeName AND target.name = $targetNodeName
-        CREATE (source)-[:{relationshipType} {{status: 'pending_approval', contributor: $userId}}]->(target)
-        RETURN source, target";
+    //     // Construct the query dynamically with the relationship type
+    //     var query = $@"
+    //     MATCH (source), (target)
+    //     WHERE source.name = $sourceNodeName AND target.name = $targetNodeName
+    //     CREATE (source)-[:{relationshipType} {{status: 'pending_approval', contributor: $userId}}]->(target)
+    //     RETURN source, target";
 
-        var result = await session.RunAsync(query, new { sourceNodeName, targetNodeName, userId });
+    //     var result = await session.RunAsync(query, new { sourceNodeName, targetNodeName, userId });
 
-        return await result.FetchAsync(); // True if the operation was successful
-    }
+    //     return await result.FetchAsync(); // True if the operation was successful
+    // }
 
-    public async Task<bool> ApproveNodeAsync(string nodeName)
+    public async Task<bool> ApproveNodeAsync(string nodeName, string reviewerId)
     {
         if (!Guid.TryParse(nodeName, out var nodeId))
             throw new ArgumentException("Invalid nodeName format. Expected a valid Guid.", nameof(nodeName));
 
-        return await _nodeApprovalRepo.ApproveNodeAsync(nodeId);
+        // Step 1: 审核通过知识节点草稿 + 版本控制（只处理 SQL）
+        var nodeSuccess = await _nodeApprovalRepo.ApproveNodeAsync(nodeId, reviewerId);
+        if (!nodeSuccess)
+            return false;
+
+        // Step 2: 查找该节点关联的标签（Neo4j）
+        var tagIds = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId.ToString());
+
+        // Step 3: 对所有 tagId，逐一处理 pending 标签草稿审核 + 主表写入 + 图状态更新
+        foreach (var tagId in tagIds)
+        {
+            var approved = await _tagRepo.ApproveTagDraftIfPendingAsync(Guid.Parse(tagId), reviewerId);
+
+            if (approved)
+            {
+                // 显式更新 Neo4j 标签状态
+                await _graphRepository.SetTagStatusApprovedAsync(Guid.Parse(tagId));
+            }
+        }
+
+        return true;
     }
 
     public async Task<bool> DisapproveNodeAsync(string nodeName)
     {
-        return await _nodeApprovalRepo.DisapproveNodeAsync(nodeName);
+        if (!Guid.TryParse(nodeName, out var nodeId))
+            throw new ArgumentException("Invalid nodeName format. Expected a valid Guid.", nameof(nodeName));
+
+        // Step 1: 拒绝节点草稿（仅 SQL）
+        var result = await _nodeApprovalRepo.DisapproveNodeAsync(nodeName);
+
+        // Step 2: 拒绝相关标签草稿 + Neo4j 标签状态改为 rejected
+        await DisapprovePendingTagsRelatedToNodeAsync(nodeId);
+
+        // Step 3: 解除与资源的关系（Neo4j）
+        await _graphRepository.DetachResourcesFromNodeAsync(nodeId);
+
+        return result;
+    }
+
+    public async Task DisapprovePendingTagsRelatedToNodeAsync(Guid nodeId)
+    {
+        var tagIds = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId.ToString());
+
+        foreach (var tagId in tagIds)
+        {
+            var drafts = await _context.TagDrafts
+                .Where(d => d.TagId == Guid.Parse(tagId) && d.ReviewStatus == ReviewStatus.Pending)
+                .ToListAsync();
+
+            foreach (var draft in drafts)
+            {
+                draft.ReviewStatus = ReviewStatus.Rejected;
+                draft.ReviewedAt = DateTimeOffset.UtcNow;
+            }
+
+            await _graphRepository.SetTagStatusRejectedAsync(Guid.Parse(tagId));
+        }
+
+        await _context.SaveChangesAsync();
     }
 
     public async Task<bool> ResubmitNodeAsync(string nodeName)
@@ -376,55 +461,55 @@ public class KnowledgeGraphService
         return await _nodeApprovalRepo.ResubmitNodeAsync(nodeName);
     }
 
-    public async Task<bool> ApproveRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
-    {
-        if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
+    // public async Task<bool> ApproveRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
+    // {
+    //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+    //         throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
 
-        using var session = _driver.AsyncSession();
-        var result = await session.RunAsync(@"
-            MATCH (source)-[r:$relationshipType]->(target)
-            WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.pending_approval)
-            REMOVE r.pending_approval
-            RETURN source, target",
-            new { sourceNodeName, targetNodeName, relationshipType });
+    //     using var session = _driver.AsyncSession();
+    //     var result = await session.RunAsync(@"
+    //         MATCH (source)-[r:$relationshipType]->(target)
+    //         WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.pending_approval)
+    //         REMOVE r.pending_approval
+    //         RETURN source, target",
+    //         new { sourceNodeName, targetNodeName, relationshipType });
 
-        return await result.FetchAsync(); // True if the operation was successful
-    }
+    //     return await result.FetchAsync(); // True if the operation was successful
+    // }
 
-    public async Task<bool> DisapproveRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
-    {
-        if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
+    // public async Task<bool> DisapproveRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
+    // {
+    //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+    //         throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
 
-        using var session = _driver.AsyncSession();
-        var result = await session.RunAsync(@"
-            MATCH (source)-[r:$relationshipType]->(target)
-            WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.pending_approval)
-            REMOVE r.pending_approval
-            SET r:disapproved
-            RETURN source, target",
-            new { sourceNodeName, targetNodeName, relationshipType });
+    //     using var session = _driver.AsyncSession();
+    //     var result = await session.RunAsync(@"
+    //         MATCH (source)-[r:$relationshipType]->(target)
+    //         WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.pending_approval)
+    //         REMOVE r.pending_approval
+    //         SET r:disapproved
+    //         RETURN source, target",
+    //         new { sourceNodeName, targetNodeName, relationshipType });
 
-        return await result.FetchAsync(); // True if the operation was successful
-    }
+    //     return await result.FetchAsync(); // True if the operation was successful
+    // }
 
-    public async Task<bool> ResubmitRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
-    {
-        if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
-            throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
+    // public async Task<bool> ResubmitRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
+    // {
+    //     if (string.IsNullOrWhiteSpace(sourceNodeName) || string.IsNullOrWhiteSpace(targetNodeName) || string.IsNullOrWhiteSpace(relationshipType))
+    //         throw new ArgumentException("Source node name, target node name, and relationship type are all required.");
 
-        using var session = _driver.AsyncSession();
-        var result = await session.RunAsync(@"
-            MATCH (source)-[r:$relationshipType]->(target)
-            WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.disapproved)
-            REMOVE r.disapproved
-            SET r:pending_approval
-            RETURN source, target",
-            new { sourceNodeName, targetNodeName, relationshipType });
+    //     using var session = _driver.AsyncSession();
+    //     var result = await session.RunAsync(@"
+    //         MATCH (source)-[r:$relationshipType]->(target)
+    //         WHERE source.name = $sourceNodeName AND target.name = $targetNodeName AND EXISTS(r.disapproved)
+    //         REMOVE r.disapproved
+    //         SET r:pending_approval
+    //         RETURN source, target",
+    //         new { sourceNodeName, targetNodeName, relationshipType });
 
-        return await result.FetchAsync(); // True if the operation was successful
-    }
+    //     return await result.FetchAsync(); // True if the operation was successful
+    // }
 
     public async Task<bool> AddResourceAsync(string nodeName, string link, string resourceName = "")
     {
@@ -464,10 +549,10 @@ public class KnowledgeGraphService
 
     public async Task<string> CreateNodeWithResourcesAsync(CreateNodeRequest request, string userId)
     {
-        // Step 1: SQL - 创建节点及其草稿
+        // Step 1: 创建 SQL 草稿
         var nodeId = await _nodeApprovalRepo.CreateDraftAsync(request, userId);
 
-        // Step 2: Neo4j - 创建图节点及资源关系
+        // Step 2: 创建 Neo4j 节点和资源关系
         await _graphRepository.CreateNodeAndResourceInGraphAsync(
             nodeId,
             request.Name,
@@ -476,7 +561,59 @@ public class KnowledgeGraphService
             userId
         );
 
+        // Step 3: 标签处理（抽象模块化）
+        await HandleTagRelationsAsync(
+            nodeId,
+            request.TagIds,
+            request.NewTagNames,
+            userId
+        );
+
         return nodeId.ToString();
+    }
+
+    public async Task<bool> EditNodeAsync(EditNodeRequest request, string userId)
+    {
+        // Step 1: 创建 SQL 草稿（已模块化）
+        await _nodeApprovalRepo.CreateNodeEditDraftAsync(request, userId);
+
+        // Step 2: 模块化标签绑定
+        // 标签逻辑调用已写的私有方法
+        await HandleTagRelationsAsync(
+            request.NodeId,
+            request.TagIds,
+            request.TagNames,
+            userId
+        );
+
+        return await _context.SaveChangesAsync() > 0;
+    }
+
+    private async Task HandleTagRelationsAsync(
+    Guid nodeId,
+    List<Guid>? tagIds,
+    List<string>? newTagNames,
+    string userId)
+    {
+        // Step 1: 已有标签 → 建立 TAGGED_WITH
+        if (tagIds != null && tagIds.Any())
+        {
+            foreach (var tagId in tagIds.Distinct())
+            {
+                await _graphRepository.RelateTagToNodeAsync(tagId, nodeId);
+            }
+        }
+
+        // Step 2: 新标签 → 创建草稿 + Neo4j 草稿节点 + 建立关系
+        if (newTagNames != null && newTagNames.Any())
+        {
+            foreach (var tagName in newTagNames.Distinct())
+            {
+                var tagId = await _tagRepo.CreateTagDraftAsync(tagName, null, userId);
+                await _graphRepository.CreatePendingTagNodeAsync(tagId);
+                await _graphRepository.RelateTagToNodeAsync(tagId, nodeId);
+            }
+        }
     }
 
     public async Task<bool> AddResourceToNodeAsync(string nodeName, string link, string resourceName)

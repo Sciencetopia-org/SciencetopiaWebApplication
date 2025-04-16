@@ -97,39 +97,6 @@ public class StudyGroupService
         return true;
     }
 
-    // public async Task<StudyGroup> GetStudyGroupById(string groupId)
-    // {
-    //     using (var session = _neo4jDriver.AsyncSession())
-    //     {
-    //         var result = await session.ExecuteReadAsync(async tx =>
-    //         {
-    //             var query = @"
-    //                 MATCH (s:StudyGroup {id: $groupId})
-    //                 RETURN s";
-    //             var parameters = new Dictionary<string, object>
-    //             {
-    //                 {"groupId", groupId}
-    //             };
-
-    //             var cursor = await tx.RunAsync(query, parameters);
-    //             return await cursor.ToListAsync();
-    //         });
-
-    //         var studyGroup = new StudyGroup();
-    //         foreach (var record in result)
-    //         {
-    //             // Assuming 's' is a node returned in the record
-    //             var studyGroupNode = record["s"].As<INode>();
-
-    //             studyGroup.Id = studyGroupNode.Properties["id"].As<string>();
-    //             studyGroup.Name = studyGroupNode.Properties["name"].As<string>();
-    //             studyGroup.Description = studyGroupNode.Properties["description"].As<string>();
-    //         }
-
-    //         return studyGroup;
-    //     }
-    // }
-
     public async Task<List<StudyGroup>> GetAllStudyGroups()
     {
         var sqlGroups = await _context.StudyGroups
@@ -255,6 +222,32 @@ public class StudyGroupService
             MemberIds = members,
             Status = entity.Status
         };
+    }
+
+    public async Task<List<StudyGroup>> SearchStudyGroups(string query, int skip, int take)
+    {
+        var sqlGroups = await _context.StudyGroups
+            .Where(g => EF.Functions.Like(g.Name.ToLower(), $"%{query.ToLower()}%") && g.Status == "approved")
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync();
+
+        var enrichedGroups = new List<StudyGroup>();
+        foreach (var entity in sqlGroups)
+        {
+            var groupId = entity.Id.ToString(); // Assuming Id is a Guid
+            var members = await GetStudyGroupMembers(groupId);
+            enrichedGroups.Add(new StudyGroup
+            {
+                Id = groupId,
+                Name = entity.Name,
+                Description = entity.Description,
+                MemberIds = members,
+                Status = entity.Status
+            });
+        }
+
+        return enrichedGroups;
     }
 
     private async Task DeleteStudyGroupFromDatabaseAsync(string groupId)

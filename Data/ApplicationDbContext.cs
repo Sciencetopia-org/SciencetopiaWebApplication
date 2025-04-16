@@ -21,11 +21,13 @@ namespace Sciencetopia.Data
         // Add the KnowledgeNodes DbSet
         public DbSet<KnowledgeNode> KnowledgeNodes { get; set; }
         public DbSet<KnowledgeNodeDraft> KnowledgeNodeDrafts { get; set; } // New KnowledgeNodeDraft DbSet
+        public DbSet<KnowledgeNodeVersion> KnowledgeNodeVersions { get; set; } // New KnowledgeNodeVersion DbSet
         public DbSet<TypesOfTags> TypesOfTags { get; set; }
         public DbSet<TagTypes> TagTypes { get; set; }
         // Add the Tags DbSet
         public DbSet<Tags> Tags { get; set; }
         public DbSet<TagDraft> TagDrafts { get; set; } // New TagDraft DbSet
+        public DbSet<TagVersion> TagVersions { get; set; } // New TagVersion DbSet
         public DbSet<Favorite> Favorites { get; set; } // New Favorite DbSet
         public DbSet<StudyGroupEntity> StudyGroups { get; set; } // New StudyGroupEntity DbSet
         public DbSet<Resource> Resources { get; set; } // New Resource DbSet

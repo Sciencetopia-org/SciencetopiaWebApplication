@@ -32,11 +32,20 @@ builder.Services.AddScoped<NotificationService>();
 builder.Services.AddScoped<EmailTemplateService>();
 builder.Services.AddScoped<UserActivityService>();
 builder.Services.AddScoped<DailySummaryService>();
+builder.Services.AddScoped<SearchService>();
 
 builder.Services.AddScoped<GroupManagerAuthorizeAttribute>(); // Register the custom authorization attribute
 
 // Register the custom IUserIdProvider
 builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
+
+builder.Services.AddScoped<IGraphRepository, GraphRepository>();
+builder.Services.AddScoped<IKnowledgeNodeRepository, KnowledgeNodeRepository>();
+builder.Services.AddScoped<ITagRepository, TagRepository>();
+builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
+builder.Services.AddScoped<INodeApprovalRepository, NodeApprovalRepository>();
+builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
+builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
 
 // Add SignalR service
 builder.Services.AddSignalR();
@@ -88,13 +97,6 @@ builder.Services.AddSingleton(x =>
     var connectionString = configuration["AzureBlobStorage:ConnectionString"];
     return new BlobServiceClient(connectionString);
 });
-builder.Services.AddScoped<IGraphRepository, GraphRepository>();
-builder.Services.AddScoped<IKnowledgeNodeRepository, KnowledgeNodeRepository>();
-builder.Services.AddScoped<ITagRepository, TagRepository>();
-builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
-builder.Services.AddScoped<INodeApprovalRepository, NodeApprovalRepository>();
-builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
-builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
 
 // // 注册您的 DataSyncService 作为后台服务
 // builder.Services.AddHostedService<DataSyncService>();

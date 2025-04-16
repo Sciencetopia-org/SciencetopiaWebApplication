@@ -37,7 +37,7 @@ public interface IGraphRepository
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
     Task<HashSet<string>> GetAllTagsRelatedToNodesAsync(IEnumerable<string> nodeIds);
-
+    Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId);
     /// <summary>
     /// 根据标签类型获取标签节点的 Id
     /// </summary>
@@ -56,6 +56,12 @@ public interface IGraphRepository
     Task CreateNodeAndResourceInGraphAsync(Guid nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
     Task<bool> LinkResourceToNodeAsync(string nodeName, string resourceId);
+    Task CreateTagNodeIfNotExistsAsync(Guid tagId);
+    Task RelateTagToNodeAsync(Guid tagId, Guid nodeId);
+    Task CreatePendingTagNodeAsync(Guid tagId);
+    Task SetTagStatusApprovedAsync(Guid tagId);
+    Task SetTagStatusRejectedAsync(Guid tagId);
+    Task DetachResourcesFromNodeAsync(Guid nodeId);
 }
 
 public class GraphRepository : IGraphRepository
@@ -153,7 +159,7 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE t.id IN $tagIds
+        WHERE t.id IN $tagIds AND NOT n.status <> 'pending_approval'
         RETURN n.id AS NodeId
         ";
         var parameters = new Dictionary<string, object>
@@ -165,6 +171,25 @@ public class GraphRepository : IGraphRepository
 
         var records = await result.ToListAsync();
         return records.Select(record => record["NodeId"].As<string>()).ToHashSet();
+    }
+
+    public async Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId)
+    {
+        using var session = _driver.AsyncSession();
+        var query = @"
+        MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
+        WHERE n.id = $nodeId
+        RETURN t.id AS TagId
+        ";
+        var parameters = new Dictionary<string, object>
+        {
+            { "nodeId", nodeId.ToLower() }
+        };
+
+        var result = await session.RunAsync(query, parameters);
+
+        var records = await result.ToListAsync();
+        return records.Select(record => record["TagId"].As<string>()).ToHashSet();
     }
 
     public async Task<HashSet<string>> GetAllTagsRelatedToNodesAsync(IEnumerable<string> nodeIds)
@@ -274,11 +299,11 @@ public class GraphRepository : IGraphRepository
         var query = @"
         MERGE (n:KnowledgeNode {id: $nodeId})
         SET n.name = $name, n.description = $description
-        SET n:pending_approval
+        SET n.status = 'pending_approval'
         WITH n
         UNWIND $links AS l
         MERGE (r:Resource {link: l})
-        SET r:pending_approval
+        SET r.status = 'pending_approval'
         MERGE (n)-[:HAS_RESOURCE {status: 'pending_approval', contributor: $userId}]->(r)
         WITH n
         MERGE (u:User {id: $userId})
@@ -334,6 +359,120 @@ public class GraphRepository : IGraphRepository
         {
             Console.WriteLine($"Neo4j error in LinkResourceToNodeAsync: {ex.Message}");
             return false;
+        }
+    }
+
+    public async Task CreateTagNodeIfNotExistsAsync(Guid tagId)
+    {
+        var query = @"MERGE (t:Tag {id: $tagId})";
+        using var session = _driver.AsyncSession();
+        var results = await session.RunAsync(query, new Dictionary<string, object> { { "tagId", tagId.ToString() } });
+        await results.FetchAsync();
+    }
+
+    public async Task RelateTagToNodeAsync(Guid tagId, Guid nodeId)
+    {
+        var query = @"
+        MATCH (t:Tag {id: $tagId})
+        MATCH (n:KnowledgeNode {id: $nodeId})
+        MERGE (t)-[:TAGGED_WITH {status: 'pending_approval'}]->(n)";
+
+        var parameters = new Dictionary<string, object>
+    {
+        { "tagId", tagId.ToString() },
+        { "nodeId", nodeId.ToString() }
+    };
+
+        var session = _driver.AsyncSession();
+
+        try
+        {
+            await session.RunAsync(query, parameters);
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task CreatePendingTagNodeAsync(Guid tagId)
+    {
+        var query = @"
+        MERGE (t:Tag {id: $tagId})
+        SET t.status = 'pending_approval'";
+
+        var parameters = new Dictionary<string, object>
+    {
+        { "tagId", tagId.ToString() }
+    };
+
+        var session = _driver.AsyncSession(); // _neo4jDriver 是 IDriver 实例
+
+        try
+        {
+            await session.RunAsync(query, parameters);
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task SetTagStatusApprovedAsync(Guid tagId)
+    {
+        var query = @"
+        MATCH (t:Tag {id: $tagId})
+        SET t.status = 'approved'";
+
+        var parameters = new Dictionary<string, object>
+    {
+        { "tagId", tagId.ToString() }
+    };
+
+        // 开启一个 Neo4j 会话（写模式）
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+
+        try
+        {
+            await session.RunAsync(query, parameters);
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task SetTagStatusRejectedAsync(Guid tagId)
+    {
+        var query = @"
+        MATCH (t:Tag {id: $tagId})
+        SET t.status = 'rejected'";
+
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        try
+        {
+            await session.RunAsync(query, new { tagId = tagId.ToString() });
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task DetachResourcesFromNodeAsync(Guid nodeId)
+    {
+        var query = @"
+        MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(:Resource)
+        DELETE r";
+
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        try
+        {
+            await session.RunAsync(query, new { nodeId = nodeId.ToString() });
+        }
+        finally
+        {
+            await session.CloseAsync();
         }
     }
 }

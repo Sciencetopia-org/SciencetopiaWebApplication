@@ -11,13 +11,16 @@ namespace Sciencetopia.Controllers.SearchEngine
     {
         private readonly IKnowledgeNodeRepository _knowledgeRepo;
         private readonly SearchService _searchService;
+        private readonly StudyGroupService _studyGroupService;
 
         public SearchController(
             IKnowledgeNodeRepository knowledgeRepo,
-            SearchService searchService)
+            SearchService searchService,
+            StudyGroupService studyGroupService)
         {
             _knowledgeRepo = knowledgeRepo;
             _searchService = searchService;
+            _studyGroupService = studyGroupService;
         }
 
         [HttpGet("SearchKnowledgeBase")]
@@ -41,5 +44,27 @@ namespace Sciencetopia.Controllers.SearchEngine
             var result = await _searchService.SearchResourcesWithLinkedNodesAsync(query, skip, pageSize);
             return Ok(result);
         }
+
+        [HttpGet("SearchStudyGroups")]
+        public async Task<IActionResult> SearchStudyGroupsAsync(string query, int page = 1, int pageSize = 10)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return BadRequest("Query parameter is required.");
+
+            var skip = (page - 1) * pageSize;
+            var result = await _studyGroupService.SearchStudyGroups(query, skip, pageSize);
+            return Ok(result);
+        }
+
+        // [HttpGet("SearchStudyPlans")]
+        // public async Task<IActionResult> SearchStudyPlansAsync(string query, int page = 1, int pageSize = 10)
+        // {
+        //     if (string.IsNullOrWhiteSpace(query))
+        //         return BadRequest("Query parameter is required.");
+
+        //     var skip = (page - 1) * pageSize;
+        //     var result = await _searchService.SearchStudyPlans(query, skip, pageSize);
+        //     return Ok(result);
+        // }
     }
 }
