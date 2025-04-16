@@ -62,6 +62,7 @@ public interface IGraphRepository
     Task SetTagStatusApprovedAsync(Guid tagId);
     Task SetTagStatusRejectedAsync(Guid tagId);
     Task DetachResourcesFromNodeAsync(Guid nodeId);
+    Task ApproveNodeResourceRelationsAsync(Guid nodeId);
 }
 
 public class GraphRepository : IGraphRepository
@@ -464,6 +465,23 @@ public class GraphRepository : IGraphRepository
         var query = @"
         MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(:Resource)
         DELETE r";
+
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        try
+        {
+            await session.RunAsync(query, new { nodeId = nodeId.ToString() });
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    public async Task ApproveNodeResourceRelationsAsync(Guid nodeId)
+    {
+        var query = @"
+        MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(res:Resource)
+        REMOVE r.status";
 
         var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
         try

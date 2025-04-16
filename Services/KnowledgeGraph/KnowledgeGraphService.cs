@@ -414,6 +414,9 @@ public class KnowledgeGraphService
             }
         }
 
+        // Step 4: 审核节点与资源之间的关系
+        await _graphRepository.ApproveNodeResourceRelationsAsync(nodeId);
+
         return true;
     }
 
