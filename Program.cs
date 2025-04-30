@@ -46,6 +46,7 @@ builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
 builder.Services.AddScoped<INodeApprovalRepository, NodeApprovalRepository>();
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
 builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
+builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
 
 // Add SignalR service
 builder.Services.AddSignalR();
