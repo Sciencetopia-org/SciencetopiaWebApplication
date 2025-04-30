@@ -423,7 +423,7 @@ public class GraphRepository : IGraphRepository
     {
         var query = @"
         MATCH (t:Tag {id: $tagId})
-        SET t.status = 'approved'";
+        REMOVE t.status";
 
         var parameters = new Dictionary<string, object>
     {

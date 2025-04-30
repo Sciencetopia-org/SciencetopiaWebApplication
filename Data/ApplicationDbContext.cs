@@ -31,6 +31,8 @@ namespace Sciencetopia.Data
         public DbSet<Favorite> Favorites { get; set; } // New Favorite DbSet
         public DbSet<StudyGroupEntity> StudyGroups { get; set; } // New StudyGroupEntity DbSet
         public DbSet<Resource> Resources { get; set; } // New Resource DbSet
+        public DbSet<StudyPlanEntity> StudyPlans { get; set; }
+        public DbSet<LessonEntity> Lessons { get; set; }
 
         protected override void OnModelCreating(ModelBuilder builder)
         {

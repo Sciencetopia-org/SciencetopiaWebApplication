@@ -7,6 +7,7 @@ public class StudyPlanService
 {
     private readonly IDriver _neo4jDriver;
     private readonly ILogger<StudyPlanService> _logger;
+    private readonly IStudyPlanRepository _sqlRepository;
 
     public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger)
     {
@@ -19,116 +20,118 @@ public class StudyPlanService
         var session = _neo4jDriver.AsyncSession();
         try
         {
-            // Check if a study plan with the same title already exists
-            var existingPlanCheck = await session.ExecuteReadAsync(async transaction =>
-            {
-                var result = await transaction.RunAsync($@"
-            MATCH (u:User {{id: $userId}})-[:CREATED]->(p:StudyPlan {{title: $title}})
-            RETURN p", new { userId, title = studyPlanDTO.StudyPlan?.Title });
+            var studyPlan = studyPlanDTO.StudyPlan;
+            var studyPlanId = Guid.NewGuid().ToString();
 
-                var record = await result.ToListAsync();
-                return record.Any();
+            // Step 1: Insert StudyPlan into SQL
+            await _sqlRepository.InsertStudyPlanAsync(new StudyPlanEntity
+            {
+                Id = Guid.Parse(studyPlanId),
+                Title = studyPlan.Title,
+                Description = studyPlan.Introduction?.Description,
+                CreatorId = Guid.Parse(userId)
             });
 
-            if (existingPlanCheck)
+            // Step 2: Insert Lessons and Resources into SQL
+            var allLessons = studyPlan.Prerequisite.Concat(studyPlan.MainCurriculum).Concat(studyPlan.AdvancedTopics).ToList();
+            foreach (var lesson in allLessons)
             {
-                return false;
+                var lessonId = lesson.Id ?? Guid.NewGuid().ToString();
+                lesson.Id = lessonId;
+
+                await _sqlRepository.InsertLessonAsync(new LessonEntity
+                {
+                    Id = Guid.Parse(lessonId),
+                    Title = lesson.Name,
+                    Description = lesson.Description,
+                });
+
+                foreach (var resource in lesson.Resources)
+                {
+                    var resourceId = resource.Id ?? Guid.NewGuid().ToString();
+                    resource.Id = resourceId;
+
+                    await _sqlRepository.InsertResourceAsync(new Resource
+                    {
+                        Id = Guid.Parse(resourceId),
+                        Name = resource.Name,
+                        Link = resource.Link
+                    });
+                }
             }
 
-            // Proceed to create a new study plan
+            // Step 3: Insert into Neo4j
             await session.ExecuteWriteAsync(async transaction =>
             {
-                var studyPlan = studyPlanDTO.StudyPlan;
-                var studyPlanId = Guid.NewGuid().ToString(); // Create unique study plan id
+                await transaction.RunAsync("CREATE (p:StudyPlan {id: $id})", new { id = studyPlanId });
 
-                // Create the StudyPlan node with a unique id
-                await transaction.RunAsync($@"
-            CREATE (p:StudyPlan {{id: $studyPlanId, title: $title, introduction: $introduction, keywords: $keywords}})
-            RETURN p", new { studyPlanId, title = studyPlan?.Title, introduction = studyPlan?.Introduction?.Description, keywords = studyPlan?.Introduction?.Keywords });
+                int orderCounter = 0;
+                foreach (var (lesson, type) in GetLessonsWithType(studyPlan))
+                {
+                    orderCounter++;
 
-                // Connect the User to the StudyPlan
-                await transaction.RunAsync($@"
-            MATCH (u:User {{id: $userId}}), (p:StudyPlan {{id: $studyPlanId}})
-            MERGE (u)-[:CREATED]->(p)",
+                    await transaction.RunAsync(@"
+                    MATCH (p:StudyPlan {id: $studyPlanId})
+                    MERGE (l:Lesson {id: $lessonId})
+                    MERGE (p)-[:HAS_STEP {type: $type, order: $order}]->(l)",
+                        new { studyPlanId, lessonId = lesson.Id, type, order = orderCounter });
+
+                    foreach (var resource in lesson.Resources)
+                    {
+                        await transaction.RunAsync(@"
+                        MATCH (l:Lesson {id: $lessonId})
+                        MERGE (r:Resource {id: $resourceId})
+                        MERGE (l)-[:HAS_RESOURCE]->(r)",
+                            new { lessonId = lesson.Id, resourceId = resource.Id });
+                    }
+
+                    // Associate Lesson with KnowledgeNodes
+                    if (lesson.AssociatedKnowledgeNodes != null)
+                    {
+                        foreach (var knowledgeNode in lesson.AssociatedKnowledgeNodes)
+                        {
+                            await transaction.RunAsync(@"
+                            MATCH (l:Lesson {id: $lessonId}), (k:KnowledgeNode {id: $knowledgeNodeId})
+                            MERGE (l)-[:ASSOCIATED_WITH]->(k)",
+                                new { lessonId = lesson.Id, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                        }
+                    }
+                }
+
+                // Associate StudyPlan Introduction with KnowledgeNodes
+                if (studyPlan.Introduction?.AssociatedKnowledgeNodes != null)
+                {
+                    foreach (var knowledgeNode in studyPlan.Introduction.AssociatedKnowledgeNodes)
+                    {
+                        await transaction.RunAsync(@"
+                        MATCH (p:StudyPlan {id: $studyPlanId}), (k:KnowledgeNode {id: $knowledgeNodeId})
+                        MERGE (p)-[:ASSOCIATED_WITH]->(k)",
+                            new { studyPlanId, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                    }
+                }
+
+                await transaction.RunAsync(@"
+                MATCH (u:User {id: $userId}), (p:StudyPlan {id: $studyPlanId})
+                MERGE (u)-[:CREATED]->(p)",
                     new { userId, studyPlanId });
-
-                // Handle prerequisites
-                foreach (var lesson in studyPlan.Prerequisite)
-                {
-                    var lessonId = Guid.NewGuid().ToString(); // Create unique lesson id
-
-                    // Merge the lesson by id and set name and description
-                    await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})
-                MERGE (l:Lesson {{id: $lessonId}})
-                ON CREATE SET l.name = $name, l.description = $description, l.keywords = $keywords
-                MERGE (p)-[:HAS_PREREQUISITE]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description, keywords = lesson.Keywords });
-
-                    // Add resources for each prerequisite lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        await transaction.RunAsync($@"
-                    MATCH (l:Lesson {{id: $lessonId}})
-                    MERGE (r:Resource {{name: $resourceName, link: $resourceLink}})
-                    MERGE (l)-[:HAS_RESOURCE]->(r)",
-                            new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                    }
-                }
-
-                // Handle main curriculum
-                foreach (var lesson in studyPlan.MainCurriculum)
-                {
-                    var lessonId = Guid.NewGuid().ToString(); // Create unique lesson id
-
-                    await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})
-                MERGE (l:Lesson {{id: $lessonId}})
-                ON CREATE SET l.name = $name, l.description = $description, l.keywords = $keywords
-                MERGE (p)-[:HAS_MAIN_CURRICULUM]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description, keywords = lesson.Keywords });
-
-                    // Add resources for each main curriculum lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        await transaction.RunAsync($@"
-                    MATCH (l:Lesson {{id: $lessonId}})
-                    MERGE (r:Resource {{name: $resourceName, link: $resourceLink}})
-                    MERGE (l)-[:HAS_RESOURCE]->(r)",
-                            new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                    }
-                }
-
-                // Handle advanced topics
-                foreach (var lesson in studyPlan.AdvancedTopics)
-                {
-                    var lessonId = Guid.NewGuid().ToString(); // Create unique lesson id
-
-                    await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})
-                MERGE (l:Lesson {{id: $lessonId}})
-                ON CREATE SET l.name = $name, l.description = $description, l.keywords = $keywords
-                MERGE (p)-[:HAS_ADVANCED_TOPIC]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description, keywords = lesson.Keywords });
-
-                    // Add resources for each advanced topic lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        await transaction.RunAsync($@"
-                    MATCH (l:Lesson {{id: $lessonId}})
-                    MERGE (r:Resource {{name: $resourceName, link: $resourceLink}})
-                    MERGE (l)-[:HAS_RESOURCE]->(r)",
-                            new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                    }
-                }
             });
 
-            return true; // Return true to indicate success
+            return true;
         }
         finally
         {
             await session.CloseAsync();
         }
+    }
+
+    private IEnumerable<(Lesson lesson, string type)> GetLessonsWithType(StudyPlanDetail studyPlan)
+    {
+        foreach (var lesson in studyPlan.Prerequisite)
+            yield return (lesson, "PREREQUISITE");
+        foreach (var lesson in studyPlan.MainCurriculum)
+            yield return (lesson, "MAIN_CURRICULUM");
+        foreach (var lesson in studyPlan.AdvancedTopics)
+            yield return (lesson, "ADVANCED_TOPIC");
     }
 
     public async Task<bool> UpdateStudyPlanAsync(StudyPlanDTO updatedStudyPlan)
@@ -138,7 +141,7 @@ public class StudyPlanService
         {
             var studyPlanId = updatedStudyPlan.StudyPlan.Id;
 
-            // Check if the study plan exists
+            // Step 1: 确认 StudyPlan 存在
             var existingPlanCheck = await session.ExecuteReadAsync(async transaction =>
             {
                 var result = await transaction.RunAsync($@"
@@ -146,129 +149,120 @@ public class StudyPlanService
                 RETURN p", new { studyPlanId });
 
                 var recordList = await result.ToListAsync();
-                return recordList.Any(); // Check if any records were returned
+                return recordList.Any();
             });
 
             if (!existingPlanCheck)
             {
                 _logger.LogError("StudyPlan with ID {studyPlanId} does not exist.", studyPlanId);
-                return false; // Study plan does not exist
+                return false;
             }
 
-            // Update the study plan details
-            await session.ExecuteWriteAsync(async transaction =>
+            var studyPlan = updatedStudyPlan.StudyPlan;
+
+            // Step 2: 更新 SQL 中的 StudyPlan 基本信息
+            await _sqlRepository.UpdateStudyPlanAsync(new StudyPlanEntity
             {
-                var studyPlan = updatedStudyPlan.StudyPlan;
-
-                // Update the StudyPlan node (title and introduction)
-                await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})
-                SET p.title = $title, p.introduction = $introduction",
-                    new { studyPlanId, title = studyPlan?.Title, introduction = studyPlan?.Introduction?.Description });
-
-                // Delete old relationships (but not the lessons or resources themselves)
-                await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})-[r:HAS_PREREQUISITE|HAS_MAIN_CURRICULUM|HAS_ADVANCED_TOPIC]->(l:Lesson)
-                DELETE r", new { studyPlanId });
-
-                // List of lesson IDs in the updated study plan
-                var updatedLessonIds = new List<string>();
-
-                // Update prerequisites
-                foreach (var lesson in studyPlan.Prerequisite)
-                {
-                    var lessonId = lesson.Id ?? Guid.NewGuid().ToString();
-                    updatedLessonIds.Add(lessonId); // Add to updated list
-
-                    // Merge the lesson node by id and link it to the study plan
-                    await transaction.RunAsync($@"
-                    MATCH (p:StudyPlan {{id: $studyPlanId}})
-                    MERGE (l:Lesson {{id: $lessonId}})
-                    ON CREATE SET l.name = $name, l.description = $description
-                    MERGE (p)-[:HAS_PREREQUISITE]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description });
-
-                    // Add resources for each prerequisite lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        if (!string.IsNullOrEmpty(resource.Name) && !string.IsNullOrEmpty(resource.Link))
-                        {
-                            await transaction.RunAsync($@"
-                            MATCH (l:Lesson {{id: $lessonId}})
-                            MERGE (r:Resource {{link: $resourceLink}})
-                            ON CREATE SET r.name = $resourceName
-                            MERGE (l)-[:HAS_RESOURCE]->(r)",
-                                new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                        }
-                    }
-                }
-
-                // Update main curriculum
-                foreach (var lesson in studyPlan.MainCurriculum)
-                {
-                    var lessonId = lesson.Id ?? Guid.NewGuid().ToString();
-                    updatedLessonIds.Add(lessonId); // Add to updated list
-
-                    // Merge the lesson node by id and link it to the study plan
-                    await transaction.RunAsync($@"
-                    MATCH (p:StudyPlan {{id: $studyPlanId}})
-                    MERGE (l:Lesson {{id: $lessonId}})
-                    ON CREATE SET l.name = $name, l.description = $description
-                    MERGE (p)-[:HAS_MAIN_CURRICULUM]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description });
-
-                    // Add resources for each main curriculum lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        if (!string.IsNullOrEmpty(resource.Name) && !string.IsNullOrEmpty(resource.Link))
-                        {
-                            await transaction.RunAsync($@"
-                            MATCH (l:Lesson {{id: $lessonId}})
-                            MERGE (r:Resource {{link: $resourceLink}})
-                            ON CREATE SET r.name = $resourceName
-                            MERGE (l)-[:HAS_RESOURCE]->(r)",
-                                new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                        }
-                    }
-                }
-
-                // Update advanced topics
-                foreach (var lesson in studyPlan.AdvancedTopics)
-                {
-                    var lessonId = lesson.Id ?? Guid.NewGuid().ToString();
-                    updatedLessonIds.Add(lessonId); // Add to updated list
-
-                    // Merge the lesson node by id and link it to the study plan
-                    await transaction.RunAsync($@"
-                    MATCH (p:StudyPlan {{id: $studyPlanId}})
-                    MERGE (l:Lesson {{id: $lessonId}})
-                    ON CREATE SET l.name = $name, l.description = $description
-                    MERGE (p)-[:HAS_ADVANCED_TOPIC]->(l)",
-                        new { studyPlanId, lessonId, name = lesson.Name, description = lesson.Description });
-
-                    // Add resources for each advanced topic lesson
-                    foreach (var resource in lesson.Resources)
-                    {
-                        if (!string.IsNullOrEmpty(resource.Name) && !string.IsNullOrEmpty(resource.Link))
-                        {
-                            await transaction.RunAsync($@"
-                            MATCH (l:Lesson {{id: $lessonId}})
-                            MERGE (r:Resource {{link: $resourceLink}})
-                            ON CREATE SET r.name = $resourceName
-                            MERGE (l)-[:HAS_RESOURCE]->(r)",
-                                new { lessonId, resourceName = resource.Name, resourceLink = resource.Link });
-                        }
-                    }
-                }
-
-                // Remove lessons not included in the updated study plan
-                await transaction.RunAsync($@"
-                MATCH (p:StudyPlan {{id: $studyPlanId}})-[r:HAS_PREREQUISITE|HAS_MAIN_CURRICULUM|HAS_ADVANCED_TOPIC]->(l:Lesson)
-                WHERE NOT l.id IN $updatedLessonIds
-                DETACH DELETE l", new { studyPlanId, updatedLessonIds });
+                Id = Guid.Parse(studyPlanId),
+                Title = studyPlan.Title,
+                Description = studyPlan.Introduction?.Description,
+                UpdatedDate = DateTime.UtcNow
             });
 
-            return true; // Successfully updated
+            // Step 3: 更新 SQL 中 Lessons 基本信息
+            var allLessons = studyPlan.Prerequisite.Concat(studyPlan.MainCurriculum).Concat(studyPlan.AdvancedTopics).ToList();
+            foreach (var lesson in allLessons)
+            {
+                if (!string.IsNullOrEmpty(lesson.Id))
+                {
+                    await _sqlRepository.UpdateLessonAsync(new LessonEntity
+                    {
+                        Id = Guid.Parse(lesson.Id),
+                        Title = lesson.Name,
+                        Description = lesson.Description,
+                        UpdatedDate = DateTime.UtcNow
+                    });
+                }
+            }
+
+            // Step 4: 更新 Neo4j 中 StudyPlan 和 Lesson 的关系
+            await session.ExecuteWriteAsync(async transaction =>
+            {
+                // 删除旧 HAS_STEP
+                await transaction.RunAsync(@"
+                MATCH (p:StudyPlan {id: $studyPlanId})-[r:HAS_STEP]->(l:Lesson)
+                DELETE r", new { studyPlanId });
+
+                int orderCounter = 0;
+                foreach (var (lesson, type) in GetLessonsWithType(studyPlan))
+                {
+                    orderCounter++;
+
+                    // Merge Lesson节点，仅根据id
+                    await transaction.RunAsync(@"
+                    MERGE (l:Lesson {id: $lessonId})",
+                        new { lessonId = lesson.Id });
+
+                    // 创建 HAS_STEP 关系
+                    await transaction.RunAsync(@"
+                    MATCH (p:StudyPlan {id: $studyPlanId}), (l:Lesson {id: $lessonId})
+                    MERGE (p)-[:HAS_STEP {type: $type, order: $order}]->(l)",
+                        new { studyPlanId, lessonId = lesson.Id, type, order = orderCounter });
+
+                    // 删除旧 ASSOCIATED_WITH（Lesson）
+                    await transaction.RunAsync(@"
+                    MATCH (l:Lesson {id: $lessonId})-[r:ASSOCIATED_WITH]->(k:KnowledgeNode)
+                    DELETE r",
+                        new { lessonId = lesson.Id });
+
+                    // 重建新的 ASSOCIATED_WITH（Lesson）
+                    if (lesson.AssociatedKnowledgeNodes != null)
+                    {
+                        foreach (var knowledgeNode in lesson.AssociatedKnowledgeNodes)
+                        {
+                            await transaction.RunAsync(@"
+                            MATCH (l:Lesson {id: $lessonId}), (k:KnowledgeNode {id: $knowledgeNodeId})
+                            MERGE (l)-[:ASSOCIATED_WITH]->(k)",
+                                new { lessonId = lesson.Id, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                        }
+                    }
+
+                    // 更新 Lesson 的 Resource 关系
+                    foreach (var resource in lesson.Resources)
+                    {
+                        if (!string.IsNullOrEmpty(resource.Name) && !string.IsNullOrEmpty(resource.Link))
+                        {
+                            await transaction.RunAsync(@"
+                            MERGE (r:Resource {id: $resourceId})
+                            ON CREATE SET r.name = $resourceName, r.link = $resourceLink
+                            ON MATCH SET r.name = $resourceName, r.link = $resourceLink
+                            WITH r
+                            MATCH (l:Lesson {id: $lessonId})
+                            MERGE (l)-[:HAS_RESOURCE]->(r)",
+                                new { lessonId = lesson.Id, resourceId = resource.Id, resourceName = resource.Name, resourceLink = resource.Link });
+                        }
+                    }
+                }
+
+                // 删除旧 ASSOCIATED_WITH（StudyPlan）
+                await transaction.RunAsync(@"
+                MATCH (p:StudyPlan {id: $studyPlanId})-[r:ASSOCIATED_WITH]->(k:KnowledgeNode)
+                DELETE r", new { studyPlanId });
+
+                // 重建新的 ASSOCIATED_WITH（StudyPlan）
+                if (studyPlan.Introduction?.AssociatedKnowledgeNodes != null)
+                {
+                    foreach (var knowledgeNode in studyPlan.Introduction.AssociatedKnowledgeNodes)
+                    {
+                        await transaction.RunAsync(@"
+                        MATCH (p:StudyPlan {id: $studyPlanId}), (k:KnowledgeNode {id: $knowledgeNodeId})
+                        MERGE (p)-[:ASSOCIATED_WITH]->(k)",
+                            new { studyPlanId, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                    }
+                }
+            });
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -280,94 +274,132 @@ public class StudyPlanService
             await session.CloseAsync();
         }
     }
+
     public async Task<List<StudyPlanDTO>> GetStudyPlansByUserIdAsync(string currentUserId, string targetUserId)
     {
         using var session = _neo4jDriver.AsyncSession();
         try
         {
-            var studyPlanResults = new List<StudyPlanDTO>();
+            // 1. 从SQL拉取StudyPlan内容
+            var studyPlans = await _sqlRepository.GetStudyPlansByUserIdAsync(targetUserId); // StudyPlanEntity列表
+            var studyPlanIds = studyPlans.Select(sp => sp.Id.ToString()).ToList();
 
-            // Modify the query to include privacy checks
-            var result = await session.RunAsync($@"
-            MATCH (u:User {{id: $targetUserId}})-[:CREATED]->(sp:StudyPlan)
+            // 2. 从Neo4j拉取所有Lesson关系
+            var lessonInfo = await GetLessonIdsByStudyPlanIdsAsync(studyPlanIds);
+
+            // 3. 拿到所有LessonId
+            var lessonIds = lessonInfo.Select(x => x.LessonId).Distinct().ToList();
+
+            // 4. 从SQL拉取Lessons
+            var lessons = await GetLessonsByIdsAsync(lessonIds);
+
+            // 5. 从Neo4j拉取Lesson->Resource关系
+            var resourceInfo = await GetResourceIdsByLessonIdsAsync(lessonIds);
+
+            // 6. 拿到所有ResourceId
+            var resourceIds = resourceInfo.SelectMany(x => x.Value).Distinct().ToList();
+
+            // 7. 从SQL拉取Resources
+            var resources = await GetResourcesByIdsAsync(resourceIds);
+
+            // Step 4. 从Neo4j拉取结构关系（HAS_STEP, HAS_RESOURCE, ASSOCIATED_WITH）
+            var cypherQuery = @"
+            MATCH (u:User {id: $targetUserId})-[:CREATED]->(sp:StudyPlan)
             WHERE sp.privacy = 'public' OR sp.privacy = 'shared' OR u.id = $currentUserId
-            OPTIONAL MATCH (sp)-[:HAS_PREREQUISITE]->(pr:Lesson)
-            OPTIONAL MATCH (pr)-[:HAS_RESOURCE]->(prRes:Resource)
-            OPTIONAL MATCH (sp)-[:HAS_MAIN_CURRICULUM]->(mc:Lesson)
-            OPTIONAL MATCH (mc)-[:HAS_RESOURCE]->(mcRes:Resource)
-            OPTIONAL MATCH (sp)-[:HAS_ADVANCED_TOPIC]->(at:Lesson)
-            OPTIONAL MATCH (at)-[:HAS_RESOURCE]->(atRes:Resource)
-            WITH sp, pr, prRes, mc, mcRes, at, atRes,
-                 EXISTS((pr)-[:FINISHED_LEARNING {{userId: u.id}}]->(prRes)) AS prLearned,
-                 EXISTS((mc)-[:FINISHED_LEARNING {{userId: u.id}}]->(mcRes)) AS mcLearned,
-                 EXISTS((at)-[:FINISHED_LEARNING {{userId: u.id}}]->(atRes)) AS atLearned
-            WITH sp, pr, mc, at,
-                 collect(DISTINCT {{resource: prRes.link, name: prRes.name, learned: prLearned}}) AS prResources,
-                 collect(DISTINCT {{resource: mcRes.link, name: mcRes.name, learned: mcLearned}}) AS mcResources,
-                 collect(DISTINCT {{resource: atRes.link, name: atRes.name, learned: atLearned}}) AS atResources
-            RETURN sp AS StudyPlan, 
-                   sp.id AS studyPlanId,
-                   collect(DISTINCT {{lesson: pr, lessonId: pr.id, resources: prResources}}) AS Prerequisites, 
-                   collect(DISTINCT {{lesson: mc, lessonId: mc.id, resources: mcResources}}) AS MainCurriculum,
-                   collect(DISTINCT {{lesson: at, lessonId: at.id, resources: atResources}}) AS AdvancedTopics
-        ", new { currentUserId, targetUserId });
+            OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
+            OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+            OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
+            OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
+            RETURN sp.id AS studyPlanId, 
+                   l.id AS lessonId, 
+                   r.id AS resourceId, 
+                   hs.type AS stepType,
+                   hs.order AS stepOrder,
+                   collect(DISTINCT lk) AS lessonKnowledgeNodes,
+                   collect(DISTINCT sk) AS studyPlanKnowledgeNodes
+            ORDER BY hs.order";
+
+            var result = await session.RunAsync(cypherQuery, new { currentUserId, targetUserId });
+
+            // Step 5. 整合数据
+            var studyPlanDict = new Dictionary<string, StudyPlanDTO>();
 
             await foreach (var record in result)
             {
-                var studyPlanNode = record["StudyPlan"].As<INode>();
-                var studyPlanId = record["studyPlanId"].As<string>();
-                var prerequisitesData = record["Prerequisites"].As<List<object>>();
-                var mainCurriculumData = record["MainCurriculum"].As<List<object>>();
-                var advancedTopicsData = record["AdvancedTopics"].As<List<object>>();
+                var studyPlanId = record["studyPlanId"]?.As<string>();
+                if (string.IsNullOrEmpty(studyPlanId)) continue;
 
-                // Transform data into Lesson objects
-                var prerequisiteLessons = prerequisitesData != null ? TransformLessonsWithProgress(prerequisitesData) : new List<Lesson>();
-                var mainCurriculumLessons = mainCurriculumData != null ? TransformLessonsWithProgress(mainCurriculumData) : new List<Lesson>();
-                var advancedTopicsLessons = advancedTopicsData != null ? TransformLessonsWithProgress(advancedTopicsData) : new List<Lesson>();
-
-                // Calculate total number of resources and learned resources for prerequisites and main curriculum
-                var totalResources = prerequisiteLessons.Sum(l => l.Resources.Count) +
-                                     mainCurriculumLessons.Sum(l => l.Resources.Count);
-
-                var learnedResources = prerequisiteLessons.Sum(l => l.Resources.Count(r => r.Learned)) +
-                                       mainCurriculumLessons.Sum(l => l.Resources.Count(r => r.Learned));
-
-                // Calculate progress percentage for prerequisites and main curriculum
-                var progressPercentage = totalResources > 0
-                    ? (float)learnedResources / totalResources * 100
-                    : 0f;
-
-                // Calculate total and learned resources for advanced topics
-                var totalAdvancedResources = advancedTopicsLessons.Sum(l => l.Resources.Count);
-                var learnedAdvancedResources = advancedTopicsLessons.Sum(l => l.Resources.Count(r => r.Learned));
-
-                // Calculate progress percentage for advanced topics
-                var advancedTopicProgressPercentage = totalAdvancedResources > 0
-                    ? (float)learnedAdvancedResources / totalAdvancedResources * 100
-                    : 0f;
-
-                // Check if the study plan is completed (i.e., all resources are learned in prerequisites and main curriculum)
-                var isCompleted = learnedResources == totalResources && totalResources > 0;
-
-                // Add the study plan result
-                studyPlanResults.Add(new StudyPlanDTO
+                if (!studyPlanDict.ContainsKey(studyPlanId))
                 {
-                    StudyPlan = new StudyPlanDetail
+                    var sqlStudyPlan = studyPlans.FirstOrDefault(sp => sp.Id.ToString() == studyPlanId);
+                    if (sqlStudyPlan == null) continue; // 数据不一致保护
+
+                    studyPlanDict[studyPlanId] = new StudyPlanDTO
                     {
-                        Id = studyPlanId,
-                        Title = studyPlanNode.Properties["title"].As<string>(),
-                        Introduction = studyPlanNode.Properties.ContainsKey("introduction") ? new Introduction { Description = studyPlanNode.Properties["introduction"].As<string>(), Keywords = studyPlanNode.Properties.ContainsKey("Keywords") ? studyPlanNode.Properties["Keywords"].As<List<string>>() : new List<string>() } : null,
-                        Prerequisite = prerequisiteLessons,
-                        MainCurriculum = mainCurriculumLessons,
-                        AdvancedTopics = advancedTopicsLessons, // Still return advanced topics separately
-                        ProgressPercentage = progressPercentage, // Overall progress percentage (excluding advanced topics)
-                        AdvancedTopicProgressPercentage = advancedTopicProgressPercentage, // Progress for advanced topics
-                        Completed = isCompleted
+                        StudyPlan = new StudyPlanDetail
+                        {
+                            Id = studyPlanId,
+                            Title = sqlStudyPlan.Title,
+                            Introduction = new Introduction
+                            {
+                                Description = sqlStudyPlan.Description,
+                                AssociatedKnowledgeNodes = record["studyPlanKnowledgeNodes"]
+                                    ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+                            },
+                            Prerequisite = new List<Lesson>(),
+                            MainCurriculum = new List<Lesson>(),
+                            AdvancedTopics = new List<Lesson>()
+                        }
+                    };
+                }
+
+                var lessonId = record["lessonId"]?.As<string>();
+                if (string.IsNullOrEmpty(lessonId)) continue;
+
+                var sqlLesson = lessons.FirstOrDefault(l => l.Value.Id.ToString() == lessonId).Value;
+                if (sqlLesson == null) continue;
+
+                var lesson = new Lesson
+                {
+                    Id = lessonId,
+                    Name = sqlLesson.Title,
+                    Description = sqlLesson.Description,
+                    Resources = new List<ResourceDTO>(),
+                    AssociatedKnowledgeNodes = record["lessonKnowledgeNodes"]
+                        ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+                };
+
+                var resourceId = record["resourceId"]?.As<string>();
+                if (!string.IsNullOrEmpty(resourceId))
+                {
+                    var sqlResource = resources.FirstOrDefault(r => r.Value.Id.ToString() == resourceId).Value;
+                    if (sqlResource != null)
+                    {
+                        lesson.Resources.Add(new ResourceDTO
+                        {
+                            Id = sqlResource.Id.ToString(),
+                            Name = sqlResource.Name,
+                            Link = sqlResource.Link
+                        });
                     }
-                });
+                }
+
+                var stepType = record["stepType"]?.As<string>();
+                if (stepType == "PREREQUISITE")
+                    studyPlanDict[studyPlanId].StudyPlan.Prerequisite.Add(lesson);
+                else if (stepType == "MAIN_CURRICULUM")
+                    studyPlanDict[studyPlanId].StudyPlan.MainCurriculum.Add(lesson);
+                else if (stepType == "ADVANCED_TOPIC")
+                    studyPlanDict[studyPlanId].StudyPlan.AdvancedTopics.Add(lesson);
             }
 
-            return studyPlanResults;
+            // Step 6. 最后计算学习进度
+            foreach (var studyPlan in studyPlanDict.Values)
+            {
+                CalculateProgress(studyPlan.StudyPlan);
+            }
+
+            return studyPlanDict.Values.ToList();
         }
         finally
         {
@@ -375,177 +407,370 @@ public class StudyPlanService
         }
     }
 
-    private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
+    // 小工具函数，把Neo4j Node转为你的Node结构
+    private Node MapNode(INode n)
     {
-        if (lessonData == null)
+        return new Node
         {
-            _logger.LogError("lessonData is null.");
-            return new List<Lesson>(); // Return an empty list if lessonData is null
-        }
-
-        return lessonData
-            .Select(data =>
+            Identity = (int)n.Id,
+            Labels = n.Labels.ToList(),
+            Properties = new NodeProperties
             {
-                if (data == null)
-                {
-                    _logger.LogError("A null entry in lessonData.");
-                    return null; // Skip null entries
-                }
-
-                var lessonDict = data as Dictionary<string, object>;
-                if (lessonDict == null)
-                {
-                    _logger.LogError("Failed to cast data to Dictionary<string, object>. Data: {data}", data);
-                    return null; // Skip if casting fails
-                }
-
-                if (!lessonDict.ContainsKey("lesson") || lessonDict["lesson"] == null)
-                {
-                    _logger.LogError("Lesson node is missing or null in lessonDict: {lessonDict}", lessonDict);
-                    return null; // Skip if lesson node is missing or null
-                }
-
-                var lessonNode = lessonDict["lesson"] as INode;
-                if (lessonNode == null)
-                {
-                    _logger.LogError("Failed to cast 'lesson' to INode in lessonDict: {lessonDict}");
-                    return null; // Skip if lessonNode is not valid
-                }
-
-                // Safely cast resources and handle potential nulls
-                var resourcesRawData = lessonDict.ContainsKey("resources") ? lessonDict["resources"] as List<object> : null;
-                _logger.LogInformation("lessonDict: {lessonDict}");
-                _logger.LogInformation("resourcesRawData: {resourcesRawData}");
-
-                var resources = resourcesRawData?.Select(resRaw =>
-                {
-                    if (resRaw == null)
-                    {
-                        _logger.LogError("A null entry in resourcesRawData.");
-                        return null; // Skip null resource entries
-                    }
-
-                    var resDict = resRaw as Dictionary<string, object>;
-                    if (resDict == null)
-                    {
-                        _logger.LogError("Failed to cast resource to Dictionary<string, object>. Resource: {resRaw}");
-                        return null; // Skip if casting fails
-                    }
-
-                    var link = resDict.ContainsKey("resource") ? resDict["resource"]?.ToString() : null;
-                    var name = resDict.ContainsKey("name") ? resDict["name"]?.ToString() : null;
-                    var learned = resDict.ContainsKey("learned") && Convert.ToBoolean(resDict["learned"]);
-
-                    // Only return valid resources
-                    if (link == null && name == null)
-                    {
-                        return null; // Skip resource if both link and name are null
-                    }
-
-                    return new ResourceDTO
-                    {
-                        Link = link,
-                        Name = name,
-                        Learned = learned
-                    };
-                }).Where(r => r != null).ToList() ?? new List<ResourceDTO>(); // Return an empty list if no valid resources
-
-                var finishedResourcesCount = resources?.Count(r => r.Learned) ?? 0;
-                var totalResources = resources?.Count ?? 0;
-                var progressPercentage = totalResources > 0 ? (finishedResourcesCount / (float)totalResources) * 100 : 0;
-
-                return new Lesson
-                {
-                    Id = lessonNode.Properties.ContainsKey("id") ? lessonNode.Properties["id"]?.As<string>() : "No ID available",
-                    Name = lessonNode.Properties.ContainsKey("name") ? lessonNode.Properties["name"]?.As<string>() : "Unnamed Lesson",
-                    Description = lessonNode.Properties.ContainsKey("description") ? lessonNode.Properties["description"]?.As<string>() : "No description available",
-                    Keywords = lessonNode.Properties.ContainsKey("keywords") ? lessonNode.Properties["keywords"]?.As<List<string>>() : new List<string>(),
-                    Resources = resources, // Return resources or an empty list
-                    FinishedResourcesCount = finishedResourcesCount,
-                    ProgressPercentage = progressPercentage
-                };
-            })
-            .Where(lesson => lesson != null) // Filter out any null lessons
-            .ToList(); // Convert to List<Lesson>
+                Link = n.Properties.ContainsKey("link") ? n.Properties["link"]?.ToString() : null,
+                Name = n.Properties.ContainsKey("name") ? n.Properties["name"]?.ToString() : null
+            },
+            ElementId = n.ElementId
+        };
     }
+
+    // 小工具函数，计算Progress
+    private void CalculateProgress(StudyPlanDetail studyPlan)
+    {
+        var allLessons = studyPlan.Prerequisite.Concat(studyPlan.MainCurriculum).ToList();
+        var totalResources = allLessons.Sum(l => l.Resources.Count);
+        var learnedResources = allLessons.Sum(l => l.Resources.Count(r => r.Learned));
+
+        studyPlan.ProgressPercentage = totalResources > 0
+            ? (float)learnedResources / totalResources * 100
+            : 0;
+
+        var advancedLessons = studyPlan.AdvancedTopics;
+        var totalAdvResources = advancedLessons.Sum(l => l.Resources.Count);
+        var learnedAdvResources = advancedLessons.Sum(l => l.Resources.Count(r => r.Learned));
+
+        studyPlan.AdvancedTopicProgressPercentage = totalAdvResources > 0
+            ? (float)learnedAdvResources / totalAdvResources * 100
+            : 0;
+
+        studyPlan.Completed = totalResources > 0 && learnedResources == totalResources;
+    }
+
+    private async Task<List<(string StudyPlanId, string LessonId, string Type, int Order)>> GetLessonIdsByStudyPlanIdsAsync(List<string> studyPlanIds)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync(@"
+            MATCH (sp:StudyPlan)-[hs:HAS_STEP]->(l:Lesson)
+            WHERE sp.id IN $studyPlanIds
+            RETURN sp.id AS studyPlanId, l.id AS lessonId, hs.type AS stepType, hs.order AS stepOrder
+            ORDER BY sp.id, hs.order
+        ", new { studyPlanIds });
+
+            var lessonInfos = new List<(string StudyPlanId, string LessonId, string Type, int Order)>();
+
+            await foreach (var record in result)
+            {
+                var studyPlanId = record["studyPlanId"].As<string>();
+                var lessonId = record["lessonId"].As<string>();
+                var stepType = record["stepType"].As<string>();
+                var stepOrder = record["stepOrder"].As<int>();
+
+                lessonInfos.Add((studyPlanId, lessonId, stepType, stepOrder));
+            }
+
+            return lessonInfos;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    private async Task<List<(string LessonId, string Type, int Order)>> GetLessonIdsByStudyPlanIdAsync(string studyPlanId)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync(@"
+            MATCH (sp:StudyPlan {id: $studyPlanId})-[hs:HAS_STEP]->(l:Lesson)
+            RETURN l.id AS lessonId, hs.type AS stepType, hs.order AS stepOrder
+            ORDER BY hs.order
+        ", new { studyPlanId });
+
+            var lessonInfos = new List<(string LessonId, string Type, int Order)>();
+
+            await foreach (var record in result)
+            {
+                var lessonId = record["lessonId"].As<string>();
+                var stepType = record["stepType"].As<string>();
+                var stepOrder = record["stepOrder"].As<int>();
+
+                lessonInfos.Add((lessonId, stepType, stepOrder));
+            }
+
+            return lessonInfos;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+
+    private async Task<Dictionary<string, LessonEntity>> GetLessonsByIdsAsync(List<string> lessonIds)
+    {
+        if (lessonIds == null || lessonIds.Count == 0)
+            return new Dictionary<string, LessonEntity>();
+
+        var guidIds = lessonIds
+            .Select(id => Guid.TryParse(id, out var guid) ? guid : (Guid?)null)
+            .Where(guid => guid.HasValue)
+            .Select(guid => guid.Value)
+            .ToList();
+
+        var lessons = await _sqlRepository.GetLessonsByIdsAsync(guidIds.Select(g => g.ToString()).ToList());
+
+        return lessons.ToDictionary(l => l.Id.ToString(), l => l);
+    }
+
+    private async Task<Dictionary<string, List<string>>> GetResourceIdsByLessonIdsAsync(List<string> lessonIds)
+    {
+        var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var result = await session.RunAsync(@"
+            MATCH (l:Lesson)
+            WHERE l.id IN $lessonIds
+            MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+            RETURN l.id AS lessonId, collect(r.id) AS resourceIds
+        ", new { lessonIds });
+
+            var lessonResourceMap = new Dictionary<string, List<string>>();
+
+            await foreach (var record in result)
+            {
+                var lessonId = record["lessonId"].As<string>();
+                var resourceIds = record["resourceIds"].As<List<object>>()
+                    .Select(id => id.ToString())
+                    .ToList();
+
+                lessonResourceMap[lessonId] = resourceIds;
+            }
+
+            return lessonResourceMap;
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    private async Task<Dictionary<string, Resource>> GetResourcesByIdsAsync(List<string> resourceIds)
+    {
+        if (resourceIds == null || resourceIds.Count == 0)
+            return new Dictionary<string, Resource>();
+
+        var guidIds = resourceIds
+            .Select(id => Guid.TryParse(id, out var guid) ? guid : (Guid?)null)
+            .Where(guid => guid.HasValue)
+            .Select(guid => guid.Value)
+            .ToList();
+
+        var resources = await _sqlRepository.GetResourcesByIdsAsync(guidIds.Select(g => g.ToString()).ToList());
+
+        return resources.ToDictionary(r => r.Id.ToString(), r => r);
+    }
+
+    // private List<Lesson> TransformLessonsWithProgress(List<object> lessonData)
+    // {
+    //     if (lessonData == null)
+    //     {
+    //         _logger.LogError("lessonData is null.");
+    //         return new List<Lesson>(); // Return an empty list if lessonData is null
+    //     }
+
+    //     return lessonData
+    //         .Select(data =>
+    //         {
+    //             if (data == null)
+    //             {
+    //                 _logger.LogError("A null entry in lessonData.");
+    //                 return null; // Skip null entries
+    //             }
+
+    //             var lessonDict = data as Dictionary<string, object>;
+    //             if (lessonDict == null)
+    //             {
+    //                 _logger.LogError("Failed to cast data to Dictionary<string, object>. Data: {data}", data);
+    //                 return null; // Skip if casting fails
+    //             }
+
+    //             if (!lessonDict.ContainsKey("lesson") || lessonDict["lesson"] == null)
+    //             {
+    //                 _logger.LogError("Lesson node is missing or null in lessonDict: {lessonDict}", lessonDict);
+    //                 return null; // Skip if lesson node is missing or null
+    //             }
+
+    //             var lessonNode = lessonDict["lesson"] as INode;
+    //             if (lessonNode == null)
+    //             {
+    //                 _logger.LogError("Failed to cast 'lesson' to INode in lessonDict: {lessonDict}");
+    //                 return null; // Skip if lessonNode is not valid
+    //             }
+
+    //             // Safely cast resources and handle potential nulls
+    //             var resourcesRawData = lessonDict.ContainsKey("resources") ? lessonDict["resources"] as List<object> : null;
+    //             _logger.LogInformation("lessonDict: {lessonDict}");
+    //             _logger.LogInformation("resourcesRawData: {resourcesRawData}");
+
+    //             var resources = resourcesRawData?.Select(resRaw =>
+    //             {
+    //                 if (resRaw == null)
+    //                 {
+    //                     _logger.LogError("A null entry in resourcesRawData.");
+    //                     return null; // Skip null resource entries
+    //                 }
+
+    //                 var resDict = resRaw as Dictionary<string, object>;
+    //                 if (resDict == null)
+    //                 {
+    //                     _logger.LogError("Failed to cast resource to Dictionary<string, object>. Resource: {resRaw}");
+    //                     return null; // Skip if casting fails
+    //                 }
+
+    //                 var link = resDict.ContainsKey("resource") ? resDict["resource"]?.ToString() : null;
+    //                 var name = resDict.ContainsKey("name") ? resDict["name"]?.ToString() : null;
+    //                 var learned = resDict.ContainsKey("learned") && Convert.ToBoolean(resDict["learned"]);
+
+    //                 // Only return valid resources
+    //                 if (link == null && name == null)
+    //                 {
+    //                     return null; // Skip resource if both link and name are null
+    //                 }
+
+    //                 return new ResourceDTO
+    //                 {
+    //                     Link = link,
+    //                     Name = name,
+    //                     Learned = learned
+    //                 };
+    //             }).Where(r => r != null).ToList() ?? new List<ResourceDTO>(); // Return an empty list if no valid resources
+
+    //             var finishedResourcesCount = resources?.Count(r => r.Learned) ?? 0;
+    //             var totalResources = resources?.Count ?? 0;
+    //             var progressPercentage = totalResources > 0 ? (finishedResourcesCount / (float)totalResources) * 100 : 0;
+
+    //             return new Lesson
+    //             {
+    //                 Id = lessonNode.Properties.ContainsKey("id") ? lessonNode.Properties["id"]?.As<string>() : "No ID available",
+    //                 Name = lessonNode.Properties.ContainsKey("name") ? lessonNode.Properties["name"]?.As<string>() : "Unnamed Lesson",
+    //                 Description = lessonNode.Properties.ContainsKey("description") ? lessonNode.Properties["description"]?.As<string>() : "No description available",
+    //                 Resources = resources, // Return resources or an empty list
+    //                 FinishedResourcesCount = finishedResourcesCount,
+    //                 ProgressPercentage = progressPercentage
+    //             };
+    //         })
+    //         .Where(lesson => lesson != null) // Filter out any null lessons
+    //         .ToList(); // Convert to List<Lesson>
+    // }
 
     public async Task<StudyPlanDTO?> GetStudyPlanByIdAsync(string studyPlanId, string targetUserId, string currentUserId)
     {
         using var session = _neo4jDriver.AsyncSession();
         try
         {
-            var result = await session.RunAsync($@"
-   MATCH (u:User {{id: $targetUserId}})-[:CREATED]->(sp:StudyPlan {{id: $studyPlanId}})
+            // Step 1. 从SQL拉取StudyPlan
+            var studyPlan = await _sqlRepository.GetStudyPlanByIdAsync(studyPlanId);
+            if (studyPlan == null) return null;
+
+            // 拉取Neo4j关系
+            var lessonInfo = await GetLessonIdsByStudyPlanIdAsync(studyPlanId);
+            var lessonIds = lessonInfo.Select(x => x.LessonId).ToList();
+
+            // 拉取Lesson内容
+            var lessons = await GetLessonsByIdsAsync(lessonIds);
+
+            // 拉取Lesson -> Resource关系
+            var resourceInfo = await GetResourceIdsByLessonIdsAsync(lessonIds);
+            var resourceIds = resourceInfo.SelectMany(x => x.Value).Distinct().ToList();
+
+            // 拉取Resource内容
+            var resources = await GetResourcesByIdsAsync(resourceIds);
+
+            // Step 4. 从Neo4j拉取结构关系
+            var cypherQuery = @"
+            MATCH (u:User {id: $targetUserId})-[:CREATED]->(sp:StudyPlan {id: $studyPlanId})
             WHERE sp.privacy = 'public' OR sp.privacy = 'shared' OR u.id = $currentUserId
-            OPTIONAL MATCH (sp)-[:HAS_PREREQUISITE]->(pr:Lesson)
-            OPTIONAL MATCH (pr)-[:HAS_RESOURCE]->(prRes:Resource)
-            OPTIONAL MATCH (sp)-[:HAS_MAIN_CURRICULUM]->(mc:Lesson)
-            OPTIONAL MATCH (mc)-[:HAS_RESOURCE]->(mcRes:Resource)
-            OPTIONAL MATCH (sp)-[:HAS_ADVANCED_TOPIC]->(at:Lesson)
-            OPTIONAL MATCH (at)-[:HAS_RESOURCE]->(atRes:Resource)
-            WITH sp, pr, prRes, mc, mcRes, at, atRes,
-                 EXISTS((pr)-[:FINISHED_LEARNING {{userId: u.id}}]->(prRes)) AS prLearned,
-                 EXISTS((mc)-[:FINISHED_LEARNING {{userId: u.id}}]->(mcRes)) AS mcLearned,
-                 EXISTS((at)-[:FINISHED_LEARNING {{userId: u.id}}]->(atRes)) AS atLearned
-            WITH sp, pr, mc, at,
-                 collect(DISTINCT {{resource: prRes.link, name: prRes.name, learned: prLearned}}) AS prResources,
-                 collect(DISTINCT {{resource: mcRes.link, name: mcRes.name, learned: mcLearned}}) AS mcResources,
-                 collect(DISTINCT {{resource: atRes.link, name: atRes.name, learned: atLearned}}) AS atResources
-            RETURN sp AS StudyPlan, 
-                   sp.id AS studyPlanId,
-                   collect(DISTINCT {{lesson: pr, lessonId: pr.id, resources: prResources}}) AS Prerequisites, 
-                   collect(DISTINCT {{lesson: mc, lessonId: mc.id, resources: mcResources}}) AS MainCurriculum,
-                   collect(DISTINCT {{lesson: at, lessonId: at.id, resources: atResources}}) AS AdvancedTopics
-        ", new { studyPlanId, currentUserId, targetUserId });
+            OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
+            OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+            OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
+            OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
+            RETURN sp.id AS studyPlanId, 
+                   l.id AS lessonId, 
+                   r.id AS resourceId, 
+                   hs.type AS stepType,
+                   hs.order AS stepOrder,
+                   collect(DISTINCT lk) AS lessonKnowledgeNodes,
+                   collect(DISTINCT sk) AS studyPlanKnowledgeNodes
+            ORDER BY hs.order";
 
+            var result = await session.RunAsync(cypherQuery, new { studyPlanId, currentUserId, targetUserId });
 
-            var record = await result.SingleAsync();
-            if (record == null || !record.Values.Any()) return null;
+            var recordList = await result.ToListAsync();
+            if (recordList == null || recordList.Count == 0) return null;
 
-            var studyPlanNode = record["StudyPlan"].As<INode>();
-            var prerequisitesData = record["Prerequisites"].As<List<object>>();
-            var mainCurriculumData = record["MainCurriculum"].As<List<object>>();
-            var advancedTopicsData = record["AdvancedTopics"].As<List<object>>();
-
-            // Transform data into DTOs
-            var prerequisites = TransformLessonsWithProgress(prerequisitesData);
-            var mainCurriculum = TransformLessonsWithProgress(mainCurriculumData);
-            var advancedTopics = TransformLessonsWithProgress(advancedTopicsData);
-
-            // Calculate progress percentages
-            var totalResources = prerequisites.Sum(l => l.Resources.Count) + mainCurriculum.Sum(l => l.Resources.Count);
-            var learnedResources = prerequisites.Sum(l => l.Resources.Count(r => r.Learned)) + mainCurriculum.Sum(l => l.Resources.Count(r => r.Learned));
-            var progressPercentage = totalResources > 0 ? (float)learnedResources / totalResources * 100 : 0;
-
-            var totalAdvancedResources = advancedTopics.Sum(l => l.Resources.Count);
-            var learnedAdvancedResources = advancedTopics.Sum(l => l.Resources.Count(r => r.Learned));
-            var advancedTopicProgressPercentage = totalAdvancedResources > 0 ? (float)learnedAdvancedResources / totalAdvancedResources * 100 : 0;
-
-            var isCompleted = learnedResources == totalResources && totalResources > 0;
-
-            return new StudyPlanDTO
+            var studyPlanDetail = new StudyPlanDetail
             {
-                StudyPlan = new StudyPlanDetail
+                Id = studyPlan.Id.ToString(),
+                Title = studyPlan.Title,
+                Introduction = new Introduction
                 {
-                    Id = studyPlanNode.Properties["id"].As<string>(),
-                    Title = studyPlanNode.Properties["title"].As<string>(),
-                    Introduction = studyPlanNode.Properties.ContainsKey("introduction")
-                        ? new Introduction
-                        {
-                            Description = studyPlanNode.Properties["introduction"].As<string>(),
-                            Keywords = studyPlanNode.Properties.ContainsKey("keywords")
-                                ? studyPlanNode.Properties["keywords"].As<List<string>>()
-                                : new List<string>()
-                        }
-                        : null,
-                    Prerequisite = prerequisites,
-                    MainCurriculum = mainCurriculum,
-                    AdvancedTopics = advancedTopics,
-                    ProgressPercentage = progressPercentage,
-                    AdvancedTopicProgressPercentage = advancedTopicProgressPercentage,
-                    Completed = isCompleted
-                }
+                    Description = studyPlan.Description,
+                    AssociatedKnowledgeNodes = recordList.FirstOrDefault()?["studyPlanKnowledgeNodes"]
+                        ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+                },
+                Prerequisite = new List<Lesson>(),
+                MainCurriculum = new List<Lesson>(),
+                AdvancedTopics = new List<Lesson>()
             };
+
+            foreach (var record in recordList)
+            {
+                var lessonId = record["lessonId"]?.As<string>();
+                if (string.IsNullOrEmpty(lessonId)) continue;
+
+                var sqlLesson = lessons.FirstOrDefault(l => l.Value.Id.ToString() == lessonId).Value;
+                if (sqlLesson == null) continue;
+
+                var lesson = new Lesson
+                {
+                    Id = lessonId,
+                    Name = sqlLesson.Title,
+                    Description = sqlLesson.Description,
+                    Resources = new List<ResourceDTO>(),
+                    AssociatedKnowledgeNodes = record["lessonKnowledgeNodes"]
+                        ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+                };
+
+                var resourceId = record["resourceId"]?.As<string>();
+                if (!string.IsNullOrEmpty(resourceId))
+                {
+                    var sqlResource = resources.FirstOrDefault(r => r.Value.Id.ToString() == resourceId).Value;
+                    if (sqlResource != null)
+                    {
+                        lesson.Resources.Add(new ResourceDTO
+                        {
+                            Id = sqlResource.Id.ToString(),
+                            Name = sqlResource.Name,
+                            Link = sqlResource.Link
+                        });
+                    }
+                }
+
+                var stepType = record["stepType"]?.As<string>();
+                if (stepType == "PREREQUISITE")
+                    studyPlanDetail.Prerequisite.Add(lesson);
+                else if (stepType == "MAIN_CURRICULUM")
+                    studyPlanDetail.MainCurriculum.Add(lesson);
+                else if (stepType == "ADVANCED_TOPIC")
+                    studyPlanDetail.AdvancedTopics.Add(lesson);
+            }
+
+            // Step 5. 计算学习进度
+            CalculateProgress(studyPlanDetail);
+
+            return new StudyPlanDTO { StudyPlan = studyPlanDetail };
         }
         finally
         {
@@ -553,23 +778,58 @@ public class StudyPlanService
         }
     }
 
-    public async Task<bool> DeleteStudyPlanAsync(string studyPlanTitle, string currentUserId)
+    public async Task<bool> DeleteStudyPlanAsync(string studyPlanId, string currentUserId)
     {
-        var session = _neo4jDriver.AsyncSession();
+        using var session = _neo4jDriver.AsyncSession();
         try
         {
-            return await session.ExecuteWriteAsync(async transaction =>
+            // Step 1. 从Neo4j查一下当前StudyPlan是否存在，并且是这个用户创建的
+            var exists = await session.ExecuteReadAsync(async tx =>
             {
-                var result = await transaction.RunAsync($@"
-                MATCH (u:User {{id: $currentUserId}})-[:CREATED]->(p:StudyPlan {{title: $title}})
-                OPTIONAL MATCH (p)-[:HAS_PREREQUISITE|HAS_MAIN_CURRICULUM|HAS_ADVANCED_TOPIC]->(l:Lesson)
-                DETACH DELETE p, l
-                RETURN COUNT(p) > 0",
-                    new { currentUserId, title = studyPlanTitle });
+                var result = await tx.RunAsync(@"
+                MATCH (u:User {id: $currentUserId})-[:CREATED]->(p:StudyPlan {id: $studyPlanId})
+                RETURN p.id AS id
+            ", new { currentUserId, studyPlanId });
 
-                var summary = await result.ConsumeAsync();
-                return summary.Counters.NodesDeleted > 0;
+                var records = await result.ToListAsync();
+                var record = records.SingleOrDefault();
+                return record != null;
             });
+
+            if (!exists)
+            {
+                _logger.LogWarning("StudyPlan {studyPlanId} not found or not created by user {currentUserId}.", studyPlanId, currentUserId);
+                return false;
+            }
+
+            // Step 2. 删除Neo4j中StudyPlan的关系
+            await session.ExecuteWriteAsync(async tx =>
+            {
+                await tx.RunAsync(@"
+                MATCH (p:StudyPlan {id: $studyPlanId})
+                OPTIONAL MATCH (p)-[r]-()
+                DELETE r
+            ", new { studyPlanId });
+            });
+
+            // Step 3. 删除SQL中的StudyPlan
+            await _sqlRepository.DeleteStudyPlanByIdAsync(studyPlanId);
+
+            // Step 4. 删除Neo4j中StudyPlan节点本身
+            await session.ExecuteWriteAsync(async tx =>
+            {
+                await tx.RunAsync(@"
+                MATCH (p:StudyPlan {id: $studyPlanId})
+                DELETE p
+            ", new { studyPlanId });
+            });
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to delete StudyPlan {studyPlanId}", studyPlanId);
+            return false;
         }
         finally
         {
