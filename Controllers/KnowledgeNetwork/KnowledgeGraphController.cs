@@ -68,6 +68,17 @@ namespace Sciencetopia.Controllers
             return Ok(result);
         }
 
+        [HttpPost("LazyLoad")]
+        public async Task<IActionResult> LazyLoad([FromBody] LazyLoadRequest request)
+        {
+            if (request == null || request.ParentIds == null || request.ParentIds.Count == 0)
+            {
+                return BadRequest("ParentIds are required.");
+            }
+            var data = await _knowledgeGraphService.GetAdjacentNodesByLevelAsync(request.ParentIds, request.ZoomLevel);
+            return Ok(data);
+        }
+
         [HttpGet("GetNodeDetails")]
         public async Task<IActionResult> GetNodeDetails(string nodeId)
         {

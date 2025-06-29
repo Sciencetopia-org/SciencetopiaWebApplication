@@ -231,6 +231,14 @@ public class KnowledgeGraphService
         return new { venn = new { sets, contain_relations = relations } };
     }
 
+    public async Task<GraphDTO> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentIds, string zoomLevel)
+    {
+        var childNodeIds = await _graphRepository.GetAdjacentNodesByLevelAsync(parentIds, zoomLevel);
+        var allNodeIds = parentIds.Concat(childNodeIds).Distinct().ToList();
+        var allTagIds = await _graphRepository.GetAllTagsRelatedToNodesAsync(allNodeIds);
+        return await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds);
+    }
+
     public async Task<IEnumerable<string>> GetAllKnowledgeNodeIdsAsync()
     {
         // 从 SQL 获取所有节点 id

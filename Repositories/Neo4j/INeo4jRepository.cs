@@ -42,7 +42,7 @@ public interface IGraphRepository
     /// 根据标签类型获取标签节点的 Id
     /// </summary>
     Task<IEnumerable<string>> GetNodeIdsByLabelAsync(string label);
-
+    Task<HashSet<string>> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentNodeIds, string targetLevel);
     /// <summary>
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
@@ -562,5 +562,27 @@ public class GraphRepository : IGraphRepository
         {
             await session.CloseAsync();
         }
+    }
+
+    public async Task<HashSet<string>> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentNodeIds, string targetLevel)
+    {
+        using var session = _driver.AsyncSession();
+
+        var query = @"
+        MATCH (p:KnowledgeNode)<-[:TAGGED_WITH]-(pt:Tag)
+        MATCH (pt)-[:CONTAIN*0..]->(ct:Tag)-[:TAGGED_WITH]->(c:KnowledgeNode)<-[:TAGGED_WITH]-(lvl:TagLevel {name: $targetLevel})
+        WHERE p.id IN $parentIds AND (c.status IS NULL OR c.status <> 'pending_approval')
+        RETURN DISTINCT c.id AS NodeId";
+
+        var parameters = new Dictionary<string, object>
+        {
+            { "parentIds", parentNodeIds.Select(id => id.ToLower()) },
+            { "targetLevel", targetLevel }
+        };
+
+        var result = await session.RunAsync(query, parameters);
+        var records = await result.ToListAsync();
+
+        return records.Select(r => r["NodeId"].As<string>()).ToHashSet();
     }
 }
