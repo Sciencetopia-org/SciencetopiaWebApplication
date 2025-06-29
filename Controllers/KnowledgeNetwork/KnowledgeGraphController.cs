@@ -54,6 +54,20 @@ namespace Sciencetopia.Controllers
             return Ok(result);
         }
 
+        [HttpGet("GetNodeInView")]
+        public async Task<IActionResult> GetNodeInView(
+            [FromQuery] string tagSystem = "MainTag",
+            [FromQuery] string viewType = "network",
+            string zoomLevel = "Field")
+        {
+            string userId = User?.Identity?.IsAuthenticated == true
+                ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
+                : string.Empty;
+
+            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevel, userId);
+            return Ok(result);
+        }
+
         [HttpGet("GetNodeDetails")]
         public async Task<IActionResult> GetNodeDetails(string nodeId)
         {

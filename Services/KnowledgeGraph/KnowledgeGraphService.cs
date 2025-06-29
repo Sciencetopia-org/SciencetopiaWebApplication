@@ -44,10 +44,51 @@ public class KnowledgeGraphService
         };
     }
 
+    public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, string zoomLevel, string userId)
+    {
+        var allTagIds = await GetTagIdsByTagTypeAsync(tagSystem);
+
+        return viewType.ToLower() switch
+        {
+            "venn" => await GetVennGraphDataInViewAsync(allTagIds, zoomLevel),
+            _ => await GetNetworkGraphDataInViewAsync(allTagIds, userId, zoomLevel)
+        };
+    }
+
     private async Task<object> GetNetworkGraphDataAsync(IEnumerable<string> tagIds, string userId)
     {
         var allNodeIds = await GetAllNodesRelatedToTags(tagIds);
+        Console.WriteLine($"Total nodes related to tags: {allNodeIds.Count()}");
+
+        foreach (var nodeId in allNodeIds)
+        {
+            Console.WriteLine($"Node ID: {nodeId}");
+        }
+
         var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds);
+
+        if (!string.IsNullOrEmpty(userId))
+        {
+            var data_pending = await GetPendingNodesByUserIdAsync(userId);
+            return new { data, data_pending };
+        }
+
+        return new { data };
+    }
+
+    private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<string> tagIds, string userId, string zoomLevel)
+    {
+        var nodeTagPairs = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevel);
+        var allNodeIds = nodeTagPairs.Select(pair => pair.NodeId).Distinct().ToList();
+        var allTagIds = nodeTagPairs.Select(pair => pair.TagId).Distinct().ToList();
+        Console.WriteLine($"Total nodes related to tags: {allNodeIds.Count()}");
+
+        foreach (var nodeId in allNodeIds)
+        {
+            Console.WriteLine($"Node ID: {nodeId}");
+        }
+
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds);
 
         if (!string.IsNullOrEmpty(userId))
         {
@@ -62,6 +103,72 @@ public class KnowledgeGraphService
     {
         // 获取所有标签→节点映射（不传递）
         var allVennGroups = await _graphRepository.GetVennTagNodeGroupsAsync();
+
+        // 只保留用户请求的标签
+        var vennGroups = allVennGroups
+            .Where(g => tagIds.Contains(g.TagId))
+            .ToList();
+
+        // 获取包含关系（原始所有关系）
+        var allContainRelations = await _graphRepository.GetPureTagContainRelationsAsync();
+
+        // 只保留两端都在当前标签体系中的包含关系
+        var containRelations = allContainRelations
+            .Where(r => tagIds.Contains(r.ParentTagId) && tagIds.Contains(r.ChildTagId))
+            .ToList();
+
+        // 收集所有涉及的标签和节点 ID（为了查 SQL 元信息）
+        var involvedTagIds = vennGroups.Select(g => g.TagId)
+            .Union(containRelations.Select(r => r.ParentTagId))
+            .Union(containRelations.Select(r => r.ChildTagId))
+            .Distinct()
+            .ToList();
+
+        var involvedNodeIds = vennGroups
+            .SelectMany(g => g.NodeIds)
+            .Distinct()
+            .ToList();
+
+        // 获取标签名称（从 SQL）
+        var tagMetaDict = await _tagRepo.GetTagDetailsAsync(involvedTagIds);
+
+        // 获取节点名称（从 SQL）
+        var nodeMetaDict = await _knowledgeRepo.GetNodesDetailsAsync(involvedNodeIds);
+
+        // 构造 Venn 集合部分（sets）
+        var sets = vennGroups.Select(g => new
+        {
+            id = g.TagId,
+            name = tagMetaDict.TryGetValue(g.TagId, out var meta) ? meta.Name : g.TagId,
+            elements = g.NodeIds.Select(nodeId => new
+            {
+                id = nodeId,
+                name = nodeMetaDict.TryGetValue(nodeId, out var nmeta) ? nmeta.Name : nodeId
+            })
+        });
+
+        // 构造标签间的包含关系
+        var relations = containRelations.Select(r => new
+        {
+            parent = new
+            {
+                id = r.ParentTagId,
+                name = tagMetaDict.TryGetValue(r.ParentTagId, out var parentMeta) ? parentMeta.Name : r.ParentTagId
+            },
+            child = new
+            {
+                id = r.ChildTagId,
+                name = tagMetaDict.TryGetValue(r.ChildTagId, out var childMeta) ? childMeta.Name : r.ChildTagId
+            }
+        });
+
+        return new { venn = new { sets, contain_relations = relations } };
+    }
+
+    private async Task<object> GetVennGraphDataInViewAsync(IEnumerable<string> tagIds, string zoomLevel)
+    {
+        // 获取所有标签→节点映射（不传递）
+        var allVennGroups = await _graphRepository.GetVennTagNodeGroupsInViewAsync(zoomLevel);
 
         // 只保留用户请求的标签
         var vennGroups = allVennGroups

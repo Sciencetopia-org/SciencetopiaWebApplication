@@ -32,7 +32,7 @@ public interface IGraphRepository
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
     Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds);
-
+    Task<HashSet<(string NodeId, string TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, string zoomLevel = "Field");
     /// <summary>
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
@@ -52,6 +52,7 @@ public interface IGraphRepository
     /// 获取 Venn 图中标签与知识节点的分组
     /// </summary>
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync();
+    Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(string zoomLevel = "Field");
     Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds);
     Task CreateNodeAndResourceInGraphAsync(Guid nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
@@ -157,10 +158,11 @@ public class GraphRepository : IGraphRepository
 
     public async Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds)
     {
+        Console.WriteLine($"Getting all nodes related to tags: {string.Join(", ", tagIds)}");
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE t.id IN $tagIds AND NOT n.status <> 'pending_approval'
+        WHERE t.id IN $tagIds AND (n.status IS NULL OR n.status <> 'pending_approval')
         RETURN n.id AS NodeId
         ";
         var parameters = new Dictionary<string, object>
@@ -171,7 +173,44 @@ public class GraphRepository : IGraphRepository
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
+
+        foreach (var record in records)
+        {
+            Console.WriteLine($"Found NodeId: {record["NodeId"].As<string>()}");
+        }
         return records.Select(record => record["NodeId"].As<string>()).ToHashSet();
+    }
+
+    public async Task<HashSet<(string NodeId, string TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, string zoomLevel = "Field")
+    {
+        Console.WriteLine($"Getting all nodes related to tags: {string.Join(", ", tagIds)}");
+        using var session = _driver.AsyncSession();
+        var query = @"
+    MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel {name: $zoomLevel})
+    WHERE t.id IN $tagIds AND (n.status IS NULL OR n.status <> 'pending_approval')
+    RETURN n.id AS NodeId, t.id AS TagId
+    ";
+        var parameters = new Dictionary<string, object>
+    {
+        { "tagIds", tagIds.Select(id => id.ToLower()) },
+        { "zoomLevel", zoomLevel }
+    };
+
+        var result = await session.RunAsync(query, parameters);
+
+        var records = await result.ToListAsync();
+
+        foreach (var record in records)
+        {
+            Console.WriteLine($"Found NodeId: {record["NodeId"].As<string>()}, TagId: {record["TagId"].As<string>()}");
+        }
+
+        return records
+            .Select(record => (
+                NodeId: record["NodeId"].As<string>(),
+                TagId: record["TagId"].As<string>()
+            ))
+            .ToHashSet();
     }
 
     public async Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId)
@@ -256,6 +295,7 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
+        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
         RETURN t.id AS TagId, n.id AS NodeId
     ";
 
@@ -270,6 +310,36 @@ public class GraphRepository : IGraphRepository
                 NodeIds = g.Select(r => r["NodeId"].As<string>()).Distinct().ToList()
             })
             .ToList();
+    }
+
+    public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(string zoomLevel = "Field")
+    {
+        // 这里的 zoomLevel 参数可以用于未来的扩展，比如根据不同的缩放级别返回不同的数据
+        // 目前我们直接返回所有标签和节点的关系
+        // 如果需要根据 zoomLevel 过滤数据，可以在查询中添加相应的条件
+
+        // 获取所有标签→节点映射
+        {
+            using var session = _driver.AsyncSession();
+            var cypher = @"
+        MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel {name: $zoomLevel})
+        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
+        RETURN t.id AS TagId, n.id AS NodeId
+    ";
+
+            var result = await session.RunAsync(cypher, new { zoomLevel });
+            // 获取查询结果
+            var records = await result.ToListAsync();
+
+            return records
+                .GroupBy(r => r["TagId"].As<string>())
+                .Select(g => new TagNodeGroup
+                {
+                    TagId = g.Key,
+                    NodeIds = g.Select(r => r["NodeId"].As<string>()).Distinct().ToList()
+                })
+                .ToList();
+        }
     }
 
     public async Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds)
@@ -431,7 +501,7 @@ public class GraphRepository : IGraphRepository
     };
 
         // 开启一个 Neo4j 会话（写模式）
-        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
 
         try
         {
@@ -449,7 +519,7 @@ public class GraphRepository : IGraphRepository
         MATCH (t:Tag {id: $tagId})
         SET t.status = 'rejected'";
 
-        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
         try
         {
             await session.RunAsync(query, new { tagId = tagId.ToString() });
@@ -466,7 +536,7 @@ public class GraphRepository : IGraphRepository
         MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(:Resource)
         DELETE r";
 
-        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
         try
         {
             await session.RunAsync(query, new { nodeId = nodeId.ToString() });
@@ -483,7 +553,7 @@ public class GraphRepository : IGraphRepository
         MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(res:Resource)
         REMOVE r.status";
 
-        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write));
+        var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
         try
         {
             await session.RunAsync(query, new { nodeId = nodeId.ToString() });
