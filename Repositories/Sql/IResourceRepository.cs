@@ -28,7 +28,7 @@ public class ResourceRepository : IResourceRepository
     public async Task<List<Resource>> GetResourcesByIdsAsync(IEnumerable<string> ids)
     {
         return await _context.Resources
-            .Where(r => ids.Contains(r.Id.ToString()!.ToLower()))
+            .Where(r => ids.Contains(r.Id.ToString()!))
             .ToListAsync();
     }
 

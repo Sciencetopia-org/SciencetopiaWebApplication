@@ -4,10 +4,11 @@ using Sciencetopia.Models;
 
 public interface ITagRepository
 {
-    Task<IEnumerable<string>> GetTagNodeIdsByTagTypeAsync(string tagType);
+    Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType);
     Task<List<Tags>> GetAllTagsAsync();
     Task<List<TagDTO>> GetTagsByNameAsync(IEnumerable<string> inputTagNames);
-    Task<Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<string> ids);
+    Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
+    Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids);
     Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds);
     Task<Guid> CreateIfNotExistsAsync(string tagName);
     Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy);
@@ -23,14 +24,13 @@ public class TagRepository : ITagRepository
         _context = context;
     }
 
-    public async Task<IEnumerable<string>> GetTagNodeIdsByTagTypeAsync(string tagType)
+    public async Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType)
     {
         return await (from tag in _context.Tags
                       join tagTypeEntity in _context.TagTypes on tag.Id equals tagTypeEntity.TagId
                       join typeOfTag in _context.TypesOfTags on tagTypeEntity.TypeId equals typeOfTag.Id
-                      where typeOfTag.Type == tagType
-                      select tag)
-                 .Select(tag => tag.Id.ToString()!.ToLower())
+                      where typeOfTag.Type == tagType && tag.Id.HasValue
+                      select tag.Id.Value)
                  .ToListAsync();
     }
 
@@ -62,7 +62,7 @@ public class TagRepository : ITagRepository
             .Where(t => inputTagNames.Contains(t.Name))
             .Select(t => new TagDTO
             {
-                Id = t.Id.ToString()!.ToLower(),
+                Id = t.Id,
                 Name = t.Name
             })
             .ToListAsync();
@@ -70,13 +70,13 @@ public class TagRepository : ITagRepository
         return tags;
     }
 
-    public async Task<Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<string> ids)
+    public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids)
     {
         var tags = await _context.Tags
-                            .Where(tag => ids.Contains(tag.Id.ToString()!.ToLower()))
+                            .Where(tag => ids.Contains(tag.Id.Value))
                             .Select(tag => new
                             {
-                                Id = tag.Id.ToString()!.ToLower(),
+                                Id = tag.Id.Value,
                                 tag.Name,
                                 tag.Description,
                                 // 将 DateTime 转换为 DateTimeOffset（假设这里的 DateTime 为本地时间，可以根据实际情况调整）
@@ -85,12 +85,27 @@ public class TagRepository : ITagRepository
                             })
                             .ToListAsync();
 
-        var dict = new Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
+        var dict = new Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
         foreach (var tag in tags)
         {
-            if (!string.IsNullOrEmpty(tag.Id))
+            dict[tag.Id] = (tag.Name ?? string.Empty, tag.Description ?? string.Empty, tag.CreatedDate.HasValue ? tag.CreatedDate.Value : default, tag.UpdatedDate.HasValue ? tag.UpdatedDate.Value : default);
+        }
+        return dict;
+    }
+    
+    public async Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids)
+    {
+        var tagNames = await _context.Tags
+            .Where(tag => ids.Contains(tag.Id.Value))
+            .Select(tag => new { tag.Id, tag.Name })
+            .ToListAsync();
+
+        var dict = new Dictionary<Guid, string>();
+        foreach (var tag in tagNames)
+        {
+            if (tag.Id.HasValue)
             {
-                dict[tag.Id] = (tag.Name ?? string.Empty, tag.Description ?? string.Empty, tag.CreatedDate.HasValue ? tag.CreatedDate.Value : default, tag.UpdatedDate.HasValue ? tag.UpdatedDate.Value : default);
+                dict[tag.Id.Value] = tag.Name ?? string.Empty;
             }
         }
         return dict;

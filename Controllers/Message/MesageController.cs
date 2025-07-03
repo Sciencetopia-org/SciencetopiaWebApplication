@@ -98,10 +98,15 @@ public class MessageController : ControllerBase
     public async Task<ActionResult<GroupedMessageDTO>> GetConversation(string conversationId)
     {
         // Step 1: Retrieve the conversation and related messages
+        if (!Guid.TryParse(conversationId, out Guid conversationGuid))
+        {
+            return BadRequest("Invalid conversationId format.");
+        }
+
         var conversationGroup = await _context.Messages
             .Include(m => m.Sender)
             .Include(m => m.Receiver)
-            .Where(m => m.ConversationId == conversationId)
+            .Where(m => m.ConversationId == conversationGuid)
             .OrderBy(m => m.SentTime)
             .ToListAsync();
 
@@ -110,7 +115,7 @@ public class MessageController : ControllerBase
         {
             return Ok(new GroupedMessageDTO
             {
-                ConversationId = conversationId,
+                ConversationId = conversationGuid,
                 PartnerId = null,
                 PartnerName = "Unknown", // Placeholder, adjust if you have specific data requirements
                 UnreadMessageCount = 0,
@@ -131,7 +136,7 @@ public class MessageController : ControllerBase
         // Step 4: Populate the DTO with message details
         var conversationDto = new GroupedMessageDTO
         {
-            ConversationId = conversationId,
+            ConversationId = conversationGuid,
             PartnerId = partnerId,
             PartnerName = partnerName,
             PartnerAvatarUrl = partnerAvatarUrl,
@@ -157,8 +162,13 @@ public class MessageController : ControllerBase
     [HttpPost("MarkAsRead")]
     public async Task<IActionResult> MarkAsRead([FromBody] MarkAsReadRequest request)
     {
+        if (!Guid.TryParse(request.ConversationId, out Guid conversationGuid))
+        {
+            return BadRequest("Invalid ConversationId format.");
+        }
+
         var messages = await _context.Messages
-            .Where(m => m.ConversationId == request.ConversationId && m.ReceiverId == request.UserId && !m.IsRead)
+            .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == request.UserId && !m.IsRead)
             .ToListAsync();
 
         foreach (var message in messages)

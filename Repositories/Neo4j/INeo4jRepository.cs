@@ -10,6 +10,7 @@ public interface IGraphRepository
     /// 获取所有知识节点与纯标签节点之间的 TAGGED_WITH 关系
     /// </summary>
     Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync();
+    Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds);
 
     /// <summary>
     /// 获取知识节点之间的层次关系（知识层次关系），
@@ -32,7 +33,7 @@ public interface IGraphRepository
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
     Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds);
-    Task<HashSet<(string NodeId, string TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, string zoomLevel = "Field");
+    Task<HashSet<(Guid NodeId, Guid TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
     /// <summary>
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
@@ -52,18 +53,18 @@ public interface IGraphRepository
     /// 获取 Venn 图中标签与知识节点的分组
     /// </summary>
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync();
-    Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(string zoomLevel = "Field");
+    Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(IEnumerable<string> zoomLevels);
     Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds);
-    Task CreateNodeAndResourceInGraphAsync(Guid nodeId, string name, string description, IEnumerable<string> links, string userId);
+    Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
     Task<bool> LinkResourceToNodeAsync(string nodeName, string resourceId);
-    Task CreateTagNodeIfNotExistsAsync(Guid tagId);
-    Task RelateTagToNodeAsync(Guid tagId, Guid nodeId);
-    Task CreatePendingTagNodeAsync(Guid tagId);
-    Task SetTagStatusApprovedAsync(Guid tagId);
-    Task SetTagStatusRejectedAsync(Guid tagId);
-    Task DetachResourcesFromNodeAsync(Guid nodeId);
-    Task ApproveNodeResourceRelationsAsync(Guid nodeId);
+    Task CreateTagNodeIfNotExistsAsync(string tagId);
+    Task RelateTagToNodeAsync(string tagId, string nodeId);
+    Task CreatePendingTagNodeAsync(string tagId);
+    Task SetTagStatusApprovedAsync(string tagId);
+    Task SetTagStatusRejectedAsync(string tagId);
+    Task DetachResourcesFromNodeAsync(string nodeId);
+    Task ApproveNodeResourceRelationsAsync(string nodeId);
 }
 
 public class GraphRepository : IGraphRepository
@@ -89,6 +90,27 @@ public class GraphRepository : IGraphRepository
                 SourceId = record["SourceId"].As<string>(),
                 TagId = record["TagId"].As<string>()
             }).ToList();
+    }
+
+    public async Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds)
+    {
+        if (allTagIds == null || !allTagIds.Any())
+        {
+            return new List<string>();
+        }
+
+        using var session = _driver.AsyncSession();
+        var cypher = @"
+            MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
+            WHERE t.id IN $tagIds AND t2.name IN $zoomLevels
+            RETURN DISTINCT t.id AS TagId
+        ";
+        var result = await session.RunAsync(cypher, new { zoomLevels, tagIds = allTagIds });
+        var records = await result.ToListAsync();
+
+        return records
+            .Select(record => record["TagId"].As<string>())
+            .ToHashSet();
     }
 
     // Repositories/GraphRepository.cs
@@ -134,12 +156,12 @@ public class GraphRepository : IGraphRepository
 
         var query = @"
         MATCH (tagLevel:TagLevel)-[:TAGGED_WITH]->(node:KnowledgeNode)
-        WHERE toLower(node.id) IN $nodeIds
+        WHERE node.id IN $nodeIds
         RETURN node.id AS NodeId, tagLevel.id AS TagLevelId
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeIds", nodeIds.Select(id => id.ToLower()) }
+            { "nodeIds", nodeIds }
         };
 
         var result = await session.RunAsync(query, parameters);
@@ -158,7 +180,6 @@ public class GraphRepository : IGraphRepository
 
     public async Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds)
     {
-        Console.WriteLine($"Getting all nodes related to tags: {string.Join(", ", tagIds)}");
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
@@ -167,48 +188,39 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "tagIds", tagIds.Select(id => id.ToLower()) }
+            { "tagIds", tagIds }
         };
 
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
 
-        foreach (var record in records)
-        {
-            Console.WriteLine($"Found NodeId: {record["NodeId"].As<string>()}");
-        }
         return records.Select(record => record["NodeId"].As<string>()).ToHashSet();
     }
 
-    public async Task<HashSet<(string NodeId, string TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, string zoomLevel = "Field")
+    public async Task<HashSet<(Guid NodeId, Guid TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels)
     {
-        Console.WriteLine($"Getting all nodes related to tags: {string.Join(", ", tagIds)}");
         using var session = _driver.AsyncSession();
         var query = @"
-    MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel {name: $zoomLevel})
+    MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
     WHERE t.id IN $tagIds AND (n.status IS NULL OR n.status <> 'pending_approval')
+        AND t2.name IN $zoomLevels
     RETURN n.id AS NodeId, t.id AS TagId
     ";
         var parameters = new Dictionary<string, object>
     {
-        { "tagIds", tagIds.Select(id => id.ToLower()) },
-        { "zoomLevel", zoomLevel }
+        { "tagIds", tagIds },
+        { "zoomLevels", zoomLevels }
     };
 
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
 
-        foreach (var record in records)
-        {
-            Console.WriteLine($"Found NodeId: {record["NodeId"].As<string>()}, TagId: {record["TagId"].As<string>()}");
-        }
-
         return records
             .Select(record => (
-                NodeId: record["NodeId"].As<string>(),
-                TagId: record["TagId"].As<string>()
+                NodeId: Guid.Parse(record["NodeId"].As<string>()),
+                TagId: Guid.Parse(record["TagId"].As<string>())
             ))
             .ToHashSet();
     }
@@ -223,7 +235,7 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeId", nodeId.ToLower() }
+            { "nodeId", nodeId }
         };
 
         var result = await session.RunAsync(query, parameters);
@@ -242,7 +254,7 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeIds", nodeIds.Select(id => id.ToLower()) }
+            { "nodeIds", nodeIds }
         };
 
         var result = await session.RunAsync(query, parameters);
@@ -303,16 +315,18 @@ public class GraphRepository : IGraphRepository
         var records = await result.ToListAsync();
 
         return records
-            .GroupBy(r => r["TagId"].As<string>())
-            .Select(g => new TagNodeGroup
-            {
-                TagId = g.Key,
-                NodeIds = g.Select(r => r["NodeId"].As<string>()).Distinct().ToList()
-            })
-            .ToList();
+        .Select(r => new TagNodeGroup
+        {
+            TagId = Guid.Parse(r["TagId"].As<string>()), // Convert TagId once
+            NodeIds = r["NodeIds"].As<List<string>>()
+                .Select(nodeId => Guid.Parse(nodeId))  // Convert NodeIds once
+                .Distinct()
+                .ToList()
+        })
+        .ToList();
     }
 
-    public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(string zoomLevel = "Field")
+    public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(IEnumerable<string> zoomLevels)
     {
         // 这里的 zoomLevel 参数可以用于未来的扩展，比如根据不同的缩放级别返回不同的数据
         // 目前我们直接返回所有标签和节点的关系
@@ -322,12 +336,13 @@ public class GraphRepository : IGraphRepository
         {
             using var session = _driver.AsyncSession();
             var cypher = @"
-        MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel {name: $zoomLevel})
+        MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
         WHERE (n.status IS NULL OR n.status <> 'pending_approval')
+          AND t2.name IN $zoomLevels
         RETURN t.id AS TagId, n.id AS NodeId
     ";
 
-            var result = await session.RunAsync(cypher, new { zoomLevel });
+            var result = await session.RunAsync(cypher, new { zoomLevels });
             // 获取查询结果
             var records = await result.ToListAsync();
 
@@ -335,8 +350,8 @@ public class GraphRepository : IGraphRepository
                 .GroupBy(r => r["TagId"].As<string>())
                 .Select(g => new TagNodeGroup
                 {
-                    TagId = g.Key,
-                    NodeIds = g.Select(r => r["NodeId"].As<string>()).Distinct().ToList()
+                    TagId = Guid.Parse(g.Key),
+                    NodeIds = g.Select(r => Guid.Parse(r["NodeId"].As<string>())).Distinct().ToList()
                 })
                 .ToList();
         }
@@ -359,13 +374,13 @@ public class GraphRepository : IGraphRepository
         {
             var id = record["resourceId"]?.As<string>();
             if (!string.IsNullOrWhiteSpace(id))
-                resourceIds.Add(id.ToLower());
+                resourceIds.Add(id);
         }
 
         return resourceIds;
     }
 
-    public async Task CreateNodeAndResourceInGraphAsync(Guid nodeId, string name, string description, IEnumerable<string> links, string userId)
+    public async Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId)
     {
         var query = @"
         MERGE (n:KnowledgeNode {id: $nodeId})
@@ -382,7 +397,7 @@ public class GraphRepository : IGraphRepository
 
         var parameters = new
         {
-            nodeId = nodeId.ToString().ToLower(),
+            nodeId = nodeId.ToString(),
             name,
             description,
             links = links ?? new List<string>(),
@@ -433,7 +448,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task CreateTagNodeIfNotExistsAsync(Guid tagId)
+    public async Task CreateTagNodeIfNotExistsAsync(string tagId)
     {
         var query = @"MERGE (t:Tag {id: $tagId})";
         using var session = _driver.AsyncSession();
@@ -441,7 +456,7 @@ public class GraphRepository : IGraphRepository
         await results.FetchAsync();
     }
 
-    public async Task RelateTagToNodeAsync(Guid tagId, Guid nodeId)
+    public async Task RelateTagToNodeAsync(string tagId, string nodeId)
     {
         var query = @"
         MATCH (t:Tag {id: $tagId})
@@ -466,7 +481,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task CreatePendingTagNodeAsync(Guid tagId)
+    public async Task CreatePendingTagNodeAsync(string tagId)
     {
         var query = @"
         MERGE (t:Tag {id: $tagId})
@@ -489,7 +504,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task SetTagStatusApprovedAsync(Guid tagId)
+    public async Task SetTagStatusApprovedAsync(string tagId)
     {
         var query = @"
         MATCH (t:Tag {id: $tagId})
@@ -513,7 +528,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task SetTagStatusRejectedAsync(Guid tagId)
+    public async Task SetTagStatusRejectedAsync(string tagId)
     {
         var query = @"
         MATCH (t:Tag {id: $tagId})
@@ -530,7 +545,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task DetachResourcesFromNodeAsync(Guid nodeId)
+    public async Task DetachResourcesFromNodeAsync(string nodeId)
     {
         var query = @"
         MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(:Resource)
@@ -547,7 +562,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task ApproveNodeResourceRelationsAsync(Guid nodeId)
+    public async Task ApproveNodeResourceRelationsAsync(string nodeId)
     {
         var query = @"
         MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(res:Resource)
@@ -576,7 +591,7 @@ public class GraphRepository : IGraphRepository
 
         var parameters = new Dictionary<string, object>
         {
-            { "parentIds", parentNodeIds.Select(id => id.ToLower()) },
+            { "parentIds", parentNodeIds },
             { "targetLevel", targetLevel }
         };
 

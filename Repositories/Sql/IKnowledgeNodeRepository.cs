@@ -3,9 +3,10 @@ using Microsoft.EntityFrameworkCore;
 
 public interface IKnowledgeNodeRepository
 {
-    Task<IEnumerable<string>> GetAllNodeIdsAsync();
-    Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(string id);
-    Task<Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<string> ids);
+    Task<IEnumerable<Guid>> GetAllNodeIdsAsync();
+    Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id);
+    Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids);
+    Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids);
     Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take);
     // Dictionary<string, object> CreateNode(string id, string name, string description);
     // bool UpdateNode(string id, string name, string description);
@@ -22,18 +23,18 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
     }
 
     // 获取所有节点Id，转换为字符串
-    public async Task<IEnumerable<string>> GetAllNodeIdsAsync()
+    public async Task<IEnumerable<Guid>> GetAllNodeIdsAsync()
     {
         return await _context.KnowledgeNodes
                              .Where(node => node.Id != null)
-                             .Select(node => node.Id.ToString()!)
+                             .Select(node => node.Id.Value)
                              .ToListAsync();
     }
 
-    public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(string id)
+    public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id)
     {
         var node = await _context.KnowledgeNodes
-            .Where(n => n.Id.ToString()!.ToLower() == id.ToLower())
+            .Where(n => n.Id == id)
             .Select(n => new
             {
                 n.Name,
@@ -48,28 +49,47 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
             return null;
         }
 
-        return (node.Name ?? string.Empty, node.Description ?? string.Empty, 
-                node.CreatedDate.HasValue ? node.CreatedDate.Value : default, 
+        return (node.Name ?? string.Empty, node.Description ?? string.Empty,
+                node.CreatedDate.HasValue ? node.CreatedDate.Value : default,
                 node.UpdatedDate.HasValue ? node.UpdatedDate.Value : default
                 );
     }
 
     // 获取节点详情，投影时将 Guid 转为字符串
-    public async Task<Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<string> ids)
+    public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids)
     {
-        var dict = new Dictionary<string, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
+        var dict = new Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
         foreach (var id in ids)
         {
             var details = await GetNodeDetailsByIdAsync(id);
             if (details.HasValue)
             {
-            dict[id.ToLower()] = details.Value;
+                dict[id] = details.Value;
             }
         }
         return dict;
     }
 
-        public async Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take)
+    // 获取节点名称，投影时将 Guid 转为字符串
+    public async Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids)
+    {
+        var dict = new Dictionary<Guid, string>();
+        foreach (var id in ids)
+        {
+            var name = await _context.KnowledgeNodes
+                .Where(n => n.Id == id)
+                .Select(n => n.Name)
+                .FirstOrDefaultAsync();
+
+            if (name != null)
+            {
+                dict[id] = name;
+            }
+        }
+        return dict;
+    }
+
+    public async Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take)
     {
         return await _context.KnowledgeNodes
             .Where(n => EF.Functions.Like(n.Name, $"%{query}%") ||

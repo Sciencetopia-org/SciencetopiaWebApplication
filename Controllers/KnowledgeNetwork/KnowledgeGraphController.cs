@@ -64,7 +64,18 @@ namespace Sciencetopia.Controllers
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                 : string.Empty;
 
-            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevel, userId);
+            // Define the valid zoom levels
+            var validZoomLevels = new[] {"Keyword", "Topic", "Field", "Subject"};
+            // Validate the zoom level
+            if (!validZoomLevels.Contains(zoomLevel))
+            {
+                return BadRequest($"Invalid zoom level. Valid options are: {string.Join(", ", validZoomLevels)}");
+            }
+
+            // Find the zoom levels greater than or equal to the requested zoom level
+            var zoomLevels = validZoomLevels.SkipWhile(z => z != zoomLevel).ToList();
+
+            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId);
             return Ok(result);
         }
 
@@ -89,7 +100,12 @@ namespace Sciencetopia.Controllers
 
             try
             {
-                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(nodeId);
+                // Convert nodeId to Guid if necessary
+                if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+                {
+                    return BadRequest("Invalid Node ID format.");
+                }
+                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(parsedNodeId);
                 if (data != null)
                 {
                     return Ok(data);
@@ -220,7 +236,7 @@ namespace Sciencetopia.Controllers
 
                 var tagId = await _tagRepository.CreateTagDraftAsync(request.Name, request.Description, userId);
 
-                await _graphRepository.CreatePendingTagNodeAsync(tagId);
+                await _graphRepository.CreatePendingTagNodeAsync(tagId.ToString());
 
                 // 无论是否重复，CreateTagDraftAsync 已处理好，我们统一返回成功提示
                 return Ok("Tag draft submitted (new or already exists).");

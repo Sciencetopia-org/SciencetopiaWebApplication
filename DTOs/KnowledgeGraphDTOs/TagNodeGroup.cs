@@ -1,5 +1,5 @@
 public class TagNodeGroup
 {
-    public string TagId { get; set; }
-    public List<string> NodeIds { get; set; }
+    public Guid TagId { get; set; }
+    public List<Guid>? NodeIds { get; set; }
 }

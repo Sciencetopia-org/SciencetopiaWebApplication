@@ -1,6 +1,6 @@
 public class MessageDTO
 {
-    public string? Id { get; set; }
+    public Guid? Id { get; set; }
     public string? Content { get; set; }
     public DateTimeOffset SentTime { get; set; }
     public string? SenderId { get; set; }
@@ -10,7 +10,7 @@ public class MessageDTO
 
 public class GroupedMessageDTO
 {
-    public string? ConversationId { get; set; }
+    public Guid? ConversationId { get; set; }
     public string? PartnerId { get; set; }
     public string? PartnerName { get; set; }
     public string? PartnerAvatarUrl { get; set; }
@@ -20,7 +20,7 @@ public class GroupedMessageDTO
 
 public class MessageWithUserDetailsDTO
 {
-    public string? Id { get; set; }
+    public Guid? Id { get; set; }
     public string? Content { get; set; }
     public DateTimeOffset SentTime { get; set; }
     public UserDetailsDTO? Sender { get; set; }

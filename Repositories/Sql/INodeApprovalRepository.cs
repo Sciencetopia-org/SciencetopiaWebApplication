@@ -103,7 +103,7 @@ public class NodeApprovalRepository : INodeApprovalRepository
     public async Task<bool> DisapproveNodeAsync(string nodeId)
     {
         var drafts = await _context.KnowledgeNodeDrafts
-            .Where(d => d.NodeId.ToString().ToLower() == nodeId.ToLower() && d.ReviewStatus == ReviewStatus.Pending)
+            .Where(d => d.NodeId.ToString() == nodeId && d.ReviewStatus == ReviewStatus.Pending)
             .ToListAsync();
 
         foreach (var draft in drafts)
@@ -118,7 +118,7 @@ public class NodeApprovalRepository : INodeApprovalRepository
     public async Task<bool> ResubmitNodeAsync(string nodeId)
     {
         var rejected = await _context.KnowledgeNodeDrafts
-            .FirstOrDefaultAsync(d => d.NodeId.ToString().ToLower() == nodeId.ToLower() && d.ReviewStatus == ReviewStatus.Rejected);
+            .FirstOrDefaultAsync(d => d.NodeId.ToString() == nodeId && d.ReviewStatus == ReviewStatus.Rejected);
 
         if (rejected != null)
         {

@@ -20,17 +20,22 @@ namespace Sciencetopia.Hubs
 
         public async Task SendMessage(string conversationId, string senderId, string receiverId, string content)
         {
+            if (!Guid.TryParse(conversationId, out var conversationGuid))
+            {
+                throw new HubException("Invalid conversation ID format");
+            }
+
             // Ensure the conversation exists
             var conversation = await _context.Conversations
                                      .Include(c => c.Messages)
-                                     .FirstOrDefaultAsync(c => c.Id == conversationId);
+                                     .FirstOrDefaultAsync(c => c.Id == conversationGuid);
 
             // If the conversation does not exist, optionally create a new one (or handle as needed)
             if (conversation == null)
             {
                 conversation = new Conversation
                 {
-                    Id = Guid.NewGuid().ToString(),
+                    Id = Guid.NewGuid(),
                     Messages = new List<Message>()
                 };
                 _context.Conversations.Add(conversation);
@@ -39,7 +44,7 @@ namespace Sciencetopia.Hubs
             // Create and save the new message
             var message = new Message
             {
-                Id = Guid.NewGuid().ToString(),
+                Id = Guid.NewGuid(),
                 Content = content,
                 SentTime = DateTimeOffset.UtcNow,
                 SenderId = senderId,
@@ -83,7 +88,7 @@ namespace Sciencetopia.Hubs
 
             // Notify client of updated message count per conversation
             var conversationMessageCount = await _context.Messages
-                .Where(m => m.ReceiverId == receiverId && m.ConversationId == conversationId && !m.IsRead)
+                .Where(m => m.ReceiverId == receiverId && m.ConversationId == conversationGuid && !m.IsRead)
                 .CountAsync();
 
             // Send notification to the receiver
@@ -116,7 +121,7 @@ namespace Sciencetopia.Hubs
             // If no existing conversation, create a new conversation entry
             var newConversation = new Conversation
             {
-                Id = Guid.NewGuid().ToString(),
+                Id = Guid.NewGuid(),
                 Messages = new List<Message>()
             };
             _context.Conversations.Add(newConversation);
@@ -147,10 +152,15 @@ namespace Sciencetopia.Hubs
 
         public async Task JoinConversation(string conversationId)
         {
+            if (!Guid.TryParse(conversationId, out var conversationGuid))
+            {
+                throw new HubException("Invalid conversation ID format");
+            }
+
             await Groups.AddToGroupAsync(Context.ConnectionId, conversationId);
 
             var messages = await _context.Messages
-                .Where(m => m.ConversationId == conversationId)
+                .Where(m => m.ConversationId == conversationGuid)
                 .OrderBy(m => m.SentTime)
                 .Select(m => new MessageDTO
                 {
@@ -222,8 +232,12 @@ namespace Sciencetopia.Hubs
 
         public async Task MarkMessagesAsRead(string conversationId, string userId)
         {
+            if (!Guid.TryParse(conversationId, out var conversationGuid))
+            {
+                throw new HubException("Invalid conversation ID format");
+            }
             var messages = await _context.Messages
-                .Where(m => m.ConversationId == conversationId && m.ReceiverId == userId && !m.IsRead)
+                .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == userId && !m.IsRead)
                 .ToListAsync();
 
             foreach (var message in messages)
@@ -240,7 +254,7 @@ namespace Sciencetopia.Hubs
 
             // Notify client of updated message count per conversation
             var conversationMessageCount = await _context.Messages
-                .Where(m => m.ReceiverId == userId && m.ConversationId == conversationId && !m.IsRead)
+                .Where(m => m.ReceiverId == userId && m.ConversationId == conversationGuid && !m.IsRead)
                 .CountAsync();
 
             await Clients.User(userId).SendAsync("updateMessages", receiverMessageCount);

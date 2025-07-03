@@ -1,6 +1,6 @@
 // Models/HierarchyRelationDTO.cs
 public class HierarchyRelationDTO
 {
-    public string? ParentId { get; set; }
-    public string? ChildId { get; set; }
+    public Guid? ParentId { get; set; }
+    public Guid? ChildId { get; set; }
 }
