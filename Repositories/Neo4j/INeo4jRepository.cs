@@ -9,14 +9,14 @@ public interface IGraphRepository
     /// <summary>
     /// 获取所有知识节点与纯标签节点之间的 TAGGED_WITH 关系
     /// </summary>
-    Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync();
+    Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<string> nodeIds, IEnumerable<string> tagIds);
     Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds);
 
     /// <summary>
     /// 获取知识节点之间的层次关系（知识层次关系），
     /// 即标签知识节点之间按照标签体系建立的父→子关系
     /// </summary>
-    Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync();
+    Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<string> allTagIds);
 
     /// <summary>
     /// 利用纯标签节点和 TAGGED_WITH 关系进行二部图投影，
@@ -33,7 +33,10 @@ public interface IGraphRepository
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
     Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds);
-    Task<HashSet<(Guid NodeId, Guid TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
+
+    Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<string> nodeIds);
+    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(IEnumerable<string> tagIds);
+    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
     /// <summary>
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
@@ -76,14 +79,20 @@ public class GraphRepository : IGraphRepository
         _driver = driver;
     }
 
-    public async Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync()
+    public async Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<string> nodeIds, IEnumerable<string> tagIds)
     {
         using var session = _driver.AsyncSession();
         var cypher = @"
             MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
+            WHERE (n.id) IN $nodeIds AND (t.id) IN $tagIds
             RETURN n.id AS SourceId, t.id AS TagId
         ";
-        var result = await session.RunAsync(cypher);
+        var parameters = new Dictionary<string, object>
+        {
+            { "nodeIds", nodeIds },
+            { "tagIds", tagIds }
+        };
+        var result = await session.RunAsync(cypher, parameters);
         return (await result.ToListAsync())
             .Select(record => new TaggedRelationDTO
             {
@@ -94,34 +103,37 @@ public class GraphRepository : IGraphRepository
 
     public async Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds)
     {
-        if (allTagIds == null || !allTagIds.Any())
-        {
-            return new List<string>();
-        }
+        if (allTagIds == null || !allTagIds.Any()) return Enumerable.Empty<string>();
 
         using var session = _driver.AsyncSession();
         var cypher = @"
-            MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
-            WHERE t.id IN $tagIds AND t2.name IN $zoomLevels
-            RETURN DISTINCT t.id AS TagId
-        ";
+    MATCH (t:Tag)-[:TAGGED_WITH]->(:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+    WHERE t.id IN $tagIds AND l.name IN $zoomLevels
+    RETURN DISTINCT t.id AS TagId;
+    ";
         var result = await session.RunAsync(cypher, new { zoomLevels, tagIds = allTagIds });
         var records = await result.ToListAsync();
 
-        return records
-            .Select(record => record["TagId"].As<string>())
-            .ToHashSet();
+        // Return the TagId directly as a string list, no need for additional Select
+        return records.Select(r => r["TagId"].As<string>());
     }
 
     // Repositories/GraphRepository.cs
-    public async Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync()
+    public async Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<string> allTagIds)
     {
         using var session = _driver.AsyncSession();
         var cypher = @"
         MATCH (parent:Tag)-[:CONTAIN]->(child:Tag)
+        WHERE parent.id IN $tagIds AND child.id IN $tagIds
+        WITH parent, child
+        WHERE parent.id <> child.id
         RETURN parent.id AS ParentTagId, child.id AS ChildTagId
     ";
-        var result = await session.RunAsync(cypher);
+        var parameters = new Dictionary<string, object>
+        {
+            { "tagIds", allTagIds }
+        };
+        var result = await session.RunAsync(cypher, parameters);
         return (await result.ToListAsync())
             .Select(record => new TagContainRelationDTO
             {
@@ -198,29 +210,70 @@ public class GraphRepository : IGraphRepository
         return records.Select(record => record["NodeId"].As<string>()).ToHashSet();
     }
 
-    public async Task<HashSet<(Guid NodeId, Guid TagId)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels)
+    public async Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<string> nodeIds)
+    {
+        if (nodeIds == null) return new();
+
+        using var session = _driver.AsyncSession();
+        var cypher = @"
+        UNWIND $nodeIds AS nid
+        MATCH (n:KnowledgeNode {id: nid})<-[:TAGGED_WITH]-(l:TagLevel)
+        RETURN nid AS NodeId, l.name AS TagLevel
+    ";
+        var cursor = await session.RunAsync(cypher, new { nodeIds });
+        var records = await cursor.ToListAsync();
+
+        // 若一个节点匹配多个层级，可在这里自定义优先级（示例：取第一个）
+        return records
+            .GroupBy(r => r["NodeId"].As<string>())
+            .ToDictionary(
+                g => Guid.Parse(g.Key),
+                g => g.Select(x => x["TagLevel"].As<string>()).First()
+            );
+    }
+
+    public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(
+    IEnumerable<string> tagIds)
     {
         using var session = _driver.AsyncSession();
         var query = @"
-    MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
-    WHERE t.id IN $tagIds AND (n.status IS NULL OR n.status <> 'pending_approval')
-        AND t2.name IN $zoomLevels
-    RETURN n.id AS NodeId, t.id AS TagId
+        UNWIND $tagIds AS id
+        MATCH (t:Tag {id: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
+        RETURN DISTINCT n.id AS NodeId, id AS TagId, l.name AS TagLevel
     ";
-        var parameters = new Dictionary<string, object>
-    {
-        { "tagIds", tagIds },
-        { "zoomLevels", zoomLevels }
-    };
-
-        var result = await session.RunAsync(query, parameters);
-
+        var result = await session.RunAsync(query, new { tagIds });
         var records = await result.ToListAsync();
 
         return records
-            .Select(record => (
-                NodeId: Guid.Parse(record["NodeId"].As<string>()),
-                TagId: Guid.Parse(record["TagId"].As<string>())
+            .Select(r => (
+                NodeId: Guid.Parse(r["NodeId"].As<string>()),
+                TagId: Guid.Parse(r["TagId"].As<string>()),
+                TagLevel: r["TagLevel"].As<string>()
+            ))
+            .ToHashSet();
+    }
+
+    public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
+        IEnumerable<string> tagIds, IEnumerable<string> zoomLevels)
+    {
+        using var session = _driver.AsyncSession();
+        var query = @"
+        MATCH (t:Tag)
+        WHERE t.id IN $tagIds
+        MATCH (t)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+        WHERE l.name IN $zoomLevels
+          AND (n.status IS NULL OR n.status <> 'pending_approval')
+        RETURN DISTINCT n.id AS NodeId, t.id AS TagId, l.name AS TagLevel
+    ";
+        var result = await session.RunAsync(query, new { tagIds, zoomLevels });
+        var records = await result.ToListAsync();
+
+        return records
+            .Select(r => (
+                NodeId: Guid.Parse(r["NodeId"].As<string>()),
+                TagId: Guid.Parse(r["TagId"].As<string>()),
+                TagLevel: r["TagLevel"].As<string>()
             ))
             .ToHashSet();
     }

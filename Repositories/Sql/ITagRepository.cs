@@ -92,22 +92,29 @@ public class TagRepository : ITagRepository
         }
         return dict;
     }
-    
+
     public async Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids)
     {
-        var tagNames = await _context.Tags
-            .Where(tag => ids.Contains(tag.Id.Value))
-            .Select(tag => new { tag.Id, tag.Name })
-            .ToListAsync();
-
+        const int batchSize = 20;
+        var idList = ids.ToList();
         var dict = new Dictionary<Guid, string>();
-        foreach (var tag in tagNames)
+
+        for (int i = 0; i < idList.Count; i += batchSize)
         {
-            if (tag.Id.HasValue)
+            var batch = idList.Skip(i).Take(batchSize).ToList();
+
+            var tagNames = await _context.Tags
+                .Where(tag => tag.Id.HasValue && batch.Contains(tag.Id.Value))
+                .Select(tag => new { tag.Id, tag.Name })
+                .ToListAsync(); // 保持 IQueryable 流程
+
+            foreach (var tag in tagNames)
             {
-                dict[tag.Id.Value] = tag.Name ?? string.Empty;
+                if (tag.Id.HasValue)
+                    dict[tag.Id.Value] = tag.Name ?? string.Empty;
             }
         }
+
         return dict;
     }
 

@@ -65,7 +65,7 @@ namespace Sciencetopia.Controllers
                 : string.Empty;
 
             // Define the valid zoom levels
-            var validZoomLevels = new[] {"Keyword", "Topic", "Field", "Subject"};
+            var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject" };
             // Validate the zoom level
             if (!validZoomLevels.Contains(zoomLevel))
             {
@@ -82,12 +82,22 @@ namespace Sciencetopia.Controllers
         [HttpPost("LazyLoad")]
         public async Task<IActionResult> LazyLoad([FromBody] LazyLoadRequest request)
         {
-            if (request == null || request.ParentIds == null || request.ParentIds.Count == 0)
-            {
-                return BadRequest("ParentIds are required.");
-            }
-            var data = await _knowledgeGraphService.GetAdjacentNodesByLevelAsync(request.ParentIds, request.ZoomLevel);
-            return Ok(data);
+            if (request?.ParentIds == null || request.ParentIds.Count == 0)
+                return Ok(new List<GraphDTO>());
+
+            var cleanParentIdStrings = request.ParentIds
+                .Select(s => s?.Trim())
+                .Where(s => !string.IsNullOrWhiteSpace(s) && Guid.TryParse(s, out _))
+                .Select(s => s!)                               // 已校验非空
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (cleanParentIdStrings.Count == 0)
+                return Ok(new List<GraphDTO>());
+
+            // ✅ 这里用干净的 cleanParentIdStrings，而不是原始的 request.ParentIds
+            var data = await _knowledgeGraphService.GetAdjacentNodesByLevelAsync(cleanParentIdStrings, request.ZoomLevel ?? "Field");
+            return Ok(data != null ? data : new List<GraphDTO>());
         }
 
         [HttpGet("GetNodeDetails")]

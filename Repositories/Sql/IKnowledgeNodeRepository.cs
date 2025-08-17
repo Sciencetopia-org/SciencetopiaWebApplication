@@ -73,19 +73,27 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
     // 获取节点名称，投影时将 Guid 转为字符串
     public async Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids)
     {
+        const int batchSize = 20;
+        var idList = ids.ToList();
         var dict = new Dictionary<Guid, string>();
-        foreach (var id in ids)
-        {
-            var name = await _context.KnowledgeNodes
-                .Where(n => n.Id == id)
-                .Select(n => n.Name)
-                .FirstOrDefaultAsync();
 
-            if (name != null)
+        for (int i = 0; i < idList.Count; i += batchSize)
+        {
+            // 改为 HashSet 可防止 EF 使用 OPENJSON 优化路径
+            var batchSet = idList.Skip(i).Take(batchSize).ToHashSet();
+
+            var nodes = await _context.KnowledgeNodes
+                .Where(n => n.Id.HasValue && batchSet.Contains(n.Id.Value))
+                .Select(n => new { n.Id, n.Name })
+                .ToListAsync();
+
+            foreach (var node in nodes)
             {
-                dict[id] = name;
+                if (node.Id.HasValue)
+                    dict[node.Id.Value] = node.Name ?? string.Empty;
             }
         }
+
         return dict;
     }
 

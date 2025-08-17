@@ -47,21 +47,33 @@ public class KnowledgeGraphService
 
     public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, IEnumerable<string> zoomLevels, string userId)
     {
+        // var startTime = DateTime.UtcNow;
         var allTagIds = await _tagRepo.GetTagNodeIdsByTagTypeAsync(tagSystem);
-        var tagIdsInView = await _graphRepository.GetTagIdsInViewAsync(zoomLevels, allTagIds.Select(id => id.ToString()));
+        // var elapsed1 = DateTime.UtcNow - startTime;
+        // Console.WriteLine($"GetTagNodeIdsByTagTypeAsync took {elapsed1.TotalSeconds} seconds.");
+        // var tagIdsInView = await _graphRepository.GetTagIdsInViewAsync(zoomLevels, allTagIds.Select(id => id.ToString()));
+        // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
+        // Console.WriteLine($"GetTagIdsInViewAsync took {elapsed2.TotalSeconds} seconds.");
 
         return viewType.ToLower() switch
         {
-            "venn" => await GetVennGraphDataInViewAsync(tagIdsInView, zoomLevels),
-            _ => await GetNetworkGraphDataInViewAsync(tagIdsInView, userId, zoomLevels)
+            "venn" => await GetVennGraphDataInViewAsync(allTagIds.Select(id => id.ToString()), zoomLevels),
+            _ => await GetNetworkGraphDataInViewAsync(allTagIds.Select(id => id.ToString()), userId, zoomLevels)
         };
     }
 
     private async Task<object> GetNetworkGraphDataAsync(IEnumerable<Guid> tagIds, string userId)
     {
-        var allNodeIds = await GetAllNodesRelatedToTags(tagIds);
+        var nodeTagTriples = await _graphRepository.GetNodeTagTriplesRelatedToTagsAsync(tagIds.Select(id => id.ToString()));
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds);
+        var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
+
+        // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
+        var nodeToLevel = nodeTagTriples
+            .GroupBy(p => p.NodeId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
+
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds, nodeToLevel);
 
         if (!string.IsNullOrEmpty(userId))
         {
@@ -74,11 +86,26 @@ public class KnowledgeGraphService
 
     private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<string> tagIds, string userId, IEnumerable<string> zoomLevels)
     {
-        var nodeTagPairs = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevels);
-        var allNodeIds = nodeTagPairs.Select(pair => pair.NodeId).Distinct().ToList();
-        var allTagIds = nodeTagPairs.Select(pair => pair.TagId).Distinct().ToList();
+        // var startTime = DateTime.UtcNow;
+        var nodeTagTriples = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevels);
+        // var elapsed1 = DateTime.UtcNow - startTime;
+        // Console.WriteLine($"GetAllNodesRelatedToTagsInViewAsync took {elapsed1.TotalSeconds} seconds.");
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds);
+        var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
+        var allTagIds = nodeTagTriples.Select(p => p.TagId).Distinct().ToList();
+
+        // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
+        var nodeToLevel = nodeTagTriples
+            .GroupBy(p => p.NodeId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
+
+        // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
+        // Console.WriteLine($"Node to level mapping took {elapsed2.TotalSeconds} seconds.");
+        
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel);
+        // var endTime = DateTime.UtcNow;
+        // var elapsed3 = endTime - startTime - elapsed1 - elapsed2;
+        // Console.WriteLine($"GetKnowledgeGraphDataByNodeId took {elapsed3.TotalSeconds} seconds.");
 
         if (!string.IsNullOrEmpty(userId))
         {
@@ -100,7 +127,7 @@ public class KnowledgeGraphService
             .ToList();
 
         // 获取包含关系（原始所有关系）
-        var allContainRelations = await _graphRepository.GetPureTagContainRelationsAsync();
+        var allContainRelations = await _graphRepository.GetPureTagContainRelationsAsync(tagIds.Select(id => id.ToString()));
 
         // 只保留两端都在当前标签体系中的包含关系
         var validContainRelations = new List<(Guid Parent, Guid Child)>();
@@ -183,7 +210,7 @@ public class KnowledgeGraphService
             .ToList();
 
         // 获取包含关系（原始所有关系）
-        var allContainRelations = await _graphRepository.GetPureTagContainRelationsAsync();
+        var allContainRelations = await _graphRepository.GetPureTagContainRelationsAsync(tagIds);
 
         // 只保留两端都在当前标签体系中的包含关系
         var containRelations = allContainRelations
@@ -309,8 +336,18 @@ public class KnowledgeGraphService
         return nodeIdsString.Select(id => Guid.Parse(id));
     }
 
-    public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds, IEnumerable<Guid> allTagIds)
+    public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds,
+    IEnumerable<Guid> allTagIds,
+    IReadOnlyDictionary<Guid, string>? nodeToLevel = null)
     {
+        // 如果调用方没传，就内部批量查一遍
+        if (nodeToLevel is null)
+        {
+            var map = await _graphRepository
+                .GetNodeLevelsByNodeIdsAsync(allNodeIds.Select(id => id.ToString()));
+            nodeToLevel = map;
+        }
+
         // 获取节点详情
         var nodesDict = await _knowledgeRepo.GetNodesNamesAsync(allNodeIds);
 
@@ -319,45 +356,45 @@ public class KnowledgeGraphService
         {
             Id = kvp.Key,
             Name = kvp.Value,
-            TagLevel = "" // 后续赋值
+            TagLevel = nodeToLevel.TryGetValue(kvp.Key, out var lvl) ? lvl : "Keyword"
         }).ToList();
 
         // 从 SQL 获取所有 Tag 信息
         var sqlTags = await _tagRepo.GetTagNamesAsync(allTagIds);
         var tagIdToName = sqlTags.ToDictionary(t => t.Key, t => t.Value);
 
-        // 获取 TagLevel 节点 ID
-        var tagLevelIdStrings = await _graphRepository.GetNodeIdsByLabelAsync("TagLevel");
-        var tagLevelIdSet = tagLevelIdStrings
-            .Select(id => Guid.TryParse(id, out var guid) ? guid : Guid.Empty)
-            .Where(guid => guid != Guid.Empty)
-            .ToHashSet();
+        // // 获取 TagLevel 节点 ID
+        // var tagLevelIdStrings = await _graphRepository.GetNodeIdsByLabelAsync("TagLevel");
+        // var tagLevelIdSet = tagLevelIdStrings
+        //     .Select(id => Guid.TryParse(id, out var guid) ? guid : Guid.Empty)
+        //     .Where(guid => guid != Guid.Empty)
+        //     .ToHashSet();
 
-        var sqlTagLevels = await _tagRepo.GetTagNamesAsync(tagLevelIdSet);
-        var tagLevelIdToName = sqlTagLevels.ToDictionary(t => t.Key, t => t.Value);
+        // var sqlTagLevels = await _tagRepo.GetTagNamesAsync(tagLevelIdSet);
+        // var tagLevelIdToName = sqlTagLevels.ToDictionary(t => t.Key, t => t.Value);
 
-        // 从 Neo4j 获取节点和其 TagLevel 标签的对应关系
-        var nodeIdToTagLevelId = await _graphRepository.GetNodeTagLevelRelationsAsync(allNodeIds.Select(id => id.ToString()));
+        // // 从 Neo4j 获取节点和其 TagLevel 标签的对应关系
+        // var nodeIdToTagLevelId = await _graphRepository.GetNodeTagLevelRelationsAsync(allNodeIds.Select(id => id.ToString()));
 
-        // 更新节点的 TagLevel
-        foreach (var node in sqlNodes)
-        {
-            if (nodeIdToTagLevelId.TryGetValue(node.Id.ToString(), out var tagLevelTagIdStr) &&
-                Guid.TryParse(tagLevelTagIdStr, out var tagLevelGuid) &&
-                tagLevelIdToName.TryGetValue(tagLevelGuid, out var tagLevelName))
-            {
-                node.TagLevel = tagLevelName;
-            }
-            else
-            {
-                node.TagLevel = "Keyword";
-            }
-        }
+        // // 更新节点的 TagLevel
+        // foreach (var node in sqlNodes)
+        // {
+        //     if (nodeIdToTagLevelId.TryGetValue(node.Id.ToString(), out var tagLevelTagIdStr) &&
+        //         Guid.TryParse(tagLevelTagIdStr, out var tagLevelGuid) &&
+        //         tagLevelIdToName.TryGetValue(tagLevelGuid, out var tagLevelName))
+        //     {
+        //         node.TagLevel = tagLevelName;
+        //     }
+        //     else
+        //     {
+        //         node.TagLevel = "Keyword";
+        //     }
+        // }
 
         // 获取所有关系
-        var taggedRelations = await _graphRepository.GetTaggedRelationsAsync();
+        var taggedRelations = await _graphRepository.GetTaggedRelationsAsync(allNodeIds.Select(id => id.ToString()), allTagIds.Select(id => id.ToString()));
         var projectedRelations = new List<ProjectedRelationDTO>(); // 仍为空
-        var tagContainRelations = await _graphRepository.GetPureTagContainRelationsAsync();
+        var tagContainRelations = await _graphRepository.GetPureTagContainRelationsAsync(allTagIds.Select(id => id.ToString()));
 
         // 预构建知识节点名称到 ID 的映射（用于 CONTAIN 关系）
         var tagNameToNodeId = sqlNodes
