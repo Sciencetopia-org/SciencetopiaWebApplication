@@ -137,8 +137,8 @@ public class KnowledgeGraphService
 
         // 收集所有涉及的标签和节点 ID（为了查 SQL 元信息）
         var involvedTagIds = vennGroups.Select(g => g.TagId)
-            .Union(validContainRelations.Select(r => r.Parent))
-            .Union(validContainRelations.Select(r => r.Child))
+            .Union(validContainRelations.Select(r => r.ParentTagId))
+            .Union(validContainRelations.Select(r => r.ChildTagId))
             .Distinct()
             .ToList();
 
@@ -174,14 +174,14 @@ public class KnowledgeGraphService
         {
             parent = new
             {
-                id = r.Parent,
-                name = tagMetaDict.TryGetValue(r.Parent, out var parentMeta) ? parentMeta : r.Parent.ToString()
+                id = r.ParentTagId,
+                name = tagMetaDict.TryGetValue(r.ParentTagId, out var parentMeta) ? parentMeta : r.ParentTagId.ToString()
                 // name = tagMetaDict.TryGetValue(r.Parent, out var parentMeta) ? parentMeta.Name : r.Parent.ToString()
             },
             child = new
             {
-                id = r.Child,
-                name = tagMetaDict.TryGetValue(r.Child, out var childMeta) ? childMeta : r.Child.ToString()
+                id = r.ChildTagId,
+                name = tagMetaDict.TryGetValue(r.ChildTagId, out var childMeta) ? childMeta : r.ChildTagId.ToString()
                 // name = tagMetaDict.TryGetValue(r.Child, out var childMeta) ? childMeta.Name : r.Child.ToString()
             }
         });
