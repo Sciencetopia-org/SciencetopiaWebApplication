@@ -1,6 +1,6 @@
 // Models/TaggedRelationDTO.cs
 public class TaggedRelationDTO
 {
-    public string? SourceId { get; set; }
-    public string? TagId { get; set; }
+    public Guid SourceId { get; set; }
+    public Guid TagId { get; set; }
 }

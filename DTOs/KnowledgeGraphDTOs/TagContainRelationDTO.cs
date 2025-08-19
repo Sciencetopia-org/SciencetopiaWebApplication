@@ -1,6 +1,6 @@
 // Models/TagContainRelationDTO.cs
 public class TagContainRelationDTO
 {
-    public string? ParentTagId { get; set; }
-    public string? ChildTagId { get; set; }
+    public Guid ParentTagId { get; set; }
+    public Guid ChildTagId { get; set; }
 }

@@ -22,7 +22,8 @@ public class SearchService
         // Step 2: SQL - 匹配且审核通过的 KnowledgeNode ID
         var approvedNodes = await _knowledgeRepo.SearchKnowledgeNodesAsync(query, 0, int.MaxValue);
         var approvedNodeIds = approvedNodes
-            .Select(n => n.Id.ToString()!.ToLower())
+            .Where(n => n.Id.HasValue)
+            .Select(n => n.Id!.Value)
             .ToList();
 
         // Step 3: Neo4j - 获取这些节点关联的资源 ID
