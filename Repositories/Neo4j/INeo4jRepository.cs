@@ -9,14 +9,14 @@ public interface IGraphRepository
     /// <summary>
     /// 获取所有知识节点与纯标签节点之间的 TAGGED_WITH 关系
     /// </summary>
-    Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<string> nodeIds, IEnumerable<string> tagIds);
-    Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds);
+    Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<Guid> nodeIds, IEnumerable<Guid> tagIds);
+    Task<IEnumerable<Guid>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<Guid> allTagIds);
 
     /// <summary>
     /// 获取知识节点之间的层次关系（知识层次关系），
     /// 即标签知识节点之间按照标签体系建立的父→子关系
     /// </summary>
-    Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<string> allTagIds);
+    Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<Guid> allTagIds);
 
     /// <summary>
     /// 利用纯标签节点和 TAGGED_WITH 关系进行二部图投影，
@@ -27,38 +27,38 @@ public interface IGraphRepository
     /// <summary>
     /// 获取知识节点与标签层次节点之间的关系
     /// </summary>
-    Task<Dictionary<string, string>> GetNodeTagLevelRelationsAsync(IEnumerable<string> nodeIds);
+    Task<Dictionary<Guid, string>> GetNodeTagLevelRelationsAsync(IEnumerable<Guid> nodeIds);
 
     /// <summary>
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
-    Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds);
+    Task<HashSet<Guid>> GetAllNodesRelatedToTagsAsync(IEnumerable<Guid> tagIds);
 
-    Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<string> nodeIds);
-    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(IEnumerable<string> tagIds);
-    Task<HashSet<(Guid NodeId, string NodeIdStr, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
+    Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<Guid> nodeIds);
+    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(IEnumerable<Guid> tagIds);
+    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels);
     /// <summary>
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
-    Task<HashSet<string>> GetAllTagsRelatedToNodesAsync(IEnumerable<string> nodeIds);
-    Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId);
-    Task<HashSet<(string TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId);
+    Task<HashSet<Guid>> GetAllTagsRelatedToNodesAsync(IEnumerable<Guid> nodeIds);
+    Task<HashSet<Guid>> GetTagsRelatedToNodeAsync(Guid nodeId);
+    Task<HashSet<(Guid TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId);
     /// <summary>
     /// 根据标签类型获取标签节点的 Id
     /// </summary>
-    Task<IEnumerable<string>> GetNodeIdsByLabelAsync(string label);
-    Task<HashSet<string>> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentNodeIds, string targetLevel);
+    Task<IEnumerable<Guid>> GetNodeIdsByLabelAsync(string label);
+    Task<HashSet<Guid>> GetAdjacentNodesByLevelAsync(IEnumerable<Guid> parentNodeIds, string targetLevel);
     /// <summary>
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
-    Task<HashSet<string>> GetAllDescendantTagIdsAsync(IEnumerable<string> tagNames);
+    Task<HashSet<Guid>> GetAllDescendantTagIdsAsync(IEnumerable<string> tagNames);
 
     /// <summary>
     /// 获取 Venn 图中标签与知识节点的分组
     /// </summary>
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync();
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(IEnumerable<string> zoomLevels);
-    Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds);
+    Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<Guid> knowledgeNodeIds);
     Task<List<string>> GetResourcesIdsRelatedToNodeAsync(string nodeId);
     Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
@@ -81,7 +81,7 @@ public class GraphRepository : IGraphRepository
         _driver = driver;
     }
 
-    public async Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<string> nodeIds, IEnumerable<string> tagIds)
+    public async Task<List<TaggedRelationDTO>> GetTaggedRelationsAsync(IEnumerable<Guid> nodeIds, IEnumerable<Guid> tagIds)
     {
         using var session = _driver.AsyncSession();
         var cypher = @"
@@ -91,21 +91,21 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeIds", nodeIds },
-            { "tagIds", tagIds }
+            { "nodeIds", nodeIds.Select(id => id.ToString()) },
+            { "tagIds", tagIds.Select(id => id.ToString()) }
         };
         var result = await session.RunAsync(cypher, parameters);
         return (await result.ToListAsync())
             .Select(record => new TaggedRelationDTO
             {
-                SourceId = record["SourceId"].As<string>(),
-                TagId = record["TagId"].As<string>()
+                SourceId = Guid.Parse(record["SourceId"].As<string>()),
+                TagId = Guid.Parse(record["TagId"].As<string>())
             }).ToList();
     }
 
-    public async Task<IEnumerable<string>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<string> allTagIds)
+    public async Task<IEnumerable<Guid>> GetTagIdsInViewAsync(IEnumerable<string> zoomLevels, IEnumerable<Guid> allTagIds)
     {
-        if (allTagIds == null || !allTagIds.Any()) return Enumerable.Empty<string>();
+        if (allTagIds == null || !allTagIds.Any()) return Enumerable.Empty<Guid>();
 
         using var session = _driver.AsyncSession();
         var cypher = @"
@@ -113,15 +113,14 @@ public class GraphRepository : IGraphRepository
     WHERE t.id IN $tagIds AND l.name IN $zoomLevels
     RETURN DISTINCT t.id AS TagId;
     ";
-        var result = await session.RunAsync(cypher, new { zoomLevels, tagIds = allTagIds });
+        var result = await session.RunAsync(cypher, new { zoomLevels, tagIds = allTagIds.Select(id => id.ToString()) });
         var records = await result.ToListAsync();
 
-        // Return the TagId directly as a string list, no need for additional Select
-        return records.Select(r => r["TagId"].As<string>());
+        return records.Select(r => Guid.Parse(r["TagId"].As<string>()));
     }
 
     // Repositories/GraphRepository.cs
-    public async Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<string> allTagIds)
+    public async Task<List<TagContainRelationDTO>> GetPureTagContainRelationsAsync(IEnumerable<Guid> allTagIds)
     {
         using var session = _driver.AsyncSession();
         var cypher = @"
@@ -133,14 +132,14 @@ public class GraphRepository : IGraphRepository
     ";
         var parameters = new Dictionary<string, object>
         {
-            { "tagIds", allTagIds }
+            { "tagIds", allTagIds.Select(id => id.ToString()) }
         };
         var result = await session.RunAsync(cypher, parameters);
         return (await result.ToListAsync())
             .Select(record => new TagContainRelationDTO
             {
-                ParentTagId = record["ParentTagId"].As<string>(),
-                ChildTagId = record["ChildTagId"].As<string>()
+                ParentTagId = Guid.Parse(record["ParentTagId"].As<string>()),
+                ChildTagId = Guid.Parse(record["ChildTagId"].As<string>())
             }).ToList();
     }
 
@@ -158,13 +157,13 @@ public class GraphRepository : IGraphRepository
         return (await result.ToListAsync())
             .Select(record => new ProjectedRelationDTO
             {
-                SourceId = record["SourceId"].As<string>(),
-                TargetId = record["TargetId"].As<string>(),
+                SourceId = Guid.Parse(record["SourceId"].As<string>()),
+                TargetId = Guid.Parse(record["TargetId"].As<string>()),
                 Weight = record["weight"].As<int>()
             }).ToList();
     }
 
-    public async Task<Dictionary<string, string>> GetNodeTagLevelRelationsAsync(IEnumerable<string> nodeIds)
+    public async Task<Dictionary<Guid, string>> GetNodeTagLevelRelationsAsync(IEnumerable<Guid> nodeIds)
     {
         using var session = _driver.AsyncSession();
 
@@ -175,16 +174,16 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeIds", nodeIds }
+            { "nodeIds", nodeIds.Select(id => id.ToString()) }
         };
 
         var result = await session.RunAsync(query, parameters);
 
-        var nodeTagLevels = new Dictionary<string, string>();
+        var nodeTagLevels = new Dictionary<Guid, string>();
 
         await result.ForEachAsync(record =>
         {
-            var nodeId = record["NodeId"].As<string>();
+            var nodeId = Guid.Parse(record["NodeId"].As<string>());
             var tagLevelId = record["TagLevelId"].As<string>();
             nodeTagLevels[nodeId] = tagLevelId;
         });
@@ -192,7 +191,7 @@ public class GraphRepository : IGraphRepository
         return nodeTagLevels;
     }
 
-    public async Task<HashSet<string>> GetAllNodesRelatedToTagsAsync(IEnumerable<string> tagIds)
+    public async Task<HashSet<Guid>> GetAllNodesRelatedToTagsAsync(IEnumerable<Guid> tagIds)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -202,17 +201,17 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "tagIds", tagIds }
+            { "tagIds", tagIds.Select(id => id.ToString()) }
         };
 
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
 
-        return records.Select(record => record["NodeId"].As<string>()).ToHashSet();
+        return records.Select(record => Guid.Parse(record["NodeId"].As<string>())).ToHashSet();
     }
 
-    public async Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<string> nodeIds)
+    public async Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<Guid> nodeIds)
     {
         if (nodeIds == null) return new();
 
@@ -222,7 +221,7 @@ public class GraphRepository : IGraphRepository
         MATCH (n:KnowledgeNode {id: nid})<-[:TAGGED_WITH]-(l:TagLevel)
         RETURN nid AS NodeId, l.name AS TagLevel
     ";
-        var cursor = await session.RunAsync(cypher, new { nodeIds });
+        var cursor = await session.RunAsync(cypher, new { nodeIds = nodeIds.Select(id => id.ToString()) });
         var records = await cursor.ToListAsync();
 
         // 若一个节点匹配多个层级，可在这里自定义优先级（示例：取第一个）
@@ -235,7 +234,7 @@ public class GraphRepository : IGraphRepository
     }
 
     public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(
-    IEnumerable<string> tagIds)
+    IEnumerable<Guid> tagIds)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -244,7 +243,7 @@ public class GraphRepository : IGraphRepository
         WHERE (n.status IS NULL OR n.status <> 'pending_approval')
         RETURN DISTINCT n.id AS NodeId, id AS TagId, l.name AS TagLevel
     ";
-        var result = await session.RunAsync(query, new { tagIds });
+        var result = await session.RunAsync(query, new { tagIds = tagIds.Select(id => id.ToString()) });
         var records = await result.ToListAsync();
 
         return records
@@ -256,8 +255,8 @@ public class GraphRepository : IGraphRepository
             .ToHashSet();
     }
 
-    public async Task<HashSet<(Guid NodeId, string NodeIdStr, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
-        IEnumerable<string> tagIds, IEnumerable<string> zoomLevels)
+    public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
+        IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -268,20 +267,19 @@ public class GraphRepository : IGraphRepository
           AND (n.status IS NULL OR n.status <> 'pending_approval')
         RETURN DISTINCT n.id AS NodeId, t.id AS TagId, l.name AS TagLevel
     ";
-        var result = await session.RunAsync(query, new { tagIds, zoomLevels });
+        var result = await session.RunAsync(query, new { tagIds = tagIds.Select(id => id.ToString()), zoomLevels });
         var records = await result.ToListAsync();
 
         return records
             .Select(r => (
                 NodeId: Guid.Parse(r["NodeId"].As<string>()),
-                NodeIdStr: r["NodeId"].As<string>(),
                 TagId: Guid.Parse(r["TagId"].As<string>()),
                 TagLevel: r["TagLevel"].As<string>()
             ))
             .ToHashSet();
     }
 
-    public async Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId)
+    public async Task<HashSet<Guid>> GetTagsRelatedToNodeAsync(Guid nodeId)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -291,16 +289,16 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeId", nodeId }
+            { "nodeId", nodeId.ToString() }
         };
 
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
-        return records.Select(record => record["TagId"].As<string>()).ToHashSet();
+        return records.Select(record => Guid.Parse(record["TagId"].As<string>())).ToHashSet();
     }
 
-    public async Task<HashSet<string>> GetAllTagsRelatedToNodesAsync(IEnumerable<string> nodeIds)
+    public async Task<HashSet<Guid>> GetAllTagsRelatedToNodesAsync(IEnumerable<Guid> nodeIds)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -310,16 +308,16 @@ public class GraphRepository : IGraphRepository
         ";
         var parameters = new Dictionary<string, object>
         {
-            { "nodeIds", nodeIds }
+            { "nodeIds", nodeIds.Select(id => id.ToString()) }
         };
 
         var result = await session.RunAsync(query, parameters);
 
         var records = await result.ToListAsync();
-        return records.Select(record => record["TagId"].As<string>()).ToHashSet();
+        return records.Select(record => Guid.Parse(record["TagId"].As<string>())).ToHashSet();
     }
 
-    public async Task<HashSet<(string TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId)
+    public async Task<HashSet<(Guid TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId)
     {
         using var session = _driver.AsyncSession();
         var query = @"
@@ -337,13 +335,13 @@ public class GraphRepository : IGraphRepository
         var records = await result.ToListAsync();
         return records
             .Select(record => (
-                TagId: record["TagId"].As<string>(),
+                TagId: Guid.Parse(record["TagId"].As<string>()),
                 ResourceId: record["ResourceId"].As<string>()
             ))
             .ToHashSet();
     }
 
-    public async Task<IEnumerable<string>> GetNodeIdsByLabelAsync(string label)
+    public async Task<IEnumerable<Guid>> GetNodeIdsByLabelAsync(string label)
     {
         // 确保 label 仅包含安全的字符（防止 Cypher 注入攻击）
         if (!Regex.IsMatch(label, "^[A-Za-z0-9_]+$"))
@@ -361,14 +359,14 @@ public class GraphRepository : IGraphRepository
 
         var result = await session.RunAsync(query);
 
-        return await result.ToListAsync(record => record["TagId"].As<string>());
+        return await result.ToListAsync(record => Guid.Parse(record["TagId"].As<string>()));
     }
 
-    public async Task<HashSet<string>> GetAllDescendantTagIdsAsync(IEnumerable<string> tagIds)
+    public async Task<HashSet<Guid>> GetAllDescendantTagIdsAsync(IEnumerable<string> tagIds)
     {
         using var session = _driver.AsyncSession();
 
-        if (!tagIds.Any()) return new HashSet<string>();
+        if (!tagIds.Any()) return new HashSet<Guid>();
 
         var query = @"
         MATCH (parent:Tag)-[:CONTAIN*]->(child:Tag)
@@ -379,7 +377,7 @@ public class GraphRepository : IGraphRepository
 
         var result = await session.RunAsync(query, parameters);
         var records = await result.ToListAsync();
-        return records.Select(record => record["tagId"].As<string>()).ToHashSet();
+        return records.Select(record => Guid.Parse(record["tagId"].As<string>())).ToHashSet();
     }
 
     public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync()
@@ -437,7 +435,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds)
+    public async Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<Guid> knowledgeNodeIds)
     {
         if (!knowledgeNodeIds.Any())
             return new List<string>();
@@ -448,7 +446,7 @@ public class GraphRepository : IGraphRepository
         var result = await session.RunAsync(@"
         UNWIND $ids AS nodeId
         MATCH (n:KnowledgeNode {id: nodeId})-[:HAS_RESOURCE]->(r:Resource)
-        RETURN DISTINCT r.id AS resourceId", new { ids = knowledgeNodeIds });
+        RETURN DISTINCT r.id AS resourceId", new { ids = knowledgeNodeIds.Select(id => id.ToString()) });
 
         await foreach (var record in result)
         {
@@ -676,7 +674,7 @@ public class GraphRepository : IGraphRepository
         }
     }
 
-    public async Task<HashSet<string>> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentNodeIds, string targetLevel)
+    public async Task<HashSet<Guid>> GetAdjacentNodesByLevelAsync(IEnumerable<Guid> parentNodeIds, string targetLevel)
     {
         using var session = _driver.AsyncSession();
 
@@ -688,13 +686,13 @@ public class GraphRepository : IGraphRepository
 
         var parameters = new Dictionary<string, object>
         {
-            { "parentIds", parentNodeIds },
+            { "parentIds", parentNodeIds.Select(id => id.ToString()) },
             { "targetLevel", targetLevel }
         };
 
         var result = await session.RunAsync(query, parameters);
         var records = await result.ToListAsync();
 
-        return records.Select(r => r["NodeId"].As<string>()).ToHashSet();
+        return records.Select(r => Guid.Parse(r["NodeId"].As<string>())).ToHashSet();
     }
 }
