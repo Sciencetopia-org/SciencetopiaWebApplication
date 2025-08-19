@@ -67,13 +67,14 @@ public class KnowledgeGraphService
         var nodeTagTriples = await _graphRepository.GetNodeTagTriplesRelatedToTagsAsync(tagIds.Select(id => id.ToString()));
 
         var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
+        var allNodeIdsString = nodeTagTriples.Select(p => p.NodeId.ToString()).Distinct().ToList();
 
         // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
         var nodeToLevel = nodeTagTriples
             .GroupBy(p => p.NodeId)
             .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds, nodeToLevel);
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allNodeIdsString, tagIds, nodeToLevel);
 
         if (!string.IsNullOrEmpty(userId))
         {
@@ -93,6 +94,7 @@ public class KnowledgeGraphService
 
         var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
         var allTagIds = nodeTagTriples.Select(p => p.TagId).Distinct().ToList();
+        var allNodeIdsString = nodeTagTriples.Select(p => p.NodeIdStr).Distinct().ToList();
 
         // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
         var nodeToLevel = nodeTagTriples
@@ -101,8 +103,8 @@ public class KnowledgeGraphService
 
         // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
         // Console.WriteLine($"Node to level mapping took {elapsed2.TotalSeconds} seconds.");
-        
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel);
+
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allNodeIdsString, allTagIds, nodeToLevel);
         // var endTime = DateTime.UtcNow;
         // var elapsed3 = endTime - startTime - elapsed1 - elapsed2;
         // Console.WriteLine($"GetKnowledgeGraphDataByNodeId took {elapsed3.TotalSeconds} seconds.");
@@ -294,7 +296,7 @@ public class KnowledgeGraphService
         // allTagIds 转换为 Guid
         var allTagIdsGuid = allTagIds.Select(id => Guid.Parse(id)).ToList();
 
-        return await GetKnowledgeGraphDataByNodeId(allNodeIdsGuid, allTagIdsGuid);
+        return await GetKnowledgeGraphDataByNodeId(allNodeIdsGuid, allNodeIds, allTagIdsGuid);
     }
 
     public async Task<IEnumerable<Guid>> GetAllKnowledgeNodeIdsAsync()
@@ -336,7 +338,7 @@ public class KnowledgeGraphService
         return nodeIdsString.Select(id => Guid.Parse(id));
     }
 
-    public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds,
+    public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds, IEnumerable<string> allNodeIdsStr,
     IEnumerable<Guid> allTagIds,
     IReadOnlyDictionary<Guid, string>? nodeToLevel = null)
     {
@@ -344,7 +346,7 @@ public class KnowledgeGraphService
         if (nodeToLevel is null)
         {
             var map = await _graphRepository
-                .GetNodeLevelsByNodeIdsAsync(allNodeIds.Select(id => id.ToString()));
+                .GetNodeLevelsByNodeIdsAsync(allNodeIdsStr);
             nodeToLevel = map;
         }
 
@@ -392,7 +394,7 @@ public class KnowledgeGraphService
         // }
 
         // 获取所有关系
-        var taggedRelations = await _graphRepository.GetTaggedRelationsAsync(allNodeIds.Select(id => id.ToString()), allTagIds.Select(id => id.ToString()));
+        var taggedRelations = await _graphRepository.GetTaggedRelationsAsync(allNodeIdsStr, allTagIds.Select(id => id.ToString()));
         var projectedRelations = new List<ProjectedRelationDTO>(); // 仍为空
         var tagContainRelations = await _graphRepository.GetPureTagContainRelationsAsync(allTagIds.Select(id => id.ToString()));
 
@@ -631,27 +633,41 @@ public class KnowledgeGraphService
         return Enumerable.Empty<Guid>();
     }
 
-    public async Task<object> GetNodeDetailsByIdAsync(Guid nodeId)
+    public async Task<object> GetNodeDetailsByIdAsync(string nodeId, Guid parsedNodeId)
     {
         // Fetch node details from the knowledge repository
-        var nodeDetails = await _knowledgeRepo.GetNodeDetailsByIdAsync(nodeId);
+        var nodeDetails = await _knowledgeRepo.GetNodeDetailsByIdAsync(parsedNodeId);
 
         if (!nodeDetails.HasValue)
         {
-            throw new KeyNotFoundException($"Node with ID {nodeId} not found.");
+            throw new KeyNotFoundException($"Node with ID {parsedNodeId} not found.");
         }
 
-        // Fetch related tags from the graph repository
-        var relatedTags = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId.ToString());
+        // Fetch related tags and resources from the graph repository
+        var tagResourcePairs = await _graphRepository.GetTagsAndResourcesIdsRelatedToNodeAsync(nodeId);
+
+        // Separate tags and resource IDs
+        var relatedTags = tagResourcePairs.Select(pair => pair.TagId).Distinct().ToList();
+        var relatedResourcesIds = tagResourcePairs.Select(pair => pair.ResourceId).Distinct().ToList();
+
+        // // Fetch related tags from the graph repository
+        // var relatedTags = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId.ToString());
+
+        // // Fetch Id's of resources related to the node
+        // var relatedResourcesIds = await _graphRepository.GetResourcesIdsRelatedToNodeAsync(nodeId.ToString());
+
+        // Fetch resource details from the resource repository
+        var relatedResources = await _resourceRepo.GetResourcesByIdsAsync(relatedResourcesIds);
 
         return new
         {
-            Id = nodeId,
+            Id = parsedNodeId,
             Name = nodeDetails.Value.Name,
-            Description = nodeDetails.Value.Description,
+            nodeDetails.Value.Description,
             CreatedDate = nodeDetails.Value.CreatedDate,
             UpdatedDate = nodeDetails.Value.UpdatedDate,
-            Tags = relatedTags
+            Tags = relatedTags,
+            Resources = relatedResources
         };
     }
 

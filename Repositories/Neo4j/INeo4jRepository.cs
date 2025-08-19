@@ -36,12 +36,13 @@ public interface IGraphRepository
 
     Task<Dictionary<Guid, string>> GetNodeLevelsByNodeIdsAsync(IEnumerable<string> nodeIds);
     Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetNodeTagTriplesRelatedToTagsAsync(IEnumerable<string> tagIds);
-    Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
+    Task<HashSet<(Guid NodeId, string NodeIdStr, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(IEnumerable<string> tagIds, IEnumerable<string> zoomLevels);
     /// <summary>
     /// 获取所有与指定知识节点相关的标签
     /// </summary>
     Task<HashSet<string>> GetAllTagsRelatedToNodesAsync(IEnumerable<string> nodeIds);
     Task<HashSet<string>> GetTagsRelatedToNodeAsync(string nodeId);
+    Task<HashSet<(string TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId);
     /// <summary>
     /// 根据标签类型获取标签节点的 Id
     /// </summary>
@@ -58,6 +59,7 @@ public interface IGraphRepository
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync();
     Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(IEnumerable<string> zoomLevels);
     Task<List<string>> GetLinkedResourceIdsAsync(IEnumerable<string> knowledgeNodeIds);
+    Task<List<string>> GetResourcesIdsRelatedToNodeAsync(string nodeId);
     Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
     Task<bool> LinkResourceToNodeAsync(string nodeName, string resourceId);
@@ -254,7 +256,7 @@ public class GraphRepository : IGraphRepository
             .ToHashSet();
     }
 
-    public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
+    public async Task<HashSet<(Guid NodeId, string NodeIdStr, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
         IEnumerable<string> tagIds, IEnumerable<string> zoomLevels)
     {
         using var session = _driver.AsyncSession();
@@ -272,6 +274,7 @@ public class GraphRepository : IGraphRepository
         return records
             .Select(r => (
                 NodeId: Guid.Parse(r["NodeId"].As<string>()),
+                NodeIdStr: r["NodeId"].As<string>(),
                 TagId: Guid.Parse(r["TagId"].As<string>()),
                 TagLevel: r["TagLevel"].As<string>()
             ))
@@ -314,6 +317,30 @@ public class GraphRepository : IGraphRepository
 
         var records = await result.ToListAsync();
         return records.Select(record => record["TagId"].As<string>()).ToHashSet();
+    }
+
+    public async Task<HashSet<(string TagId, string ResourceId)>> GetTagsAndResourcesIdsRelatedToNodeAsync(string nodeId)
+    {
+        using var session = _driver.AsyncSession();
+        var query = @"
+        MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)-[:HAS_RESOURCE]->(r:Resource)
+        WHERE n.id = $nodeId
+        RETURN t.id AS TagId, r.id AS ResourceId
+        ";
+        var parameters = new Dictionary<string, object>
+        {
+            { "nodeId", nodeId }
+        };
+
+        var result = await session.RunAsync(query, parameters);
+
+        var records = await result.ToListAsync();
+        return records
+            .Select(record => (
+                TagId: record["TagId"].As<string>(),
+                ResourceId: record["ResourceId"].As<string>()
+            ))
+            .ToHashSet();
     }
 
     public async Task<IEnumerable<string>> GetNodeIdsByLabelAsync(string label)
@@ -431,6 +458,23 @@ public class GraphRepository : IGraphRepository
         }
 
         return resourceIds;
+    }
+
+    public async Task<List<string>> GetResourcesIdsRelatedToNodeAsync(string nodeId)
+    {
+        if (string.IsNullOrWhiteSpace(nodeId))
+            return new List<string>();
+
+        using var session = _driver.AsyncSession();
+        var query = @"
+        MATCH (n:KnowledgeNode {id: $nodeId})-[:HAS_RESOURCE]->(r:Resource)
+        RETURN r.id AS ResourceId";
+
+        var result = await session.RunAsync(query, new { nodeId });
+
+        return (await result.ToListAsync())
+            .Select(record => record["ResourceId"].As<string>())
+            .ToList();
     }
 
     public async Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId)
