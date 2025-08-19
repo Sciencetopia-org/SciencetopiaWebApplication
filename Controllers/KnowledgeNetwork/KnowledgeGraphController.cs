@@ -115,7 +115,7 @@ namespace Sciencetopia.Controllers
                 {
                     return BadRequest("Invalid Node ID format.");
                 }
-                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(nodeId, parsedNodeId);
+                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(parsedNodeId);
                 if (data != null)
                 {
                     return Ok(data);
@@ -141,9 +141,8 @@ namespace Sciencetopia.Controllers
             {
                 var tagIds = await _knowledgeGraphService.GetTagIdsByTagNamesAsync(tags);
                 var nodeIds = await _knowledgeGraphService.GetNodeIdsByTagsAsync(tagIds);
-                var nodeIdsString = nodeIds.Select(id => id.ToString()).ToList();
                 var relatedTagIds = tagSystem != null ? await _knowledgeGraphService.GetTagIdsByTagTypeAmongNodesAsync(nodeIds, tagSystem) : await _knowledgeGraphService.GetTagIdsByTagTypeAmongNodesAsync(nodeIds, "MainTag");
-                var data = await _knowledgeGraphService.GetKnowledgeGraphDataByNodeId(nodeIds, nodeIdsString, relatedTagIds);
+                var data = await _knowledgeGraphService.GetKnowledgeGraphDataByNodeId(nodeIds, relatedTagIds);
                 return Ok(data);
             }
             catch (Exception ex)
