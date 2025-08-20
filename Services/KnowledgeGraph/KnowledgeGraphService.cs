@@ -658,7 +658,7 @@ public class KnowledgeGraphService
     {
         return await _tagRepo.SearchTagsAsync(query);
     }
-
+    
     public async Task<string> CreateNodeAsync(CreateNodeRequest request, string userId)
     {
         return await CreateNodeWithResourcesAsync(request, userId);

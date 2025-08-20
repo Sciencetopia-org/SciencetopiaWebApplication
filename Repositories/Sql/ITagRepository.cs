@@ -8,6 +8,7 @@ public interface ITagRepository
     Task<List<Tags>> GetAllTagsAsync();
     Task<List<TagDTO>> GetTagsByNameAsync(IEnumerable<string> inputTagNames);
     Task<List<TagDTO>> SearchTagsAsync(string query);
+    Task<List<string>> SearchTagNamesAsync(string query);
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
     Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids);
     Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds);
@@ -90,6 +91,23 @@ public class TagRepository : ITagRepository
             .ToListAsync();
 
         return tags;
+    }
+
+    public async Task<List<string>> SearchTagNamesAsync(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new List<string>();
+        }
+
+        query = query.ToLower();
+
+        var tagNames = await _context.Tags
+            .Where(t => t.Name != null && EF.Functions.Like(t.Name.ToLower(), $"%{query}%"))
+            .Select(t => t.Name)
+            .ToListAsync();
+
+        return tagNames;
     }
 
     public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids)
