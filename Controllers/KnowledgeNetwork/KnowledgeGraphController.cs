@@ -223,6 +223,25 @@ namespace Sciencetopia.Controllers
             }
         }
 
+        [HttpGet("GetTagSystems")]
+        public async Task<IActionResult> GetTagSystems()
+        {
+            try
+            {
+                var tagSystems = await _tagRepository.GetAllTagSystemsAsync();
+                if (tagSystems != null && tagSystems.Count > 0)
+                {
+                    return Ok(tagSystems);
+                }
+
+                return NotFound("No tag systems found.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
         [HttpPost("CreateNode")]
         public async Task<IActionResult> CreateNode([FromBody] CreateNodeRequest request)
         {

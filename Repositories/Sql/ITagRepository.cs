@@ -6,6 +6,7 @@ public interface ITagRepository
 {
     Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType);
     Task<List<Tags>> GetAllTagsAsync();
+    Task<List<string>> GetAllTagSystemsAsync();
     Task<List<TagDTO>> GetTagsByNameAsync(IEnumerable<string> inputTagNames);
     Task<List<TagDTO>> SearchTagsAsync(string query);
     Task<List<string>> SearchTagNamesAsync(string query);
@@ -108,6 +109,16 @@ public class TagRepository : ITagRepository
             .ToListAsync();
 
         return tagNames;
+    }
+
+    public async Task<List<string>> GetAllTagSystemsAsync()
+    {
+        // 获取所有标签系统的名称
+        return await _context.Tags
+            .Where(t => t.Name != null)
+            .Select(t => t.Name!)
+            .Distinct()
+            .ToListAsync();
     }
 
     public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids)
