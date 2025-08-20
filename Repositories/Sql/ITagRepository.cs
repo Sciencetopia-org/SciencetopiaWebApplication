@@ -114,9 +114,9 @@ public class TagRepository : ITagRepository
     public async Task<List<string>> GetAllTagSystemsAsync()
     {
         // 获取所有标签系统的名称
-        return await _context.Tags
-            .Where(t => t.Name != null)
-            .Select(t => t.Name!)
+        return await _context.TypesOfTags
+            .Where(t => t.Type != null)
+            .Select(t => t.Type!)
             .Distinct()
             .ToListAsync();
     }
