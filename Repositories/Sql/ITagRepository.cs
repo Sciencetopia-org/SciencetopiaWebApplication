@@ -7,6 +7,7 @@ public interface ITagRepository
     Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType);
     Task<List<Tags>> GetAllTagsAsync();
     Task<List<TagDTO>> GetTagsByNameAsync(IEnumerable<string> inputTagNames);
+    Task<List<TagDTO>> SearchTagsAsync(string query);
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
     Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids);
     Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds);
@@ -60,6 +61,27 @@ public class TagRepository : ITagRepository
         // 使用 EF Core 查询匹配的标签
         var tags = await _context.Tags
             .Where(t => inputTagNames.Contains(t.Name))
+            .Select(t => new TagDTO
+            {
+                Id = t.Id,
+                Name = t.Name
+            })
+            .ToListAsync();
+
+        return tags;
+    }
+
+    public async Task<List<TagDTO>> SearchTagsAsync(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new List<TagDTO>();
+        }
+
+        query = query.ToLower();
+
+        var tags = await _context.Tags
+            .Where(t => t.Name != null && EF.Functions.Like(t.Name.ToLower(), $"%{query}%"))
             .Select(t => new TagDTO
             {
                 Id = t.Id,
