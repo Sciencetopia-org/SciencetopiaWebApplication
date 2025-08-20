@@ -175,6 +175,30 @@ namespace Sciencetopia.Controllers
             }
         }
 
+        [HttpGet("SearchTags")]
+        public async Task<IActionResult> SearchTags([FromQuery] string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return BadRequest("Search query is required.");
+            }
+
+            try
+            {
+                var result = await _knowledgeGraphService.SearchTagsAsync(query);
+                if (result != null)
+                {
+                    return Ok(result);
+                }
+
+                return NotFound("No tag found matching the query.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
         [HttpPost("CreateNode")]
         public async Task<IActionResult> CreateNode([FromBody] CreateNodeRequest request)
         {
