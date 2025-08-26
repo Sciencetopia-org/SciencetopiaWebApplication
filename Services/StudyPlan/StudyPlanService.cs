@@ -9,10 +9,11 @@ public class StudyPlanService
     private readonly ILogger<StudyPlanService> _logger;
     private readonly IStudyPlanRepository _sqlRepository;
 
-    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger)
+    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository)
     {
         _neo4jDriver = neo4jDriver;
         _logger = logger;
+        _sqlRepository = sqlRepository;
     }
 
     public async Task<bool> SaveStudyPlanAsync(StudyPlanDTO studyPlanDTO, string userId)
