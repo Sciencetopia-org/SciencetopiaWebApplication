@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Sciencetopia.Data;
 
@@ -11,9 +12,11 @@ using Sciencetopia.Data;
 namespace SciencetopiaWebApplication.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250828080031_AddGroupSharingForStudyPlans")]
+    partial class AddGroupSharingForStudyPlans
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -723,25 +726,6 @@ namespace SciencetopiaWebApplication.Migrations
                         });
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupUserRole", b =>
-                {
-                    b.Property<Guid>("GroupId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("UserId")
-                        .HasColumnType("nvarchar(450)")
-                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
-
-                    b.Property<byte>("Role")
-                        .HasColumnType("tinyint");
-
-                    b.HasKey("GroupId", "UserId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("StudyGroupUserRoles", (string)null);
-                });
-
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanDraft", b =>
                 {
                     b.Property<Guid>("Id")
@@ -802,25 +786,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsUnique();
 
                     b.ToTable("StudyPlanDrafts", (string)null);
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyPlanUserRole", b =>
-                {
-                    b.Property<Guid>("PlanId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("UserId")
-                        .HasColumnType("nvarchar(450)")
-                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
-
-                    b.Property<byte>("Role")
-                        .HasColumnType("tinyint");
-
-                    b.HasKey("PlanId", "UserId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("StudyPlanUserRoles", (string)null);
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanVersion", b =>
@@ -890,12 +855,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("Privacy")
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(16)
-                        .HasColumnType("nvarchar(16)")
-                        .HasDefaultValue("private");
-
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -905,10 +864,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("datetime2");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("CreatorId");
-
-                    b.HasIndex("Privacy");
 
                     b.ToTable("StudyPlans");
                 });
@@ -1207,25 +1162,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupUserRole", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.StudyGroupEntity", "Group")
-                        .WithMany("UserRoles")
-                        .HasForeignKey("GroupId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Sciencetopia.Models.ApplicationUser", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Group");
-
-                    b.Navigation("User");
-                });
-
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanDraft", b =>
                 {
                     b.HasOne("StudyPlanEntity", null)
@@ -1233,25 +1169,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasForeignKey("StudyPlanId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyPlanUserRole", b =>
-                {
-                    b.HasOne("StudyPlanEntity", "Plan")
-                        .WithMany("UserRoles")
-                        .HasForeignKey("PlanId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Sciencetopia.Models.ApplicationUser", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Plan");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanVersion", b =>
@@ -1283,16 +1200,6 @@ namespace SciencetopiaWebApplication.Migrations
             modelBuilder.Entity("Conversation", b =>
                 {
                     b.Navigation("Messages");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupEntity", b =>
-                {
-                    b.Navigation("UserRoles");
-                });
-
-            modelBuilder.Entity("StudyPlanEntity", b =>
-                {
-                    b.Navigation("UserRoles");
                 });
 #pragma warning restore 612, 618
         }

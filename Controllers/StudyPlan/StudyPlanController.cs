@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Sciencetopia.Models;
 using Sciencetopia.Services;
 using System.Security.Claims;
+using Sciencetopia.DTOs;
 
 namespace Sciencetopia.Controllers
 {
@@ -112,6 +113,31 @@ namespace Sciencetopia.Controllers
             {
                 return NotFound(new { message = "Study plan not found or could not be updated." });
             }
+        }
+
+        [HttpPost("SaveStudyPlanDraft")]
+        public async Task<IActionResult> SaveStudyPlanDraft([FromBody] SaveStudyPlanDraftRequest request)
+        {
+            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
+            if (request?.Payload?.StudyPlan?.Id == null) return BadRequest("studyPlanId is required.");
+
+            var (ok, draftNumber) = await _studyPlanService.SaveStudyPlanDraftAsync(request.Payload!, userId, request.ChangeNotes);
+            if (!ok) return BadRequest("Failed to save draft.");
+            return Ok(new { draftNumber });
+        }
+
+        [HttpPost("PublishStudyPlanDraft")]
+        public async Task<IActionResult> PublishStudyPlanDraft([FromBody] PublishStudyPlanDraftRequest request)
+        {
+            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
+            if (string.IsNullOrEmpty(request?.StudyPlanId) || request.DraftNumber <= 0)
+                return BadRequest("Invalid studyPlanId or draftNumber.");
+
+            var (ok, versionNumber) = await _studyPlanService.PublishStudyPlanDraftAsync(request.StudyPlanId!, request.DraftNumber, userId, request.ChangeNotes);
+            if (!ok) return BadRequest("Failed to publish draft.");
+            return Ok(new { versionNumber });
         }
 
         [HttpPost("MarkStudyPlanAsCompleted")]

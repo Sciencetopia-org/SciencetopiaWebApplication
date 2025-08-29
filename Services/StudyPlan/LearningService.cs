@@ -9,27 +9,29 @@ public class LearningService
         _driver = driver;
     }
 
-    public async Task<bool> ToggleFinishedLearningRelationship(string lessonName, string resourceLink, string userId)
+    public async Task<bool> ToggleFinishedLearningRelationship(string resourceLink, string userId, string? source, string? device)
     {
         using (var session = _driver.AsyncSession())
         {
+            // Check if the user has already completed this resource
             var queryCheck = @"
-            MATCH (l:Lesson)-[rel:FINISHED_LEARNING]->(r:Resource)
-            WHERE l.name = $lessonName AND r.link = $resourceLink AND rel.userId = $userId
+            MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
+            WHERE r.link = $resourceLink
             RETURN rel";
 
+            // Delete existing COMPLETED relationship (toggle off)
             var queryDelete = @"
-            MATCH (l:Lesson)-[rel:FINISHED_LEARNING]->(r:Resource)
-            WHERE l.name = $lessonName AND r.link = $resourceLink AND rel.userId = $userId
+            MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
+            WHERE r.link = $resourceLink
             DELETE rel";
 
+            // Create COMPLETED relationship with properties (toggle on)
             var queryCreate = @"
-            MATCH (l:Lesson), (r:Resource)
-            WHERE l.name = $lessonName AND r.link = $resourceLink
-            CREATE (l)-[rel:FINISHED_LEARNING { userId: $userId }]->(r)
+            MATCH (u:User {id: $userId}), (r:Resource {link: $resourceLink})
+            CREATE (u)-[rel:COMPLETED { at: datetime(), source: $source, device: $device }]->(r)
             RETURN rel";
 
-            var parameters = new { lessonName, resourceLink, userId };
+            var parameters = new { resourceLink, userId, source, device };
 
             // Check if the relationship exists
             var result = await session.RunAsync(queryCheck, parameters);

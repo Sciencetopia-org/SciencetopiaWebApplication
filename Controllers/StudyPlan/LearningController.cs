@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Threading.Tasks;
 using Sciencetopia.Services;
 using System.Security.Claims;
+using Sciencetopia.DTOs; 
 
 [ApiController]
 [Route("api/StudyPlan/LearningLessons")]
@@ -15,15 +16,15 @@ public class StudyPlanController : ControllerBase
     }
 
     [HttpPost("ToggleFinishedLearning")]
-    public async Task<IActionResult> ToggleFinishedLearning(Resource lessonResource)
+    public async Task<IActionResult> ToggleFinishedLearning([FromBody] ToggleFinishedLearningRequest request)
     {
         // Retrieve the current user id (you need to implement this logic)
         string userId = GetCurrentUserId();
 
-        if (lessonResource.Name != null && lessonResource.Link != null) // Add null check for resourceName
+        if (!string.IsNullOrWhiteSpace(request?.Link))
         {
-            // Forward the user id, lesson name, and resource link to the ManagePlanService
-            await _learningService.ToggleFinishedLearningRelationship(lessonResource.Name, lessonResource.Link, userId);
+            // Toggle (u:User)-[:COMPLETED {at, source, device}]->(r:Resource)
+            await _learningService.ToggleFinishedLearningRelationship(request.Link!, userId, request.Source, request.Device);
         }
 
         return Ok();

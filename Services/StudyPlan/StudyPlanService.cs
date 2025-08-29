@@ -2,6 +2,7 @@ using Neo4j.Driver;
 using System.Linq;
 using Sciencetopia.Models;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 public class StudyPlanService
 {
@@ -117,6 +118,15 @@ public class StudyPlanService
                     new { userId, studyPlanId });
             });
 
+            // Step 4: Create initial version snapshot and versioned subgraph in Neo4j
+            try
+            {
+                var snapshot = SerializePlan(studyPlanDTO);
+                var versionNo = await _sqlRepository.CreateStudyPlanVersionAsync(Guid.Parse(studyPlanId), studyPlan?.Title, studyPlan?.Introduction?.Description, snapshot, "Initial create", userId);
+                await WriteVersionSubgraphAsync(session, Guid.Parse(studyPlanId), studyPlanDTO, versionNo);
+            }
+            catch { /* non-blocking */ }
+
             return true;
         }
         finally
@@ -160,6 +170,27 @@ public class StudyPlanService
             }
 
             var studyPlan = updatedStudyPlan.StudyPlan;
+
+            // New behavior: create a draft and publish it (backwards compatible)
+            try
+            {
+                var snapshot = SerializePlan(updatedStudyPlan);
+                // create draft
+                var draftNumber = await _sqlRepository.CreateStudyPlanDraftAsync(Guid.Parse(studyPlanId), studyPlan?.Title, studyPlan?.Introduction?.Description, snapshot, "Auto-publish via UpdateStudyPlan", null);
+                // publish draft
+                var published = await PublishStudyPlanDraftInternal(session, Guid.Parse(studyPlanId), draftNumber, "Auto-publish via UpdateStudyPlan", null);
+                if (published)
+                {
+                    // create version record
+                    await _sqlRepository.CreateStudyPlanVersionAsync(Guid.Parse(studyPlanId), studyPlan?.Title, studyPlan?.Introduction?.Description, snapshot, "Auto-publish via UpdateStudyPlan", null);
+                    await _sqlRepository.MarkStudyPlanDraftStatusAsync(Guid.Parse(studyPlanId), draftNumber, DraftStatus.Approved, null);
+                }
+                return published;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to draft+publish update; fallback to direct update.");
+            }
 
             // Step 2: 更新 SQL 中的 StudyPlan 基本信息
             await _sqlRepository.UpdateStudyPlanAsync(new StudyPlanEntity
@@ -276,14 +307,211 @@ public class StudyPlanService
         }
     }
 
+    private string SerializePlan(StudyPlanDTO dto)
+    {
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = false };
+        return JsonSerializer.Serialize(dto, options);
+    }
+
+    private StudyPlanDTO? DeserializePlan(string json)
+    {
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        return JsonSerializer.Deserialize<StudyPlanDTO>(json, options);
+    }
+
+    // Save a draft (does not alter live data/graph)
+    public async Task<(bool ok, int draftNumber)> SaveStudyPlanDraftAsync(StudyPlanDTO dto, string userId, string? changeNotes)
+    {
+        if (dto?.StudyPlan?.Id == null) return (false, 0);
+        var planId = Guid.Parse(dto.StudyPlan.Id);
+        var snapshot = SerializePlan(dto);
+        var draftNo = await _sqlRepository.CreateStudyPlanDraftAsync(planId, dto.StudyPlan.Title, dto.StudyPlan.Introduction?.Description, snapshot, changeNotes, userId);
+        return (true, draftNo);
+    }
+
+    // Publish a draft: create version and apply to SQL + Neo4j
+    public async Task<(bool ok, int versionNumber)> PublishStudyPlanDraftAsync(string studyPlanId, int draftNumber, string userId, string? changeNotes)
+    {
+        using var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var planGuid = Guid.Parse(studyPlanId);
+            // Load draft and create version first to get versionNumber
+            var draft = await _sqlRepository.GetStudyPlanDraftAsync(planGuid, draftNumber);
+            if (draft == null) return (false, 0);
+            var versionNo = await _sqlRepository.CreateStudyPlanVersionAsync(planGuid, draft.Title, draft.Description, draft.SnapshotJson, changeNotes, userId);
+
+            // Build versioned subgraph in Neo4j for historical queries
+            var dto = DeserializePlan(draft.SnapshotJson);
+            if (dto?.StudyPlan == null) return (false, 0);
+            await WriteVersionSubgraphAsync(session, planGuid, dto, versionNo);
+
+            // Apply to live graph
+            var success = await PublishStudyPlanDraftInternal(session, planGuid, draftNumber, changeNotes, userId);
+            if (!success) return (false, 0);
+
+            await _sqlRepository.MarkStudyPlanDraftStatusAsync(planGuid, draftNumber, DraftStatus.Approved, userId);
+            return (true, versionNo);
+        }
+        finally
+        {
+            await session.CloseAsync();
+        }
+    }
+
+    private async Task WriteVersionSubgraphAsync(IAsyncSession session, Guid studyPlanId, StudyPlanDTO dto, int versionNumber)
+    {
+        var spId = studyPlanId.ToString();
+        await session.ExecuteWriteAsync(async tx =>
+        {
+            // Version anchor node
+            await tx.RunAsync(@"
+                MATCH (sp:StudyPlan {id: $studyPlanId})
+                MERGE (pv:PlanVersion {studyPlanId: $studyPlanId, versionNumber: $versionNumber})
+                MERGE (sp)-[:HAS_VERSION]->(pv)
+            ", new { studyPlanId = spId, versionNumber });
+
+            int orderCounter = 0;
+            foreach (var (lesson, type) in GetLessonsWithType(dto.StudyPlan!))
+            {
+                orderCounter++;
+                await tx.RunAsync(@"MERGE (l:Lesson {id: $lessonId})",
+                    new { lessonId = lesson.Id });
+                await tx.RunAsync(@"
+                    MATCH (pv:PlanVersion {studyPlanId: $studyPlanId, versionNumber: $versionNumber}), (l:Lesson {id: $lessonId})
+                    MERGE (pv)-[:HAS_STEP {type: $type, order: $order}]->(l)
+                ", new { studyPlanId = spId, versionNumber, lessonId = lesson.Id, type, order = orderCounter });
+
+                foreach (var resource in lesson.Resources ?? new List<ResourceDTO>())
+                {
+                    if (!string.IsNullOrEmpty(resource.Id))
+                    {
+                        await tx.RunAsync(@"MERGE (r:Resource {id: $resourceId})",
+                            new { resourceId = resource.Id });
+                        await tx.RunAsync(@"
+                            MATCH (pv:PlanVersion {studyPlanId: $studyPlanId, versionNumber: $versionNumber}), (r:Resource {id: $resourceId})
+                            MERGE (pv)-[:HAS_RESOURCE {lessonId: $lessonId}]->(r)
+                        ", new { studyPlanId = spId, versionNumber, resourceId = resource.Id, lessonId = lesson.Id });
+                    }
+                }
+            }
+
+            // Study plan knowledge node associations per version
+            if (dto.StudyPlan!.Introduction?.AssociatedKnowledgeNodes != null)
+            {
+                foreach (var knowledgeNode in dto.StudyPlan.Introduction.AssociatedKnowledgeNodes)
+                {
+                    await tx.RunAsync(@"
+                        MATCH (pv:PlanVersion {studyPlanId: $studyPlanId, versionNumber: $versionNumber}), (k:KnowledgeNode {id: $knowledgeNodeId})
+                        MERGE (pv)-[:ASSOCIATED_WITH]->(k)
+                    ", new { studyPlanId = spId, versionNumber, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                }
+            }
+        });
+    }
+
+    private async Task<bool> PublishStudyPlanDraftInternal(IAsyncSession session, Guid studyPlanId, int draftNumber, string? changeNotes, string? userId)
+    {
+        var draft = await _sqlRepository.GetStudyPlanDraftAsync(studyPlanId, draftNumber);
+        if (draft == null) return false;
+        var dto = DeserializePlan(draft.SnapshotJson);
+        if (dto?.StudyPlan == null) return false;
+
+        // 1) Update SQL title/description
+        await _sqlRepository.UpdateStudyPlanAsync(new StudyPlanEntity
+        {
+            Id = studyPlanId,
+            Title = dto.StudyPlan.Title ?? string.Empty,
+            Description = dto.StudyPlan.Introduction?.Description,
+            UpdatedDate = DateTime.UtcNow
+        });
+
+        // 2) Update Lessons basic info in SQL (existing IDs only)
+        var allLessons = (dto.StudyPlan.Prerequisite ?? new List<Lesson>())
+            .Concat(dto.StudyPlan.MainCurriculum ?? new List<Lesson>())
+            .Concat(dto.StudyPlan.AdvancedTopics ?? new List<Lesson>())
+            .ToList();
+
+        foreach (var lesson in allLessons)
+        {
+            if (!string.IsNullOrEmpty(lesson.Id))
+            {
+                await _sqlRepository.UpdateLessonAsync(new LessonEntity
+                {
+                    Id = Guid.Parse(lesson.Id),
+                    Title = lesson.Name ?? string.Empty,
+                    Description = lesson.Description,
+                    UpdatedDate = DateTime.UtcNow
+                });
+            }
+        }
+
+        // 3) Update Neo4j relationships to match snapshot
+        await session.ExecuteWriteAsync(async transaction =>
+        {
+            var studyPlanIdStr = studyPlanId.ToString();
+            await transaction.RunAsync(@"MATCH (p:StudyPlan {id: $studyPlanId})-[r:HAS_STEP]->(l:Lesson) DELETE r", new { studyPlanId = studyPlanIdStr });
+
+            int orderCounter = 0;
+            foreach (var (lesson, type) in GetLessonsWithType(dto.StudyPlan))
+            {
+                orderCounter++;
+                await transaction.RunAsync(@"MERGE (l:Lesson {id: $lessonId})", new { lessonId = lesson.Id });
+                await transaction.RunAsync(@"MATCH (p:StudyPlan {id: $studyPlanId}), (l:Lesson {id: $lessonId}) MERGE (p)-[:HAS_STEP {type: $type, order: $order}]->(l)", new { studyPlanId = studyPlanIdStr, lessonId = lesson.Id, type, order = orderCounter });
+
+                await transaction.RunAsync(@"MATCH (l:Lesson {id: $lessonId})-[r:ASSOCIATED_WITH]->(k:KnowledgeNode) DELETE r", new { lessonId = lesson.Id });
+                if (lesson.AssociatedKnowledgeNodes != null)
+                {
+                    foreach (var knowledgeNode in lesson.AssociatedKnowledgeNodes)
+                    {
+                        await transaction.RunAsync(@"MATCH (l:Lesson {id: $lessonId}), (k:KnowledgeNode {id: $knowledgeNodeId}) MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                    }
+                }
+
+                foreach (var resource in lesson.Resources ?? new List<ResourceDTO>())
+                {
+                    if (!string.IsNullOrEmpty(resource.Id))
+                    {
+                        await transaction.RunAsync(@"MERGE (r:Resource {id: $resourceId}) WITH r MATCH (l:Lesson {id: $lessonId}) MERGE (l)-[:HAS_RESOURCE]->(r)", new { lessonId = lesson.Id, resourceId = resource.Id });
+                    }
+                }
+            }
+
+            await transaction.RunAsync(@"MATCH (p:StudyPlan {id: $studyPlanId})-[r:ASSOCIATED_WITH]->(k:KnowledgeNode) DELETE r", new { studyPlanId = studyPlanIdStr });
+            if (dto.StudyPlan.Introduction?.AssociatedKnowledgeNodes != null)
+            {
+                foreach (var knowledgeNode in dto.StudyPlan.Introduction.AssociatedKnowledgeNodes)
+                {
+                    await transaction.RunAsync(@"MATCH (p:StudyPlan {id: $studyPlanId}), (k:KnowledgeNode {id: $knowledgeNodeId}) MERGE (p)-[:ASSOCIATED_WITH]->(k)", new { studyPlanId = studyPlanIdStr, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                }
+            }
+        });
+
+        return true;
+    }
+
     public async Task<List<StudyPlanDTO>> GetStudyPlansByUserIdAsync(string currentUserId, string targetUserId)
     {
         using var session = _neo4jDriver.AsyncSession();
         try
         {
-            // 1. 从SQL拉取StudyPlan内容
-            var studyPlans = await _sqlRepository.GetStudyPlansByUserIdAsync(targetUserId); // StudyPlanEntity列表
-            var studyPlanIds = studyPlans.Select(sp => sp.Id.ToString()).ToList();
+            // 1. 从Neo4j拉取用户加入(ENROLLED_IN)的StudyPlan Ids
+            var studyPlanIds = new List<string>();
+            var enrolledQuery = @"MATCH (u:User {id: $targetUserId})-[:ENROLLED_IN]->(sp:StudyPlan) RETURN sp.id AS studyPlanId";
+            var enrolledResult = await session.RunAsync(enrolledQuery, new { targetUserId });
+            await foreach (var rec in enrolledResult)
+            {
+                var pid = rec["studyPlanId"].As<string>();
+                if (!string.IsNullOrEmpty(pid)) studyPlanIds.Add(pid);
+            }
+
+            // 拉取SQL中的StudyPlan基本信息（按Id集合）
+            var studyPlans = new List<StudyPlanEntity>();
+            foreach (var pid in studyPlanIds.Distinct())
+            {
+                var sp = await _sqlRepository.GetStudyPlanByIdAsync(pid);
+                if (sp != null) studyPlans.Add(sp);
+            }
 
             // 2. 从Neo4j拉取所有Lesson关系
             var lessonInfo = await GetLessonIdsByStudyPlanIdsAsync(studyPlanIds);
@@ -305,10 +533,11 @@ public class StudyPlanService
 
             // Step 4. 从Neo4j拉取结构关系（HAS_STEP, HAS_RESOURCE, ASSOCIATED_WITH）
             var cypherQuery = @"
-            MATCH (u:User {id: $targetUserId})-[:CREATED]->(sp:StudyPlan)
-            WHERE sp.privacy = 'public' OR sp.privacy = 'shared' OR u.id = $currentUserId
+            MATCH (sp:StudyPlan)
+            WHERE sp.id IN $studyPlanIds
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
             OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+            OPTIONAL MATCH (cu:User {id: $currentUserId})-[cr:COMPLETED]->(r)
             OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
             OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
             RETURN sp.id AS studyPlanId, 
@@ -316,11 +545,12 @@ public class StudyPlanService
                    r.id AS resourceId, 
                    hs.type AS stepType,
                    hs.order AS stepOrder,
+                   (cr IS NOT NULL) AS learned,
                    collect(DISTINCT lk) AS lessonKnowledgeNodes,
                    collect(DISTINCT sk) AS studyPlanKnowledgeNodes
             ORDER BY hs.order";
 
-            var result = await session.RunAsync(cypherQuery, new { currentUserId, targetUserId });
+            var result = await session.RunAsync(cypherQuery, new { currentUserId, studyPlanIds });
 
             // Step 5. 整合数据
             var studyPlanDict = new Dictionary<string, StudyPlanDTO>();
@@ -376,11 +606,14 @@ public class StudyPlanService
                     var sqlResource = resources.FirstOrDefault(r => r.Value.Id.ToString() == resourceId).Value;
                     if (sqlResource != null)
                     {
+                        var learned = false;
+                        try { learned = record["learned"].As<bool>(); } catch {}
                         lesson.Resources.Add(new ResourceDTO
                         {
                             Id = sqlResource.Id.ToString(),
                             Name = sqlResource.Name,
-                            Link = sqlResource.Link
+                            Link = sqlResource.Link,
+                            Learned = learned
                         });
                     }
                 }
@@ -695,6 +928,7 @@ public class StudyPlanService
             WHERE sp.privacy = 'public' OR sp.privacy = 'shared' OR u.id = $currentUserId
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
             OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+            OPTIONAL MATCH (cu:User {id: $currentUserId})-[cr:COMPLETED]->(r)
             OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
             OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
             RETURN sp.id AS studyPlanId, 
@@ -702,6 +936,7 @@ public class StudyPlanService
                    r.id AS resourceId, 
                    hs.type AS stepType,
                    hs.order AS stepOrder,
+                   (cr IS NOT NULL) AS learned,
                    collect(DISTINCT lk) AS lessonKnowledgeNodes,
                    collect(DISTINCT sk) AS studyPlanKnowledgeNodes
             ORDER BY hs.order";
@@ -750,11 +985,14 @@ public class StudyPlanService
                     var sqlResource = resources.FirstOrDefault(r => r.Value.Id.ToString() == resourceId).Value;
                     if (sqlResource != null)
                     {
+                        var learned = false;
+                        try { learned = record["learned"].As<bool>(); } catch {}
                         lesson.Resources.Add(new ResourceDTO
                         {
                             Id = sqlResource.Id.ToString(),
                             Name = sqlResource.Name,
-                            Link = sqlResource.Link
+                            Link = sqlResource.Link,
+                            Learned = learned
                         });
                     }
                 }

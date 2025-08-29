@@ -236,6 +236,7 @@ namespace Sciencetopia.Hubs
             {
                 throw new HubException("Invalid conversation ID format");
             }
+
             var messages = await _context.Messages
                 .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == userId && !m.IsRead)
                 .ToListAsync();
@@ -306,15 +307,18 @@ namespace Sciencetopia.Hubs
         // Method to mark a notification as read, could be called from the client
         public async Task MarkNotificationAsRead(string notificationId)
         {
-            // Fetch the notification from the database using notificationId
-            var notification = await _context.Notifications.FindAsync(notificationId);
+            if (!Guid.TryParse(notificationId, out var notificationGuid))
+            {
+                throw new HubException("Invalid notification ID format");
+            }
+
+            var notification = await _context.Notifications.FindAsync(notificationGuid);
             if (notification != null)
             {
                 notification.IsRead = true;
                 await _context.SaveChangesAsync();
             }
 
-            // Notify the client (optional, based on your app's needs)
             await Clients.Caller.SendAsync("UpdateNotifications", notificationId);
         }
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Sciencetopia.Models;
 
 public class StudyPlanEntity
 {
@@ -19,6 +20,9 @@ public class StudyPlanEntity
     public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
 
     public DateTime UpdatedDate { get; set; } = DateTime.UtcNow;
+
+    // RBAC user roles
+    public ICollection<StudyPlanUserRole> UserRoles { get; set; } = new List<StudyPlanUserRole>();
 }
 
 public class LessonEntity

@@ -102,7 +102,6 @@ public class MessageController : ControllerBase
         {
             return BadRequest("Invalid conversationId format.");
         }
-
         var conversationGroup = await _context.Messages
             .Include(m => m.Sender)
             .Include(m => m.Receiver)

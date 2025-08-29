@@ -19,5 +19,8 @@ namespace Sciencetopia.Models
         public string? Status { get; set; }
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+        // RBAC user roles
+        public ICollection<StudyGroupUserRole> UserRoles { get; set; } = new List<StudyGroupUserRole>();
     }
 }

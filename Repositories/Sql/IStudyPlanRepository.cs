@@ -1,8 +1,12 @@
 // IStudyPlanRepository.cs
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
+using Sciencetopia.Models;
 
 public interface IStudyPlanRepository
 {
@@ -17,6 +21,14 @@ public interface IStudyPlanRepository
     Task<List<LessonEntity>> GetLessonsByIdsAsync(List<string> lessonIds);
     Task<List<Resource>> GetResourcesByIdsAsync(List<string> resourceIds);
     Task DeleteStudyPlanByIdAsync(string studyPlanId);
+
+    // Drafts & Versions APIs
+    Task<int> CreateStudyPlanDraftAsync(Guid studyPlanId, string? title, string? description, string snapshotJson, string? changeNotes, string? userId);
+    Task<int> CreateStudyPlanVersionAsync(Guid studyPlanId, string? title, string? description, string snapshotJson, string? changeNotes, string? userId);
+    Task<StudyPlanDraft?> GetStudyPlanDraftAsync(Guid studyPlanId, int draftNumber);
+    Task<List<StudyPlanDraft>> GetStudyPlanDraftsAsync(Guid studyPlanId);
+    Task<List<StudyPlanVersion>> GetStudyPlanVersionsAsync(Guid studyPlanId);
+    Task MarkStudyPlanDraftStatusAsync(Guid studyPlanId, int draftNumber, DraftStatus status, string? updatedBy);
 }
 
 public class StudyPlanRepository : IStudyPlanRepository
@@ -48,7 +60,7 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task UpdateLessonAsync(LessonEntity lesson)
     {
-        _dbContext.Lessons.Update(lesson);
+        _dbContext. Lessons.Update(lesson);
         await _dbContext.SaveChangesAsync();
     }
 
@@ -76,15 +88,14 @@ public class StudyPlanRepository : IStudyPlanRepository
                 CreatorId = sp.CreatorId,
                 CreatedDate = sp.CreatedDate,
                 UpdatedDate = sp.UpdatedDate,
-                // Privacy = sp.Privacy // 如果有的话
             })
-    .ToListAsync();
+            .ToListAsync();
     }
 
     public async Task<StudyPlanEntity?> GetStudyPlanByIdAsync(string studyPlanId)
     {
         if (!Guid.TryParse(studyPlanId, out var studyPlanGuid))
-            return null; // 如果studyPlanId格式不对，直接返回null
+            return null;
 
         return await _dbContext.StudyPlans
             .Where(sp => sp.Id == studyPlanGuid)
@@ -135,4 +146,92 @@ public class StudyPlanRepository : IStudyPlanRepository
         }
     }
 
+    public async Task<int> CreateStudyPlanDraftAsync(Guid studyPlanId, string? title, string? description, string snapshotJson, string? changeNotes, string? userId)
+    {
+        var last = await _dbContext.StudyPlanDrafts
+            .Where(d => d.StudyPlanId == studyPlanId)
+            .OrderByDescending(d => d.DraftNumber)
+            .Select(d => d.DraftNumber)
+            .FirstOrDefaultAsync();
+        int nextNumber = last == 0 ? 1 : last + 1;
+
+        var draft = new StudyPlanDraft
+        {
+            StudyPlanId = studyPlanId,
+            DraftNumber = nextNumber,
+            Title = title,
+            Description = description,
+            SnapshotJson = snapshotJson,
+            ChangeNotes = changeNotes,
+            DraftStatus = null,
+            CreatedBy = userId,
+            UpdatedBy = userId,
+            CreatedDate = DateTime.UtcNow,
+            UpdatedDate = DateTime.UtcNow
+        };
+        _dbContext.StudyPlanDrafts.Add(draft);
+        await _dbContext.SaveChangesAsync();
+        return nextNumber;
+    }
+
+    public async Task<int> CreateStudyPlanVersionAsync(Guid studyPlanId, string? title, string? description, string snapshotJson, string? changeNotes, string? userId)
+    {
+        var last = await _dbContext.StudyPlanVersions
+            .Where(v => v.StudyPlanId == studyPlanId)
+            .OrderByDescending(v => v.VersionNumber)
+            .Select(v => v.VersionNumber)
+            .FirstOrDefaultAsync();
+        int nextNumber = last == 0 ? 1 : last + 1;
+
+        var version = new StudyPlanVersion
+        {
+            StudyPlanId = studyPlanId,
+            VersionNumber = nextNumber,
+            Title = title,
+            Description = description,
+            SnapshotJson = snapshotJson,
+            ChangeNotes = changeNotes,
+            CreatedBy = userId,
+            CreatedDate = DateTime.UtcNow
+        };
+        _dbContext.StudyPlanVersions.Add(version);
+        await _dbContext.SaveChangesAsync();
+        return nextNumber;
+    }
+
+    public async Task<StudyPlanDraft?> GetStudyPlanDraftAsync(Guid studyPlanId, int draftNumber)
+    {
+        return await _dbContext.StudyPlanDrafts
+            .Where(d => d.StudyPlanId == studyPlanId && d.DraftNumber == draftNumber)
+            .FirstOrDefaultAsync();
+    }
+
+    public async Task<List<StudyPlanDraft>> GetStudyPlanDraftsAsync(Guid studyPlanId)
+    {
+        return await _dbContext.StudyPlanDrafts
+            .Where(d => d.StudyPlanId == studyPlanId)
+            .OrderByDescending(d => d.DraftNumber)
+            .ToListAsync();
+    }
+
+    public async Task<List<StudyPlanVersion>> GetStudyPlanVersionsAsync(Guid studyPlanId)
+    {
+        return await _dbContext.StudyPlanVersions
+            .Where(v => v.StudyPlanId == studyPlanId)
+            .OrderByDescending(v => v.VersionNumber)
+            .ToListAsync();
+    }
+
+    public async Task MarkStudyPlanDraftStatusAsync(Guid studyPlanId, int draftNumber, DraftStatus status, string? updatedBy)
+    {
+        var draft = await _dbContext.StudyPlanDrafts
+            .Where(d => d.StudyPlanId == studyPlanId && d.DraftNumber == draftNumber)
+            .FirstOrDefaultAsync();
+        if (draft == null) return;
+        draft.DraftStatus = status;
+        draft.UpdatedBy = updatedBy;
+        draft.UpdatedDate = DateTime.UtcNow;
+        await _dbContext.SaveChangesAsync();
+    }
 }
+
