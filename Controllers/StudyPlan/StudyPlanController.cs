@@ -6,7 +6,7 @@ using Sciencetopia.Services;
 using System.Security.Claims;
 using Sciencetopia.DTOs;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.StudyPlan
 {
     [ApiController]
     [Route("api/[controller]")]
@@ -14,10 +14,12 @@ namespace Sciencetopia.Controllers
     public class StudyPlanController : ControllerBase
     {
         private readonly StudyPlanService _studyPlanService;
+        private readonly PermissionService _permissionService;
 
-        public StudyPlanController(StudyPlanService studyPlanService)
+        public StudyPlanController(StudyPlanService studyPlanService, PermissionService permissionService)
         {
             _studyPlanService = studyPlanService;
+            _permissionService = permissionService;
         }
 
         [HttpPost("SaveStudyPlan")]
@@ -66,30 +68,44 @@ namespace Sciencetopia.Controllers
         }
 
         [HttpGet("GetStudyPlanById")]
-        public async Task<IActionResult> GetStudyPlanById([FromQuery] string studyPlanId, string targetUserId)
+        public async Task<IActionResult> GetStudyPlanById([FromQuery] string studyPlanId)
         {
             // Fetch the current authenticated user's ID from claims
             var currentUserId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-
-            if (string.IsNullOrEmpty(targetUserId))
-            {
-                return Unauthorized("User is not authenticated.");
-            }
-
-            // Fetch the study plan using the service
             if (string.IsNullOrEmpty(currentUserId))
             {
                 return Unauthorized("User is not authenticated.");
             }
 
-            var studyPlan = await _studyPlanService.GetStudyPlanByIdAsync(studyPlanId, targetUserId, currentUserId);
-
-            if (studyPlan == null)
+            // Permission check via PermissionService
+            if (!Guid.TryParse(studyPlanId, out var planGuid))
             {
-                return NotFound(new { message = "Study plan not found." });
+                return BadRequest(new { message = "Invalid studyPlanId." });
             }
 
-            return Ok(studyPlan);
+            var canRead = await _permissionService.CanReadAsync(currentUserId, planGuid);
+            if (!canRead)
+            {
+                return Forbid();
+            }
+
+            try
+            {
+                // Fetch the study plan using the service
+                var studyPlan = await _studyPlanService.GetStudyPlanByIdAsync(studyPlanId, currentUserId);
+
+                if (studyPlan == null)
+                {
+                    return NotFound(new { message = "Study plan not found." });
+                }
+
+                return Ok(studyPlan);
+            }
+            catch (Neo4j.Driver.ServiceUnavailableException)
+            {
+                // Neo4j (graph store) is unavailable — return a clear 503 for clients to retry later
+                return StatusCode(503, new { message = "Graph database is temporarily unavailable. Please try again later." });
+            }
         }
 
 

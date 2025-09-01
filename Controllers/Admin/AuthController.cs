@@ -7,6 +7,8 @@ using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.IdentityModel.Tokens.Jwt;
 
+namespace Sciencetopia.Controllers.Admin;
+
 [ApiController]
 [Route("api/[controller]")]
 public class AuthController : ControllerBase

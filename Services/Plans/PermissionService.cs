@@ -3,13 +3,14 @@ using Microsoft.Extensions.Caching.Memory;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
+using Sciencetopia.DTOs;
 
 namespace Sciencetopia.Services;
 
-public class PermissionService
-{
-    private readonly ApplicationDbContext _db;
-    private readonly IMemoryCache _cache;
+    public class PermissionService
+    {
+        private readonly ApplicationDbContext _db;
+        private readonly IMemoryCache _cache;
 
     public PermissionService(ApplicationDbContext db, IMemoryCache cache)
     {
@@ -99,5 +100,30 @@ public class PermissionService
         var cacheKey = $"perm:plan:{planId}:user:{userId}";
         _cache.Remove(cacheKey);
     }
-}
 
+    // Returns an aggregated boolean permissions view for a given user/plan/cohort.
+    public async Task<EffectivePermissionsDto> GetEffectivePermissionsAsync(string userId, Guid planId, Guid? cohortId = null, CancellationToken ct = default)
+    {
+        var role = await GetEffectivePlanRoleAsync(userId, planId, ct);
+
+        var canView = role >= PlanRole.Viewer;
+        var canComment = role >= PlanRole.Commenter;
+        var canEdit = role >= PlanRole.Editor || role == PlanRole.Owner;
+        var canPublish = role == PlanRole.Owner;
+
+        // Cohort permissions: placeholder baseline until CohortMember & group-scoped fields are added.
+        // For now, only owner can manage/invite cohorts. This will be extended in B1/B4.
+        var cohortManage = role == PlanRole.Owner;
+        var cohortInvite = role == PlanRole.Owner;
+
+        return new EffectivePermissionsDto
+        {
+            CanView = canView,
+            CanComment = canComment,
+            CanEdit = canEdit,
+            CanPublish = canPublish,
+            CohortManage = cohortManage,
+            CohortInvite = cohortInvite
+        };
+    }
+}

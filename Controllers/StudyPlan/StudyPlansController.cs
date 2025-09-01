@@ -7,7 +7,7 @@ using Sciencetopia.Models.Enums;
 using Sciencetopia.Services;
 using System.Security.Claims;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.StudyPlan
 {
     [ApiController]
     [Route("api/StudyPlans")] // PascalCase
@@ -28,64 +28,47 @@ namespace Sciencetopia.Controllers
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
 
-            // Collect visible plan ids from three sources
-            var userGuid = Guid.TryParse(userId, out var ug) ? ug : Guid.Empty;
+            var ug = Guid.TryParse(userId, out var parsed) ? parsed : Guid.Empty;
 
-            var ownerIdsQ = _db.StudyPlans
-                .Where(p => p.CreatorId == ug)
-                .Select(p => p.Id);
+            // Single query: compute visibility in DB, avoid description, no tracking
+            var baseQ = _db.StudyPlans.AsNoTracking().Where(p =>
+                p.CreatorId == ug
+                || _db.StudyPlanUserRoles.Any(r => r.PlanId == p.Id && r.UserId == userId)
+                || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanId == p.Id &&
+                       _db.StudyGroupUserRoles.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
+                || EF.Property<string>(p, "Privacy") == "public"
+            );
 
-            var directIdsQ = _db.StudyPlanUserRoles
-                .Where(r => r.UserId == userId)
-                .Select(r => r.PlanId);
-
-            var groupIdsQ = _db.StudyGroupUserRoles
-                .Where(gr => gr.UserId == userId)
-                .Join(_db.StudyGroupStudyPlans, gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => gp.StudyPlanId);
-
-            var planIds = await ownerIdsQ
-                .Union(directIdsQ)
-                .Union(groupIdsQ)
-                .ToListAsync();
-
-            // privacy public fallback
-            var publicIds = await _db.StudyPlans
-                .Where(p => EF.Property<string>(p, "Privacy") == "public")
-                .Select(p => p.Id)
-                .ToListAsync();
-
-            planIds = planIds.Union(publicIds).Distinct().ToList();
-
-            var query = _db.StudyPlans.Where(p => planIds.Contains(p.Id));
             if (!string.IsNullOrWhiteSpace(q))
             {
-                query = query.Where(p => p.Title.Contains(q));
+                baseQ = baseQ.Where(p => p.Title.Contains(q));
             }
 
-            query = sort switch
+            baseQ = sort switch
             {
-                "createdDesc" => query.OrderByDescending(p => p.CreatedDate),
-                "createdAsc" => query.OrderBy(p => p.CreatedDate),
-                _ => query.OrderByDescending(p => p.UpdatedDate)
+                "createdDesc" => baseQ.OrderByDescending(p => p.CreatedDate),
+                "createdAsc" => baseQ.OrderBy(p => p.CreatedDate),
+                _ => baseQ.OrderByDescending(p => p.UpdatedDate)
             };
 
-            var total = await query.CountAsync();
-            var items = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
+            var total = await baseQ.CountAsync();
 
-            var result = new List<object>();
-            foreach (var p in items)
+            // Project only Id and Title for speed
+            var items = await baseQ
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(p => new { p.Id, p.Title })
+                .ToListAsync();
+
+            // Compute roles concurrently; PermissionService is cached internally
+            var projected = await Task.WhenAll(items.Select(async p => new
             {
-                var role = await _perm.GetEffectivePlanRoleAsync(userId, p.Id);
-                result.Add(new
-                {
-                    id = p.Id,
-                    title = p.Title,
-                    description = p.Description,
-                    role = role.ToString()
-                });
-            }
+                id = p.Id,
+                title = p.Title,
+                role = (await _perm.GetEffectivePlanRoleAsync(userId, p.Id)).ToString()
+            }));
 
-            return Ok(new { total, page, pageSize, items = result });
+            return Ok(new { total, page, pageSize, items = projected });
         }
 
         [HttpGet("{id}")]
@@ -97,7 +80,88 @@ namespace Sciencetopia.Controllers
 
             var plan = await _db.StudyPlans.FirstOrDefaultAsync(p => p.Id == id);
             if (plan == null) return NotFound();
-            return Ok(new { id = plan.Id, title = plan.Title, description = plan.Description });
+            // Determine current version id and number
+            long? currentVersionId = plan.CurrentVersionId;
+            int? currentVersionNumber = null;
+            if (currentVersionId.HasValue)
+            {
+                currentVersionNumber = await _db.StudyPlanVersions
+                    .Where(v => v.Id == currentVersionId.Value)
+                    .Select(v => (int?)v.VersionNumber)
+                    .FirstOrDefaultAsync();
+            }
+            else
+            {
+                // fallback: compute latest
+                var latest = await _db.StudyPlanVersions
+                    .Where(v => v.StudyPlanId == id)
+                    .OrderByDescending(v => v.VersionNumber)
+                    .Select(v => new { v.Id, v.VersionNumber })
+                    .FirstOrDefaultAsync();
+                if (latest != null)
+                {
+                    currentVersionId = latest.Id;
+                    currentVersionNumber = latest.VersionNumber;
+                }
+            }
+            return Ok(new { id = plan.Id, title = plan.Title, description = plan.Description, currentVersionId, currentVersionNumber });
+        }
+
+        // B4-2: GET /StudyPlans/{id}/enrollment/me
+        [HttpGet("{id}/enrollment/me")]
+        public async Task<IActionResult> GetEnrollmentMe([FromRoute] Guid id, [FromServices] Sciencetopia.Services.Cohorts.ICohortService cohortService)
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrEmpty(userId)) return Unauthorized();
+            if (!await _perm.CanReadAsync(userId, id)) return Forbid();
+
+            var dto = await cohortService.GetEnrollmentForUserAsync(id, userId, HttpContext.RequestAborted);
+            return Ok(dto);
+        }
+
+        // B4-5: GET /StudyPlans/{id}/joinable-cohorts
+        [HttpGet("{id}/joinable-cohorts")]
+        public async Task<IActionResult> GetJoinableCohorts([FromRoute] Guid id, [FromServices] Neo4j.Driver.IDriver driver)
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrEmpty(userId)) return Unauthorized();
+            if (!await _perm.CanReadAsync(userId, id)) return Forbid();
+
+            var cohorts = await _db.Cohorts.AsNoTracking()
+                .Where(c => c.StudyPlanId == id)
+                .Select(c => new { c.Id, c.Title, c.StudyGroupId, c.Visibility })
+                .ToListAsync();
+
+            bool alreadyActive = false;
+            await using (var session = driver.AsyncSession())
+            {
+                alreadyActive = await session.ExecuteReadAsync(async tx =>
+                {
+                    var cur = await tx.RunAsync("MATCH (u:User {id:$userId})-[:ENROLLED_IN]->(:PlanVersion {studyPlanId:$planId}) RETURN true LIMIT 1", new { planId = id.ToString(), userId });
+                    return await cur.PeekAsync() != null;
+                });
+            }
+
+            var groupScoped = new List<object>();
+            var pub = new List<object>();
+
+            foreach (var c in cohorts)
+            {
+                var reason = alreadyActive ? "alreadyInPlan" : null;
+                var canJoin = !alreadyActive;
+                if (c.StudyGroupId.HasValue)
+                {
+                    var isMember = await _db.StudyGroupUserRoles.AsNoTracking().AnyAsync(gr => gr.GroupId == c.StudyGroupId && gr.UserId == userId);
+                    if (!isMember) { canJoin = false; reason = reason ?? "notGroupMember"; }
+                    groupScoped.Add(new { id = c.Id, title = c.Title, canJoin, reason });
+                }
+                else if (string.Equals(c.Visibility, "public", StringComparison.OrdinalIgnoreCase))
+                {
+                    pub.Add(new { id = c.Id, title = c.Title, canJoin, reason });
+                }
+            }
+
+            return Ok(new { groupScoped, @public = pub, soloAvailable = !alreadyActive });
         }
 
         [HttpGet("{id}/Permissions/Effective")]
@@ -151,4 +215,3 @@ namespace Sciencetopia.Controllers
         }
     }
 }
-

@@ -9,6 +9,8 @@ using Microsoft.AspNetCore.Authorization;
 using System;
 using System.Security.Claims;
 
+namespace Sciencetopia.Controllers.KnowledgeNetwork;
+
 [Route("api/KnowledgeGraph/[controller]")]
 [ApiController]
 [Authorize]

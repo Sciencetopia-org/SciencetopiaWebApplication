@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Identity;
 using System.Threading.Tasks;
 using Sciencetopia.Models;
 
+namespace Sciencetopia.Controllers.Admin;
+
 [Route("api/[controller]")]
 [ApiController]
 [Authorize(Roles = "administrator")]

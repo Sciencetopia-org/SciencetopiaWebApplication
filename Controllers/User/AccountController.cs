@@ -12,7 +12,7 @@ using Azure.Storage.Sas;
 using Newtonsoft.Json;
 using Sciencetopia.Data;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.Users
 {
     [Route("api/users/[controller]")]
     [ApiController]

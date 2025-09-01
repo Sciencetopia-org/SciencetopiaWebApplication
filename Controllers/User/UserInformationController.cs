@@ -7,6 +7,8 @@ using Sciencetopia.Services;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 
+namespace Sciencetopia.Controllers.Users;
+
 [Route("api/users/[controller]")]
 [ApiController]
 [Authorize] // Ensures only authenticated users can access methods in this controller

@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
 
+namespace Sciencetopia.Controllers.Messaging;
+
 [ApiController]
 [Route("api/[controller]")]
 public class MessageController : ControllerBase

@@ -495,9 +495,9 @@ public class StudyPlanService
         using var session = _neo4jDriver.AsyncSession();
         try
         {
-            // 1. 从Neo4j拉取用户加入(ENROLLED_IN)的StudyPlan Ids
+            // 1. 从Neo4j拉取用户加入(ENROLLED_IN)的PlanVersion，并取其studyPlanId
             var studyPlanIds = new List<string>();
-            var enrolledQuery = @"MATCH (u:User {id: $targetUserId})-[:ENROLLED_IN]->(sp:StudyPlan) RETURN sp.id AS studyPlanId";
+            var enrolledQuery = @"MATCH (u:User {id: $targetUserId})-[:ENROLLED_IN]->(pv:PlanVersion) RETURN pv.studyPlanId AS studyPlanId";
             var enrolledResult = await session.RunAsync(enrolledQuery, new { targetUserId });
             await foreach (var rec in enrolledResult)
             {
@@ -899,7 +899,7 @@ public class StudyPlanService
     //         .ToList(); // Convert to List<Lesson>
     // }
 
-    public async Task<StudyPlanDTO?> GetStudyPlanByIdAsync(string studyPlanId, string targetUserId, string currentUserId)
+    public async Task<StudyPlanDTO?> GetStudyPlanByIdAsync(string studyPlanId, string currentUserId)
     {
         using var session = _neo4jDriver.AsyncSession();
         try
@@ -924,8 +924,7 @@ public class StudyPlanService
 
             // Step 4. 从Neo4j拉取结构关系
             var cypherQuery = @"
-            MATCH (u:User {id: $targetUserId})-[:CREATED]->(sp:StudyPlan {id: $studyPlanId})
-            WHERE sp.privacy = 'public' OR sp.privacy = 'shared' OR u.id = $currentUserId
+            MATCH (sp:StudyPlan {id: $studyPlanId})
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
             OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
             OPTIONAL MATCH (cu:User {id: $currentUserId})-[cr:COMPLETED]->(r)
@@ -941,7 +940,7 @@ public class StudyPlanService
                    collect(DISTINCT sk) AS studyPlanKnowledgeNodes
             ORDER BY hs.order";
 
-            var result = await session.RunAsync(cypherQuery, new { studyPlanId, currentUserId, targetUserId });
+            var result = await session.RunAsync(cypherQuery, new { studyPlanId, currentUserId });
 
             var recordList = await result.ToListAsync();
             if (recordList == null || recordList.Count == 0) return null;

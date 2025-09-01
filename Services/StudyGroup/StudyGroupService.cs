@@ -79,7 +79,8 @@ public class StudyGroupService
 
     public async Task<bool> ApproveStudyGroupAsync(string groupId)
     {
-        var group = await _context.StudyGroups.FindAsync(groupId);
+        if (!Guid.TryParse(groupId, out var gid)) return false;
+        var group = await _context.StudyGroups.FindAsync(gid);
         if (group == null) return false;
 
         group.Status = "approved";
@@ -89,7 +90,8 @@ public class StudyGroupService
 
     public async Task<bool> RejectStudyGroupAsync(string groupId)
     {
-        var group = await _context.StudyGroups.FindAsync(groupId);
+        if (!Guid.TryParse(groupId, out var gid)) return false;
+        var group = await _context.StudyGroups.FindAsync(gid);
         if (group == null) return false;
 
         group.Status = "rejected";
@@ -210,7 +212,8 @@ public class StudyGroupService
 
     public async Task<StudyGroup> GetStudyGroupByIdAsync(string groupId)
     {
-        var entity = await _context.StudyGroups.FindAsync(groupId);
+        if (!Guid.TryParse(groupId, out var gid)) return null;
+        var entity = await _context.StudyGroups.FindAsync(gid);
         if (entity == null) return null;
 
         var members = await GetStudyGroupMembers(groupId);
@@ -253,7 +256,8 @@ public class StudyGroupService
     private async Task DeleteStudyGroupFromDatabaseAsync(string groupId)
     {
         // Delete the study group from SQL database
-        var studyGroup = await _context.StudyGroups.FindAsync(groupId);
+        if (!Guid.TryParse(groupId, out var gid)) return;
+        var studyGroup = await _context.StudyGroups.FindAsync(gid);
         if (studyGroup != null)
         {
             _context.StudyGroups.Remove(studyGroup);

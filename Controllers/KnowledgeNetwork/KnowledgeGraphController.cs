@@ -8,7 +8,7 @@ using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
 
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.KnowledgeNetwork
 {
     [Route("api/[controller]")]
     [ApiController]

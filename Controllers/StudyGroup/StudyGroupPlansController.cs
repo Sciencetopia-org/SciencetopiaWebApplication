@@ -4,7 +4,7 @@ using Sciencetopia.DTOs;
 using Sciencetopia.Services;
 using System.Security.Claims;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.StudyGroups
 {
     [ApiController]
     [Route("api/StudyGroups/{StudyGroupId}/Plans/{PlanId}")]
@@ -18,7 +18,6 @@ namespace Sciencetopia.Controllers
         }
 
         [HttpPost("share")]
-        [HttpPost("Share")]
         public async Task<IActionResult> ShareToStudyGroup([FromRoute(Name = "StudyGroupId")] string studyGroupId, [FromRoute(Name = "PlanId")] string planId, [FromBody] ShareStudyPlanRequest request)
         {
             var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;

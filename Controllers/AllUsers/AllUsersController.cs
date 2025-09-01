@@ -7,6 +7,8 @@ using Sciencetopia.Services;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 
+namespace Sciencetopia.Controllers.Users;
+
 [Route("api/[controller]")]
 [ApiController]
 public class AllUsersController : ControllerBase

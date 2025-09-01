@@ -50,6 +50,10 @@ builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<Sciencetopia.Services.PermissionService>();
+builder.Services.AddScoped<Sciencetopia.Services.Cohorts.ICohortService, Sciencetopia.Services.Cohorts.CohortService>();
+// Progress tracking services
+builder.Services.AddScoped<Sciencetopia.Repositories.Neo4j.INeo4jProgressRepository, Sciencetopia.Repositories.Neo4j.Neo4jProgressRepository>();
+builder.Services.AddScoped<Sciencetopia.Services.Progress.IResourceProgressService, Sciencetopia.Services.Progress.ResourceProgressService>();
 
 // Add SignalR service
 builder.Services.AddSignalR();
@@ -169,6 +173,16 @@ builder.Services.ConfigureApplicationCookie(options =>
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("RequireAdministratorRole", policy => policy.RequireRole("administrator"));
+
+    // Plan/Cohort granular policies
+    options.AddPolicy("Plan.Edit", policy =>
+        policy.Requirements.Add(new Sciencetopia.Authorization.PlanPermissionRequirement(Sciencetopia.Authorization.PlanPermissionAction.PlanEdit)));
+    options.AddPolicy("Plan.Publish", policy =>
+        policy.Requirements.Add(new Sciencetopia.Authorization.PlanPermissionRequirement(Sciencetopia.Authorization.PlanPermissionAction.PlanPublish)));
+    options.AddPolicy("Cohort.Manage", policy =>
+        policy.Requirements.Add(new Sciencetopia.Authorization.PlanPermissionRequirement(Sciencetopia.Authorization.PlanPermissionAction.CohortManage)));
+    options.AddPolicy("Cohort.Invite", policy =>
+        policy.Requirements.Add(new Sciencetopia.Authorization.PlanPermissionRequirement(Sciencetopia.Authorization.PlanPermissionAction.CohortInvite)));
 });
 
 
@@ -185,6 +199,7 @@ builder.Services.AddOpenAIService(options =>
 // Integrate other services like distributed memory cache
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, Sciencetopia.Authorization.PlanPermissionHandler>();
 builder.Services.AddSession(options =>
 {
     options.IdleTimeout = TimeSpan.FromMinutes(30);
@@ -252,5 +267,6 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.MapHub<ChatHub>("/chathub"); // Map your ChatHub
+app.MapHub<Sciencetopia.Hubs.StudyHub>("/hubs/study");
 
 app.Run();

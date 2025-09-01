@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Authorization;
 using Sciencetopia.Services;
 using Sciencetopia.Models;
 
+namespace Sciencetopia.Controllers.StudyGroups;
+
 [ApiController]
 [Route("api/[controller]")]
 public class StudyGroupController : ControllerBase
@@ -26,6 +28,10 @@ public class StudyGroupController : ControllerBase
     [HttpGet("GetStudyGroupById/{groupId}")]
     public async Task<ActionResult<StudyGroup>> GetStudyGroupById(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         var group = await _studyGroupService.GetStudyGroupByIdAsync(groupId);
         if (group == null)
         {
@@ -59,6 +65,10 @@ public class StudyGroupController : ControllerBase
     [HttpGet("GetStudyGroupMembers/{groupId}")]
     public async Task<ActionResult<IEnumerable<GroupMember>>> GetStudyGroupMembers(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         var members = await _studyGroupService.GetStudyGroupMembers(groupId);
         if (members == null)
         {
@@ -81,6 +91,10 @@ public class StudyGroupController : ControllerBase
     [HttpGet("GetGroupManagers/{studyGroupId}")]
     public async Task<IActionResult> GetGroupManagers(string studyGroupId)
     {
+        if (!Guid.TryParse(studyGroupId, out _))
+        {
+            return BadRequest("Invalid studyGroupId format. Expected GUID.");
+        }
         var managerIds = await _studyGroupService.GetGroupManagersAsync(studyGroupId);
         if (managerIds == null || !managerIds.Any())
         {
@@ -146,6 +160,10 @@ public class StudyGroupController : ControllerBase
     [Authorize(Roles = "administrator")]
     public async Task<ActionResult> ApproveStudyGroupAsync([FromBody] string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         // Retrieve the admin's ID from the ClaimsPrincipal
         string adminUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -170,6 +188,10 @@ public class StudyGroupController : ControllerBase
     [Authorize(Roles = "administrator")]
     public async Task<ActionResult> RejectStudyGroupAsync([FromBody] string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         // Retrieve the admin's ID from the ClaimsPrincipal
         string adminUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -215,6 +237,10 @@ public class StudyGroupController : ControllerBase
     [Authorize] // Ensure only authenticated users can access this endpoint
     public async Task<IActionResult> DeleteStudyGroup(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         // Retrieve the user's ID from the ClaimsPrincipal
         string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -348,6 +374,10 @@ public class StudyGroupController : ControllerBase
     [HttpPost("JoinGroup/{groupId}")]
     public async Task<IActionResult> JoinGroup(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         // Retrieve the user's ID from the ClaimsPrincipal
         string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -372,6 +402,10 @@ public class StudyGroupController : ControllerBase
     [HttpGet("GetJoinRequests/{groupId}")]
     public async Task<ActionResult<IEnumerable<JoinRequest>>> GetJoinRequests(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         var requests = await _studyGroupService.GetJoinRequests(groupId);
         if (requests == null)
         {
@@ -386,6 +420,10 @@ public class StudyGroupController : ControllerBase
     {
         try
         {
+            if (!Guid.TryParse(groupId, out _))
+            {
+                return BadRequest("Invalid groupId format. Expected GUID.");
+            }
             // Call the service to get the count of pending join requests
             var pendingCount = await _studyGroupService.GetPendingJoinRequestsCount(groupId);
 
@@ -401,6 +439,10 @@ public class StudyGroupController : ControllerBase
     [HttpGet("GetActivityLogs/{groupId}")]
     public async Task<ActionResult<IEnumerable<ActivityLog>>> GetActivityLogs(string groupId)
     {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
         var logs = await _studyGroupService.GetActivityLogs(groupId);
         if (logs == null)
         {

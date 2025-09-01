@@ -4,6 +4,8 @@ using Sciencetopia.Models;
 using Sciencetopia.Authorization;
 using System.Threading.Tasks;
 
+namespace Sciencetopia.Controllers.StudyGroups;
+
 [ApiController]
 [Route("api/[controller]")]
 public class StudyGroupManageController : ControllerBase

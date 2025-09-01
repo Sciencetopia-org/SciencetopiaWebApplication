@@ -21,6 +21,9 @@ public class StudyPlanEntity
 
     public DateTime UpdatedDate { get; set; } = DateTime.UtcNow;
 
+    // Current published version pointer (optional, backfilled to latest)
+    public long? CurrentVersionId { get; set; }
+
     // RBAC user roles
     public ICollection<StudyPlanUserRole> UserRoles { get; set; } = new List<StudyPlanUserRole>();
 }

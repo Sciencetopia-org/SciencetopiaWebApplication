@@ -5,7 +5,7 @@ using Sciencetopia.Models;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.Recommendations
 {
     [Authorize]
     [Route("api/[controller]")]

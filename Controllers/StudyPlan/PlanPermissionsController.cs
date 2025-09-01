@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Sciencetopia.Services;
 
-namespace Sciencetopia.Controllers
+namespace Sciencetopia.Controllers.StudyPlan
 {
     [ApiController]
     [Route("api/Plans")] 

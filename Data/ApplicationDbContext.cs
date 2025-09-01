@@ -40,6 +40,7 @@ namespace Sciencetopia.Data
         public DbSet<StudyGroupStudyPlan> StudyGroupStudyPlans => Set<StudyGroupStudyPlan>();
         public DbSet<StudyPlanUserRole> StudyPlanUserRoles => Set<StudyPlanUserRole>();
         public DbSet<StudyGroupUserRole> StudyGroupUserRoles => Set<StudyGroupUserRole>();
+        public DbSet<StudyPlanCohort> Cohorts => Set<StudyPlanCohort>();
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -280,6 +281,37 @@ namespace Sciencetopia.Data
 
                 b.HasIndex(x => x.UserId);
             });
+
+            // Cohorts (StudyPlanCohort)
+            builder.Entity<StudyPlanCohort>(b =>
+            {
+                b.ToTable("Cohorts");
+                b.HasKey(x => x.Id);
+                b.Property(x => x.Title).HasMaxLength(200);
+                b.Property(x => x.Visibility).HasMaxLength(20).HasDefaultValue("private");
+                b.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                b.Property(x => x.CreatedBy)
+                  .HasMaxLength(450)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                b.HasIndex(x => x.StudyPlanId);
+                b.HasIndex(x => x.StudyGroupId);
+                b.Property(x => x.EnrollMode).HasConversion<string>().HasMaxLength(16).HasDefaultValue(Sciencetopia.Models.Enums.CohortEnrollMode.OptIn);
+                b.Property(x => x.MembersCount).HasDefaultValue(0);
+
+                b.HasOne<StudyPlanEntity>(x => x.Plan)
+                 .WithMany()
+                 .HasForeignKey(x => x.StudyPlanId)
+                 .OnDelete(DeleteBehavior.Cascade);
+
+                b.HasOne<StudyGroupEntity>()
+                  .WithMany()
+                  .HasForeignKey(x => x.StudyGroupId)
+                  .OnDelete(DeleteBehavior.SetNull);
+            });
+
+            // CohortMembers removed: membership tracked in graph (Neo4j)
         }
     }
 }

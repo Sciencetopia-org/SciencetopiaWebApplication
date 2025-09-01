@@ -68,13 +68,24 @@ RETURN id(r) as relId;";
 
             if (autoEnroll)
             {
-                // AutoEnroll members
+                // AutoEnroll members to the plan's current (or latest) PlanVersion
+                // Resolve version from SQL
+                long? pinned = await _db.StudyPlans.AsNoTracking().Where(p => p.Id == spId).Select(p => p.CurrentVersionId).FirstOrDefaultAsync();
+                int versionNumber;
+                if (pinned.HasValue)
+                {
+                    versionNumber = await _db.StudyPlanVersions.Where(v => v.Id == pinned.Value).Select(v => v.VersionNumber).FirstOrDefaultAsync();
+                }
+                else
+                {
+                    versionNumber = await _db.StudyPlanVersions.Where(v => v.StudyPlanId == spId).OrderByDescending(v => v.VersionNumber).Select(v => v.VersionNumber).FirstOrDefaultAsync();
+                }
+
                 var enrollCypher = @"
-MATCH (g:StudyGroup {id:$groupId})<-[:MEMBER_OF]-(u:User),
-      (p:StudyPlan {id:$planId})
-WITH u,p
-MERGE (u)-[:ENROLLED_IN]->(p);";
-                await session.RunAsync(enrollCypher, new { groupId = studyGroupId, planId = studyPlanId });
+MATCH (g:StudyGroup {id:$groupId})<-[:MEMBER_OF]-(u:User)
+MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
+MERGE (u)-[:ENROLLED_IN]->(v);";
+                await session.RunAsync(enrollCypher, new { groupId = studyGroupId, planId = studyPlanId, versionNumber });
             }
 
             return existing;
@@ -159,4 +170,3 @@ RETURN collect({groupId: sg.id, permission: r.permission, role: m.role}) AS sour
         }
     }
 }
-

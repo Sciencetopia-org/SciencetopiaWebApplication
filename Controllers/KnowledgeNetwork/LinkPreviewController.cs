@@ -10,6 +10,8 @@ using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PdfSharp.Charting;
 
+namespace Sciencetopia.Controllers.KnowledgeNetwork;
+
 [Route("api/[controller]")]
 [ApiController]
 public class LinkPreviewController : ControllerBase

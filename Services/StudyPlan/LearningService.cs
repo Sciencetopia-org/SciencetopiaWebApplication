@@ -1,5 +1,7 @@
 using Neo4j.Driver;
 
+namespace Sciencetopia.Services;
+
 public class LearningService
 {
     private readonly IDriver _driver;
@@ -9,23 +11,21 @@ public class LearningService
         _driver = driver;
     }
 
+    [Obsolete("Use IResourceProgressService.ToggleByLinkAsync for unified progress tracking.")]
     public async Task<bool> ToggleFinishedLearningRelationship(string resourceLink, string userId, string? source, string? device)
     {
         using (var session = _driver.AsyncSession())
         {
-            // Check if the user has already completed this resource
             var queryCheck = @"
             MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
             WHERE r.link = $resourceLink
             RETURN rel";
 
-            // Delete existing COMPLETED relationship (toggle off)
             var queryDelete = @"
             MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
             WHERE r.link = $resourceLink
             DELETE rel";
 
-            // Create COMPLETED relationship with properties (toggle on)
             var queryCreate = @"
             MATCH (u:User {id: $userId}), (r:Resource {link: $resourceLink})
             CREATE (u)-[rel:COMPLETED { at: datetime(), source: $source, device: $device }]->(r)
@@ -33,22 +33,19 @@ public class LearningService
 
             var parameters = new { resourceLink, userId, source, device };
 
-            // Check if the relationship exists
             var result = await session.RunAsync(queryCheck, parameters);
             var relationshipExists = await result.FetchAsync();
 
             if (relationshipExists)
             {
-                // If the relationship exists, delete it
                 await session.RunAsync(queryDelete, parameters);
             }
             else
             {
-                // If the relationship does not exist, create it
                 await session.RunAsync(queryCreate, parameters);
             }
 
-            return true; // Or you can return the result based on your logic
+            return true;
         }
     }
 

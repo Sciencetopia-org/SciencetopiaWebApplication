@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Sciencetopia.Models;
 
+namespace Sciencetopia.Controllers;
+
 public class HomeController : Controller
 {
     private readonly UserActivityService _userActivityService;
