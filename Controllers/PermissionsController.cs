@@ -6,7 +6,7 @@ using Sciencetopia.Services;
 namespace Sciencetopia.Controllers;
 
 [ApiController]
-[Route("api/permissions")] 
+[Route("api/Permissions")] 
 public class PermissionsController : ControllerBase
 {
     private readonly PermissionService _perm;
@@ -16,8 +16,8 @@ public class PermissionsController : ControllerBase
         _perm = perm;
     }
 
-    // GET /api/permissions/effective?planId=...&cohortId=...&userId=...
-    [HttpGet("effective")]
+    // GET /api/Permissions/Effective?planId=...&cohortId=...&userId=...
+    [HttpGet("Effective")]
     [Authorize] // requires a logged-in user; if userId omitted, use current user
     public async Task<ActionResult<EffectivePermissionsDto>> GetEffective([FromQuery] Guid planId, [FromQuery] Guid? cohortId, [FromQuery] string? userId)
     {
@@ -36,4 +36,3 @@ public class PermissionsController : ControllerBase
         return Ok(result);
     }
 }
-

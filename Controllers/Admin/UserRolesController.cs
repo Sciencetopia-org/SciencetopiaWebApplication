@@ -21,7 +21,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Get user roles
-    [HttpGet("{userId}/roles")]
+    [HttpGet("{userId}/Roles")]
     public async Task<IActionResult> GetUserRoles(string userId)
     {
         var user = await _userManager.FindByIdAsync(userId);
@@ -32,7 +32,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Assign role to user
-    [HttpPost("{userId}/assign-role")]
+    [HttpPost("{userId}/AssignRole")]
     public async Task<IActionResult> AssignRoleToUser(string userId, [FromBody] string role)
     {
         var user = await _userManager.FindByIdAsync(userId);
@@ -53,7 +53,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Remove role from user
-    [HttpPost("{userId}/remove-role")]
+    [HttpPost("{userId}/RemoveRole")]
     public async Task<IActionResult> RemoveRoleFromUser(string userId, [FromBody] string role)
     {
         var user = await _userManager.FindByIdAsync(userId);
@@ -74,7 +74,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Get all available roles
-    [HttpGet("roles")]
+    [HttpGet("Roles")]
     public IActionResult GetAllRoles()
     {
         var roles = _roleManager.Roles;
@@ -82,7 +82,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Create a new role
-    [HttpPost("create-role")]
+    [HttpPost("CreateRole")]
     public async Task<IActionResult> CreateRole([FromBody] string roleName)
     {
         if (await _roleManager.RoleExistsAsync(roleName))
@@ -100,7 +100,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Delete a role
-    [HttpDelete("delete-role")]
+    [HttpDelete("DeleteRole")]
     public async Task<IActionResult> DeleteRole([FromBody] string roleName)
     {
         var role = await _roleManager.FindByNameAsync(roleName);
@@ -116,7 +116,7 @@ public class UserRoleController : ControllerBase
     }
 
     // Create Admin Account and Assign 'administrator' Role
-    [HttpPost("create-admin")]
+    [HttpPost("CreateAdmin")]
     public async Task<IActionResult> CreateAdminAccount([FromBody] RegisterDTO model)
     {
         // Check if the administrator role exists, create if not

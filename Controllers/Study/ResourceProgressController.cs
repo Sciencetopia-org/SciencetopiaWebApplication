@@ -8,7 +8,7 @@ using Sciencetopia.DTOs;
 namespace Sciencetopia.Controllers.Study;
 
 [ApiController]
-[Route("api/resources")]
+[Route("api/Resources")]
 public class ResourceProgressController : ControllerBase
 {
     private readonly IResourceProgressService _svc;
@@ -20,7 +20,7 @@ public class ResourceProgressController : ControllerBase
         _perm = perm;
     }
 
-    [HttpPost("completedStatus")]
+    [HttpPost("CompletedStatus")]
     public async Task<IActionResult> CompletedStatus([FromBody] ResourcesStatusRequest req)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -30,7 +30,7 @@ public class ResourceProgressController : ControllerBase
         return Ok(result);
     }
 
-    [HttpPost("{resourceId:guid}/complete")]
+    [HttpPost("{resourceId:guid}/Complete")]
     public async Task<IActionResult> Complete(Guid resourceId, [FromBody] CompleteResourceDto dto)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -46,7 +46,7 @@ public class ResourceProgressController : ControllerBase
         return Ok(res);
     }
 
-    [HttpDelete("{resourceId:guid}/complete")]
+    [HttpDelete("{resourceId:guid}/Complete")]
     public async Task<IActionResult> Undo(Guid resourceId, [FromQuery] Guid? planId = null)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);

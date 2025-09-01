@@ -102,19 +102,48 @@ namespace Sciencetopia.Services;
     }
 
     // Returns an aggregated boolean permissions view for a given user/plan/cohort.
+    // Plan permissions are derived from plan role; Cohort permissions are decoupled from plan
+    // and decided by cohort scope (group-scoped vs standalone) and creator/manager roles.
     public async Task<EffectivePermissionsDto> GetEffectivePermissionsAsync(string userId, Guid planId, Guid? cohortId = null, CancellationToken ct = default)
     {
+        // Plan-level permissions
         var role = await GetEffectivePlanRoleAsync(userId, planId, ct);
-
         var canView = role >= PlanRole.Viewer;
         var canComment = role >= PlanRole.Commenter;
         var canEdit = role >= PlanRole.Editor || role == PlanRole.Owner;
         var canPublish = role == PlanRole.Owner;
 
-        // Cohort permissions: placeholder baseline until CohortMember & group-scoped fields are added.
-        // For now, only owner can manage/invite cohorts. This will be extended in B1/B4.
-        var cohortManage = role == PlanRole.Owner;
-        var cohortInvite = role == PlanRole.Owner;
+        // Cohort-level permissions (decoupled from plan role)
+        bool cohortManage = false, cohortInvite = false;
+        if (cohortId.HasValue)
+        {
+            // Load cohort scope
+            var info = await _db.Cohorts.AsNoTracking()
+                .Where(c => c.Id == cohortId.Value)
+                .Select(c => new { c.StudyGroupId, c.CreatedBy })
+                .FirstOrDefaultAsync(ct);
+
+            if (info != null)
+            {
+                if (info.StudyGroupId.HasValue)
+                {
+                    // Group-scoped cohort: group managers manage/invite
+                    var isManager = await _db.StudyGroupUserRoles.AsNoTracking()
+                        .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId && x.Role == Models.Enums.GroupRole.Manager, ct);
+                    if (isManager)
+                    {
+                        cohortManage = true;
+                        cohortInvite = true;
+                    }
+                }
+                else
+                {
+                    // Non group-scoped cohorts are not supported for management in the strong coupling model
+                    cohortManage = false;
+                    cohortInvite = false;
+                }
+            }
+        }
 
         return new EffectivePermissionsDto
         {

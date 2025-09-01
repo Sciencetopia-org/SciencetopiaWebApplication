@@ -8,7 +8,6 @@ namespace Sciencetopia.Services.Cohorts;
 
 public interface ICohortService
 {
-    Task<CohortViewDto> CreateAsync(Guid planId, string createdBy, CohortCreateDto dto);
     Task<CohortViewDto?> UpdateAsync(Guid cohortId, CohortUpdateDto dto);
     Task<List<CohortViewDto>> ListByPlanAsync(Guid planId);
     Task<Guid?> GetPlanIdAsync(Guid cohortId);
@@ -105,27 +104,7 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
         return dto;
     }
 
-    public async Task<CohortViewDto> CreateAsync(Guid planId, string createdBy, CohortCreateDto dto)
-    {
-        var entity = new StudyPlanCohort
-        {
-            Id = Guid.NewGuid(),
-            StudyPlanId = planId,
-            Title = dto.Title,
-            Visibility = dto.Visibility ?? "private",
-            StartAt = dto.StartAt,
-            EndAt = dto.EndAt,
-            CreatedBy = createdBy,
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _db.Cohorts.Add(entity);
-        await _db.SaveChangesAsync();
-
-        await UpsertCohortNodeAsync(entity);
-
-        return ToDto(entity);
-    }
+    // Removed CreateAsync: cohort creation must happen via group-scoped controller
 
     public async Task<CohortViewDto?> UpdateAsync(Guid cohortId, CohortUpdateDto dto)
     {
@@ -267,12 +246,13 @@ RETURN c.id AS cohortId;";
             .FirstOrDefaultAsync(ct);
         if (info == null) throw new KeyNotFoundException("cohort_not_found");
 
-        if (info.StudyGroupId.HasValue)
-        {
-            var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
-                .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId, ct);
-            if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
-        }
+        // Strong coupling: cohort must be group-scoped and user must be a member
+        if (!info.StudyGroupId.HasValue)
+            throw new InvalidOperationException("cohort_not_group_scoped");
+
+        var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
+            .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId, ct);
+        if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
         return info.StudyPlanId;
     }
@@ -287,12 +267,10 @@ RETURN c.id AS cohortId;";
         if (target == null) throw new KeyNotFoundException("cohort_not_found");
         if (target.StudyPlanId != planId) throw new InvalidOperationException("cohort_plan_mismatch");
 
-        if (target.StudyGroupId.HasValue)
-        {
-            var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
-                .AnyAsync(x => x.GroupId == target.StudyGroupId.Value && x.UserId == userId, ct);
-            if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
-        }
+        if (!target.StudyGroupId.HasValue) throw new InvalidOperationException("cohort_not_group_scoped");
+        var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
+            .AnyAsync(x => x.GroupId == target.StudyGroupId.Value && x.UserId == userId, ct);
+        if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
         Guid? fromId = null;
         await using var session = _driver.AsyncSession();

@@ -11,7 +11,7 @@ using Microsoft.AspNetCore.Authorization;
 namespace Sciencetopia.Controllers.StudyGroups;
 
 [ApiController]
-[Route("api/groups/{groupId:guid}")]
+[Route("api/Groups/{groupId:guid}")]
 public class GroupCohortsController : ControllerBase
 {
     private readonly ApplicationDbContext _db;
@@ -32,7 +32,7 @@ public class GroupCohortsController : ControllerBase
         public CohortEnrollMode? EnrollMode { get; set; }
     }
 
-    [HttpPost("plans/{planId:guid}/cohorts")] // B5-4 create group-scoped
+    [HttpPost("Plans/{planId:guid}/Cohorts")] // B5-4 create group-scoped
     [Authorize(Policy = "Plan.Edit")]
     public async Task<IActionResult> Create(Guid groupId, Guid planId, [FromBody] CreateGroupCohortRequest body)
     {
@@ -95,7 +95,7 @@ MERGE (c)-[:OF_VERSION]->(v)
         public int? PinnedVersionNumber { get; set; }
     }
 
-    [HttpPatch("cohorts/{cohortId:guid}")] // B5-4 patch enrollMode/pinnedVersion
+    [HttpPatch("Cohorts/{cohortId:guid}")] // B5-4 patch enrollMode/pinnedVersion
     [Authorize(Policy = "Cohort.Manage")]
     public async Task<IActionResult> Patch(Guid groupId, Guid cohortId, [FromBody] UpdateGroupCohortRequest body)
     {
@@ -150,7 +150,7 @@ MERGE (u)-[:ENROLLED_IN]->(pv)";
         return Ok();
     }
 
-    [HttpPost("cohorts/{cohortId:guid}/upgrade-version")] // B5-4 upgrade to plan current
+    [HttpPost("Cohorts/{cohortId:guid}/UpgradeVersion")] // B5-4 upgrade to plan current
     [Authorize(Policy = "Cohort.Manage")]
     public async Task<IActionResult> UpgradeToCurrent(Guid groupId, Guid cohortId)
     {

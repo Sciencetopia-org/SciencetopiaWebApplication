@@ -17,7 +17,7 @@ namespace Sciencetopia.Controllers.StudyGroups
             _sharingService = sharingService;
         }
 
-        [HttpPost("share")]
+        [HttpPost("Share")]
         public async Task<IActionResult> ShareToStudyGroup([FromRoute(Name = "StudyGroupId")] string studyGroupId, [FromRoute(Name = "PlanId")] string planId, [FromBody] ShareStudyPlanRequest request)
         {
             var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;

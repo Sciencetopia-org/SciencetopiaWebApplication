@@ -18,7 +18,7 @@ public class PlanProgressController : ControllerBase
         _perm = perm;
     }
 
-    [HttpGet("studyPlans/{planId:guid}/progress/me")]
+    [HttpGet("StudyPlans/{planId:guid}/Progress/Me")]
     public async Task<IActionResult> MyPlanProgress(Guid planId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -30,7 +30,7 @@ public class PlanProgressController : ControllerBase
         return Ok(progress);
     }
 
-    [HttpGet("studyPlans/{planId:guid}/lessons/{lessonId:guid}/progress/me")]
+    [HttpGet("StudyPlans/{planId:guid}/Lessons/{lessonId:guid}/Progress/Me")]
     public async Task<IActionResult> MyLessonProgress(Guid planId, Guid lessonId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -42,4 +42,3 @@ public class PlanProgressController : ControllerBase
         return Ok(progress);
     }
 }
-

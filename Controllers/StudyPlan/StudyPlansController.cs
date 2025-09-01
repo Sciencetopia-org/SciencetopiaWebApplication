@@ -108,7 +108,7 @@ namespace Sciencetopia.Controllers.StudyPlan
         }
 
         // B4-2: GET /StudyPlans/{id}/enrollment/me
-        [HttpGet("{id}/enrollment/me")]
+        [HttpGet("{id}/Enrollment/Me")]
         public async Task<IActionResult> GetEnrollmentMe([FromRoute] Guid id, [FromServices] Sciencetopia.Services.Cohorts.ICohortService cohortService)
         {
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
@@ -120,7 +120,7 @@ namespace Sciencetopia.Controllers.StudyPlan
         }
 
         // B4-5: GET /StudyPlans/{id}/joinable-cohorts
-        [HttpGet("{id}/joinable-cohorts")]
+        [HttpGet("{id}/JoinableCohorts")]
         public async Task<IActionResult> GetJoinableCohorts([FromRoute] Guid id, [FromServices] Neo4j.Driver.IDriver driver)
         {
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;

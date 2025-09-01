@@ -908,39 +908,25 @@ public class StudyPlanService
             var studyPlan = await _sqlRepository.GetStudyPlanByIdAsync(studyPlanId);
             if (studyPlan == null) return null;
 
-            // 拉取Neo4j关系
+            // 拉取Neo4j关系（懒加载：不取资源与学习状态）
             var lessonInfo = await GetLessonIdsByStudyPlanIdAsync(studyPlanId);
             var lessonIds = lessonInfo.Select(x => x.LessonId).ToList();
-
-            // 拉取Lesson内容
             var lessons = await GetLessonsByIdsAsync(lessonIds);
 
-            // 拉取Lesson -> Resource关系
-            var resourceInfo = await GetResourceIdsByLessonIdsAsync(lessonIds);
-            var resourceIds = resourceInfo.SelectMany(x => x.Value).Distinct().ToList();
-
-            // 拉取Resource内容
-            var resources = await GetResourcesByIdsAsync(resourceIds);
-
-            // Step 4. 从Neo4j拉取结构关系
             var cypherQuery = @"
             MATCH (sp:StudyPlan {id: $studyPlanId})
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
-            OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
-            OPTIONAL MATCH (cu:User {id: $currentUserId})-[cr:COMPLETED]->(r)
             OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
             OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
-            RETURN sp.id AS studyPlanId, 
-                   l.id AS lessonId, 
-                   r.id AS resourceId, 
+            RETURN sp.id AS studyPlanId,
+                   l.id AS lessonId,
                    hs.type AS stepType,
                    hs.order AS stepOrder,
-                   (cr IS NOT NULL) AS learned,
                    collect(DISTINCT lk) AS lessonKnowledgeNodes,
                    collect(DISTINCT sk) AS studyPlanKnowledgeNodes
             ORDER BY hs.order";
 
-            var result = await session.RunAsync(cypherQuery, new { studyPlanId, currentUserId });
+            var result = await session.RunAsync(cypherQuery, new { studyPlanId });
 
             var recordList = await result.ToListAsync();
             if (recordList == null || recordList.Count == 0) return null;
@@ -960,6 +946,7 @@ public class StudyPlanService
                 AdvancedTopics = new List<Lesson>()
             };
 
+            var lessonMap = new Dictionary<string, Lesson>();
             foreach (var record in recordList)
             {
                 var lessonId = record["lessonId"]?.As<string>();
@@ -973,28 +960,12 @@ public class StudyPlanService
                     Id = lessonId,
                     Name = sqlLesson.Title,
                     Description = sqlLesson.Description,
-                    Resources = new List<ResourceDTO>(),
+                    // 懒加载：Resources 不在此接口返回
+                    Resources = null,
                     AssociatedKnowledgeNodes = record["lessonKnowledgeNodes"]
                         ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
                 };
-
-                var resourceId = record["resourceId"]?.As<string>();
-                if (!string.IsNullOrEmpty(resourceId))
-                {
-                    var sqlResource = resources.FirstOrDefault(r => r.Value.Id.ToString() == resourceId).Value;
-                    if (sqlResource != null)
-                    {
-                        var learned = false;
-                        try { learned = record["learned"].As<bool>(); } catch {}
-                        lesson.Resources.Add(new ResourceDTO
-                        {
-                            Id = sqlResource.Id.ToString(),
-                            Name = sqlResource.Name,
-                            Link = sqlResource.Link,
-                            Learned = learned
-                        });
-                    }
-                }
+                lessonMap[lessonId] = lesson;
 
                 var stepType = record["stepType"]?.As<string>();
                 if (stepType == "PREREQUISITE")
@@ -1005,8 +976,7 @@ public class StudyPlanService
                     studyPlanDetail.AdvancedTopics.Add(lesson);
             }
 
-            // Step 5. 计算学习进度
-            CalculateProgress(studyPlanDetail);
+            // 懒加载：不在此处计算整体进度（使用 Progress APIs 获取）
 
             return new StudyPlanDTO { StudyPlan = studyPlanDetail };
         }
@@ -1014,6 +984,76 @@ public class StudyPlanService
         {
             await session.CloseAsync();
         }
+    }
+
+    public class LessonDetailDto
+    {
+        public string? LessonId { get; set; }
+        public string? Title { get; set; }
+        public string? Description { get; set; }
+        public List<ResourceDTO> Resources { get; set; } = new();
+        public List<Node>? AssociatedKnowledgeNodes { get; set; }
+    }
+
+    public async Task<LessonDetailDto?> GetLessonDetailAsync(Guid planId, Guid lessonId, string userId)
+    {
+        using var session = _neo4jDriver.AsyncSession();
+        // Basic lesson info from SQL
+        var lessons = await GetLessonsByIdsAsync(new List<string> { lessonId.ToString() });
+        if (!lessons.TryGetValue(lessonId.ToString(), out var sqlLesson) || sqlLesson == null)
+            return null;
+
+        // Fetch resources linked to the lesson and learned status for user
+        var cypher = @"
+MATCH (sp:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson {id:$lessonId})
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (:User {id:$userId})-[cr:COMPLETED]->(r)
+OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
+RETURN l.id AS lessonId, collect(DISTINCT r.id) AS resourceIds, collect(DISTINCT lk) AS lessonKnowledgeNodes,
+       collect({rid:r.id, learned:(cr IS NOT NULL)}) AS flags";
+        var cursor = await session.RunAsync(cypher, new { planId = planId.ToString(), lessonId = lessonId.ToString(), userId });
+        var rec = await cursor.SingleAsync();
+        var ridObjs = rec["resourceIds"].As<List<object>>();
+        var resourceIds = ridObjs.Where(x => x != null).Select(x => x.ToString()!).ToList();
+
+        var resources = await GetResourcesByIdsAsync(resourceIds);
+
+        // Build learned map
+        var flags = rec["flags"].As<List<object>>();
+        var learnedMap = new Dictionary<string, bool>();
+        foreach (var f in flags)
+        {
+            if (f is IDictionary<string, object> d)
+            {
+                var rid = d.ContainsKey("rid") ? d["rid"]?.ToString() : null;
+                var learned = false;
+                try { learned = (d["learned"] as bool?) ?? false; } catch {}
+                if (!string.IsNullOrEmpty(rid)) learnedMap[rid!] = learned;
+            }
+        }
+
+        var dto = new LessonDetailDto
+        {
+            LessonId = sqlLesson.Id.ToString(),
+            Title = sqlLesson.Title,
+            Description = sqlLesson.Description,
+            AssociatedKnowledgeNodes = rec["lessonKnowledgeNodes"]?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+        };
+        foreach (var rid in resourceIds)
+        {
+            if (resources.TryGetValue(rid, out var res) && res != null)
+            {
+                dto.Resources.Add(new ResourceDTO
+                {
+                    Id = res.Id.ToString(),
+                    Name = res.Name,
+                    Link = res.Link,
+                    Learned = learnedMap.TryGetValue(rid, out var v) && v
+                });
+            }
+        }
+
+        return dto;
     }
 
     public async Task<bool> DeleteStudyPlanAsync(string studyPlanId, string currentUserId)

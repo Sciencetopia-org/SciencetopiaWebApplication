@@ -7,7 +7,7 @@ using Sciencetopia.Data;
 namespace Sciencetopia.Controllers.Admin;
 
 [ApiController]
-[Route("api/admin/graph")]
+[Route("api/Admin/Graph")]
 [Authorize(Policy = "RequireAdministratorRole")]
 public class GraphBackfillController : ControllerBase
 {
@@ -20,7 +20,7 @@ public class GraphBackfillController : ControllerBase
         _driver = driver;
     }
 
-    [HttpPost("backfill")]
+    [HttpPost("Backfill")]
     public async Task<IActionResult> Backfill()
     {
         int pinnedLinked = 0;

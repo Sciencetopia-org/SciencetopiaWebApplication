@@ -26,7 +26,7 @@ public class CohortsController : ControllerBase
         _hub = hub;
     }
 
-    [HttpGet("studyPlans/{planId:guid}/cohorts")]
+    [HttpGet("StudyPlans/{planId:guid}/Cohorts")]
     public async Task<IActionResult> ListByPlan(Guid planId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -36,19 +36,11 @@ public class CohortsController : ControllerBase
         return Ok(list);
     }
 
-    [HttpPost("studyPlans/{planId:guid}/cohorts")]
-    [Authorize(Policy = "Plan.Edit")]
-    public async Task<IActionResult> Create(Guid planId, [FromBody] CohortCreateDto dto)
-    {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var v = await _svc.CreateAsync(planId, userId, dto);
-        return Ok(v);
-    }
+    // Removed: plan-scoped cohort creation. Use group-scoped endpoint under GroupCohortsController.
 
     
 
-    [HttpPut("cohorts/{cohortId:guid}")]
+    [HttpPut("Cohorts/{cohortId:guid}")]
     [Authorize(Policy = "Cohort.Manage")]
     public async Task<IActionResult> Update(Guid cohortId, [FromBody] CohortUpdateDto dto)
     {
@@ -58,7 +50,7 @@ public class CohortsController : ControllerBase
         return Ok(updated);
     }
 
-    [HttpDelete("cohorts/{cohortId:guid}")]
+    [HttpDelete("Cohorts/{cohortId:guid}")]
     [Authorize(Policy = "Cohort.Manage")]
     public async Task<IActionResult> Delete(Guid cohortId)
     {
@@ -70,7 +62,7 @@ public class CohortsController : ControllerBase
 
     // Removed: POST /cohorts/{cohortId}/enroll (deprecated)
 
-    [HttpDelete("cohorts/{cohortId:guid}/leave")]
+    [HttpDelete("Cohorts/{cohortId:guid}/Leave")]
     public async Task<IActionResult> Unenroll(Guid cohortId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -80,7 +72,7 @@ public class CohortsController : ControllerBase
     }
 
     // B5-1: POST /cohorts/{cohortId}/join
-    [HttpPost("cohorts/{cohortId:guid}/join")]
+    [HttpPost("Cohorts/{cohortId:guid}/Join")]
     public async Task<IActionResult> Join(Guid cohortId, [FromBody] JoinCohortRequest body)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -102,7 +94,7 @@ public class CohortsController : ControllerBase
     }
 
     // B5-2: POST /plans/{planId}/switch-cohort
-    [HttpPost("plans/{planId:guid}/switch-cohort")]
+    [HttpPost("Plans/{planId:guid}/SwitchCohort")]
     public async Task<IActionResult> Switch(Guid planId, [FromBody] SwitchCohortRequest body)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -127,7 +119,7 @@ public class CohortsController : ControllerBase
         }
     }
 
-    [HttpPost("cohorts/{cohortId:guid}/autoEnroll/{groupId:guid}")]
+    [HttpPost("Cohorts/{cohortId:guid}/AutoEnroll/{groupId:guid}")]
     public async Task<IActionResult> AutoEnroll(Guid cohortId, Guid groupId, [FromQuery] bool run = false)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -143,7 +135,7 @@ public class CohortsController : ControllerBase
         return Ok();
     }
 
-    [HttpDelete("cohorts/{cohortId:guid}/autoEnroll/{groupId:guid}")]
+    [HttpDelete("Cohorts/{cohortId:guid}/AutoEnroll/{groupId:guid}")]
     public async Task<IActionResult> RemoveAutoEnroll(Guid cohortId, Guid groupId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
