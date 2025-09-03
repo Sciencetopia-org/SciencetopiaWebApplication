@@ -6,9 +6,10 @@ using Sciencetopia.Hubs;
 using Newtonsoft.Json;
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
+using Sciencetopia.Models.Enums;
 
-public class StudyGroupService
-{
+    public class StudyGroupService
+    {
     private readonly IDriver _neo4jDriver;
     private readonly UserService _userService;
     private readonly ApplicationDbContext _context;
@@ -45,6 +46,20 @@ public class StudyGroupService
         _context.StudyGroups.Add(entity);
         await _context.SaveChangesAsync();
 
+        // Ensure SQL role consistency: creator becomes manager in SQL as well
+        var existingRole = await _context.StudyGroupUserRoles
+            .FirstOrDefaultAsync(r => r.GroupId == entity.Id && r.UserId == userId);
+        if (existingRole == null)
+        {
+            _context.StudyGroupUserRoles.Add(new StudyGroupUserRole
+            {
+                GroupId = entity.Id,
+                UserId = userId,
+                Role = GroupRole.Manager
+            });
+            await _context.SaveChangesAsync();
+        }
+
         // Step 2: Save relationship in Neo4j
         using var session = _neo4jDriver.AsyncSession();
         try
@@ -53,6 +68,9 @@ public class StudyGroupService
             {
                 var query = @"
                 MERGE (s:StudyGroup {id: $groupId})
+                SET s.status = $status,
+                    s.name = $name,
+                    s.description = $description
                 WITH s
                 MATCH (u:User {id: $userId})
                 CREATE (u)-[:MEMBER_OF {role: 'manager', joinedAt: $joinedAt}]->(s)
@@ -62,7 +80,10 @@ public class StudyGroupService
                 {
                     {"userId", userId},
                     {"groupId", entity.Id.ToString()},
-                    {"joinedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss")}
+                    {"joinedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss")},
+                    {"status", entity.Status ?? "pending_approval"},
+                    {"name", entity.Name},
+                    {"description", entity.Description ?? string.Empty}
                 };
                 var cursor = await tx.RunAsync(query, groupParams);
                 var record = await cursor.SingleAsync();
@@ -85,6 +106,16 @@ public class StudyGroupService
 
         group.Status = "approved";
         await _context.SaveChangesAsync();
+
+        // Reflect status in Neo4j for consistency
+        using (var session = _neo4jDriver.AsyncSession())
+        {
+            await session.ExecuteWriteAsync(async tx =>
+            {
+                var q = "MERGE (s:StudyGroup {id:$id}) SET s.status=$status";
+                await tx.RunAsync(q, new { id = groupId, status = group.Status });
+            });
+        }
         return true;
     }
 
@@ -96,6 +127,16 @@ public class StudyGroupService
 
         group.Status = "rejected";
         await _context.SaveChangesAsync();
+
+        // Reflect status in Neo4j for consistency
+        using (var session = _neo4jDriver.AsyncSession())
+        {
+            await session.ExecuteWriteAsync(async tx =>
+            {
+                var q = "MERGE (s:StudyGroup {id:$id}) SET s.status=$status";
+                await tx.RunAsync(q, new { id = groupId, status = group.Status });
+            });
+        }
         return true;
     }
 
@@ -197,12 +238,12 @@ public class StudyGroupService
             return false;
         }
 
-        // // Check if the user is the leader of the group
-        // if (studyGroup.LeaderId != userId)
-        // {
-        //     // User is not the leader, so they cannot delete the group
-        //     return false;
-        // }
+        // Check if the user is the manager of the study group
+        if (!await IsUserManagerAsync(groupId, userId))
+        {
+            // User is not authorized to delete the study group
+            throw new UnauthorizedAccessException("Only the manager can delete the study group.");
+        }
 
         // Logic to delete the study group
         await DeleteStudyGroupFromDatabaseAsync(groupId);
@@ -285,6 +326,9 @@ public class StudyGroupService
 
     public async Task<bool> ApplyToJoin(string userId, string studyGroupId)
     {
+        // Guard by approval status
+        if (!await IsGroupApprovedAsync(studyGroupId))
+            return false;
         var session = _neo4jDriver.AsyncSession();
         try
         {
@@ -348,6 +392,9 @@ public class StudyGroupService
 
     public async Task<bool> UpdateApplicationStatusAsync(string userId, string studyGroupId, string status)
     {
+        // Only operate on approved groups
+        if (!await IsGroupApprovedAsync(studyGroupId))
+            return false;
         var session = _neo4jDriver.AsyncSession();
         try
         {
@@ -377,6 +424,9 @@ public class StudyGroupService
 
     internal async Task<bool> JoinGroupAsync(string groupId, string userId)
     {
+        // Guard by approval status
+        if (!await IsGroupApprovedAsync(groupId))
+            return false;
         using (var session = _neo4jDriver.AsyncSession())
         {
             var result = await session.ExecuteWriteAsync(async tx =>
@@ -400,12 +450,12 @@ public class StudyGroupService
                     MATCH (s:StudyGroup {id: $groupId})
                     MATCH (u:User {id: $userId})
                     MERGE (u)-[:MEMBER_OF {role: 'member', joinedAt: $joinedAt}]->(s)";
-                    var parameters = new Dictionary<string, object>
-                    {
-                        {"groupId", groupId},
-                        {"userId", userId},
-                        {"joinedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss")}
-                    };
+                var parameters = new Dictionary<string, object>
+                {
+                    {"groupId", groupId},
+                    {"userId", userId},
+                    {"joinedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss")}
+                };
 
                     var cursor = await tx.RunAsync(query, parameters);
                     return await cursor.FetchAsync();
@@ -414,80 +464,63 @@ public class StudyGroupService
                 return false;
             });
 
-            return result;
+            // return result;
         }
+        // SQL role consistency: ensure a Member role record exists
+        if (Guid.TryParse(groupId, out var gid))
+        {
+            var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            if (existing == null)
+            {
+                _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = userId, Role = GroupRole.Member });
+                await _context.SaveChangesAsync();
+            }
+        }
+        return true;
     }
 
     public async Task<bool> LeaveStudyGroup(string userId, string groupId)
     {
+        // SQL authority check
+        if (await IsUserManagerAsync(groupId, userId))
+            throw new InvalidOperationException("Managers cannot leave their own study group. You must dissolve the group.");
+
+        // Remove graph edge first
         using (var session = _neo4jDriver.AsyncSession())
         {
-            return await session.ExecuteWriteAsync(async tx =>
+            await session.ExecuteWriteAsync(async tx =>
             {
-                // Check if the user is a manager
-                var checkManagerQuery = @"
-                MATCH (u:User {id: $userId})-[r:MANAGES]->(sg:StudyGroup {id: $groupId})
-                RETURN COUNT(r) AS isManager";
-
-                var managerCursor = await tx.RunAsync(checkManagerQuery, new { userId, groupId });
-                var managerResult = await managerCursor.SingleAsync();
-                var isManager = managerResult["isManager"].As<int>() > 0;
-
-                if (isManager)
-                {
-                    // User is the manager, they cannot leave the group
-                    throw new InvalidOperationException("Managers cannot leave their own study group. You must dissolve the group.");
-                }
-
-                // If the user is not the manager, allow them to leave the group
-                var leaveGroupQuery = @"
-                MATCH (u:User {id: $userId})-[r:MEMBER_OF]->(sg:StudyGroup {id: $groupId})
-                DELETE r
-                RETURN COUNT(r) AS removedCount";
-
-                var leaveCursor = await tx.RunAsync(leaveGroupQuery, new { userId, groupId });
-                var leaveResult = await leaveCursor.SingleAsync();
-                var removedCount = leaveResult["removedCount"].As<int>();
-
-                return removedCount > 0;
+                var cypher = @"MATCH (u:User {id:$userId})-[r:MEMBER_OF]->(sg:StudyGroup {id:$groupId}) DELETE r";
+                await tx.RunAsync(cypher, new { userId, groupId });
             });
         }
+
+        // Remove SQL role
+        if (Guid.TryParse(groupId, out var gid))
+        {
+            var role = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            if (role != null)
+            {
+                _context.StudyGroupUserRoles.Remove(role);
+                await _context.SaveChangesAsync();
+            }
+        }
+
+        return true;
     }
 
     public async Task<bool> DissolveStudyGroup(string userId, string groupId)
     {
-        using (var session = _neo4jDriver.AsyncSession())
-        {
-            return await session.ExecuteWriteAsync(async tx =>
-            {
-                // Check if the user is the manager of the study group
-                var checkManagerQuery = @"
-                MATCH (u:User {id: $userId})-[r:MANAGES]->(sg:StudyGroup {id: $groupId})
-                RETURN COUNT(r) AS isManager";
+        // SQL authority check
+        if (!await IsUserManagerAsync(groupId, userId))
+            throw new UnauthorizedAccessException("Only the manager can dissolve the study group.");
 
-                var managerCursor = await tx.RunAsync(checkManagerQuery, new { userId, groupId });
-                var managerResult = await managerCursor.SingleAsync();
-                var isManager = managerResult["isManager"].As<int>() > 0;
+        var studyGroup = await GetStudyGroupByIdAsync(groupId);
+        if (studyGroup == null)
+            throw new InvalidOperationException("Study group does not exist.");
 
-                if (!isManager)
-                {
-                    // User is not the manager, so they cannot dissolve the group
-                    throw new UnauthorizedAccessException("Only the manager can dissolve the study group.");
-                }
-
-                // If the user is the manager, dissolve the group
-                // Check if the study group exists
-                var studyGroup = await GetStudyGroupByIdAsync(groupId);
-                if (studyGroup == null)
-                {
-                    throw new InvalidOperationException("Study group does not exist.");
-                }
-
-                await DeleteStudyGroupFromDatabaseAsync(groupId);
-
-                return true;  // Successfully dissolved the group
-            });
-        }
+        await DeleteStudyGroupFromDatabaseAsync(groupId);
+        return true;
     }
 
     internal async Task<List<StudyGroup>> GetStudyGroupByUser(string userId, string currentUserId)
@@ -576,6 +609,9 @@ public class StudyGroupService
 
     public async Task<bool> InviteMemberAsync(string studyGroupId, string memberId)
     {
+        // Only allow invites for approved groups
+        if (!await IsGroupApprovedAsync(studyGroupId))
+            return false;
         using (var session = _neo4jDriver.AsyncSession())
         {
             var result = await session.ExecuteWriteAsync(async tx =>
@@ -594,6 +630,16 @@ public class StudyGroupService
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.FetchAsync();
             });
+
+            if (result && Guid.TryParse(studyGroupId, out var gid))
+            {
+                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                if (existing == null)
+                {
+                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    await _context.SaveChangesAsync();
+                }
+            }
 
             return result;
         }
@@ -619,6 +665,16 @@ public class StudyGroupService
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.FetchAsync();
             });
+            if (result && Guid.TryParse(studyGroupId, out var gid))
+            {
+                // Ensure SQL role record
+                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                if (existing == null)
+                {
+                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    await _context.SaveChangesAsync();
+                }
+            }
 
             return result;
         }
@@ -642,6 +698,15 @@ public class StudyGroupService
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.FetchAsync();
             });
+            if (result && Guid.TryParse(studyGroupId, out var gid))
+            {
+                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                if (existing != null)
+                {
+                    _context.StudyGroupUserRoles.Remove(existing);
+                    await _context.SaveChangesAsync();
+                }
+            }
 
             return result;
         }
@@ -666,9 +731,32 @@ public class StudyGroupService
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.FetchAsync();
             });
+            if (result && Guid.TryParse(studyGroupId, out var gid))
+            {
+                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == newManagerId);
+                if (existing == null)
+                {
+                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = newManagerId, Role = GroupRole.Manager });
+                }
+                else
+                {
+                    existing.Role = GroupRole.Manager;
+                }
+                await _context.SaveChangesAsync();
+            }
 
             return result;
         }
+    }
+
+    private async Task<bool> IsGroupApprovedAsync(string groupId)
+    {
+        if (!Guid.TryParse(groupId, out var gid)) return false;
+        var status = await _context.StudyGroups.AsNoTracking()
+            .Where(g => g.Id == gid)
+            .Select(g => g.Status)
+            .FirstOrDefaultAsync();
+        return string.Equals(status, "approved", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<bool> RenameGroupAsync(string studyGroupId, string newName)
@@ -716,26 +804,9 @@ public class StudyGroupService
 
     public async Task<bool> IsUserManagerAsync(string studyGroupId, string userId)
     {
-        using (var session = _neo4jDriver.AsyncSession())
-        {
-            var result = await session.ExecuteReadAsync(async tx =>
-            {
-                var query = @"
-                    MATCH (u:User {id: $userId})-[r:MEMBER_OF {role: 'manager'}]->(s:StudyGroup {id: $studyGroupId})
-                    RETURN COUNT(r) > 0 AS isManager";
-                var parameters = new Dictionary<string, object>
-                {
-                    {"studyGroupId", studyGroupId},
-                    {"userId", userId}
-                };
-
-                var cursor = await tx.RunAsync(query, parameters);
-                var record = await cursor.SingleAsync();
-                return record["isManager"].As<bool>();
-            });
-
-            return result;
-        }
+        if (!Guid.TryParse(studyGroupId, out var gid)) return false;
+        return await _context.StudyGroupUserRoles.AsNoTracking()
+            .AnyAsync(x => x.GroupId == gid && x.UserId == userId && x.Role == GroupRole.Manager);
     }
 
     public async Task<string> GetUserRoleInGroupAsync(string groupId, string userId)
@@ -766,6 +837,8 @@ public class StudyGroupService
 
     public async Task<IEnumerable<JoinRequest>> GetJoinRequests(string groupId)
     {
+        if (!await IsGroupApprovedAsync(groupId))
+            return Enumerable.Empty<JoinRequest>();
         using (var session = _neo4jDriver.AsyncSession())
         {
             var result = await session.ExecuteReadAsync(async tx =>
@@ -807,6 +880,8 @@ public class StudyGroupService
 
     public async Task<int> GetPendingJoinRequestsCount(string groupId)
     {
+        if (!await IsGroupApprovedAsync(groupId))
+            return 0;
         using (var session = _neo4jDriver.AsyncSession())
         {
             var result = await session.ExecuteReadAsync(async tx =>

@@ -908,11 +908,6 @@ public class StudyPlanService
             var studyPlan = await _sqlRepository.GetStudyPlanByIdAsync(studyPlanId);
             if (studyPlan == null) return null;
 
-            // 拉取Neo4j关系（懒加载：不取资源与学习状态）
-            var lessonInfo = await GetLessonIdsByStudyPlanIdAsync(studyPlanId);
-            var lessonIds = lessonInfo.Select(x => x.LessonId).ToList();
-            var lessons = await GetLessonsByIdsAsync(lessonIds);
-
             var cypherQuery = @"
             MATCH (sp:StudyPlan {id: $studyPlanId})
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
@@ -930,6 +925,14 @@ public class StudyPlanService
 
             var recordList = await result.ToListAsync();
             if (recordList == null || recordList.Count == 0) return null;
+
+            // 从主查询结果中提取 lessonIds，避免额外的 Neo4j 调用
+            var lessonIds = recordList
+                .Select(r => r["lessonId"]?.As<string>())
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToList();
+            var lessons = await GetLessonsByIdsAsync(lessonIds);
 
             var studyPlanDetail = new StudyPlanDetail
             {
@@ -952,8 +955,7 @@ public class StudyPlanService
                 var lessonId = record["lessonId"]?.As<string>();
                 if (string.IsNullOrEmpty(lessonId)) continue;
 
-                var sqlLesson = lessons.FirstOrDefault(l => l.Value.Id.ToString() == lessonId).Value;
-                if (sqlLesson == null) continue;
+                if (!lessons.TryGetValue(lessonId, out var sqlLesson) || sqlLesson == null) continue;
 
                 var lesson = new Lesson
                 {

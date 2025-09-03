@@ -106,6 +106,11 @@ namespace Sciencetopia.Controllers.StudyPlan
                 // Neo4j (graph store) is unavailable — return a clear 503 for clients to retry later
                 return StatusCode(503, new { message = "Graph database is temporarily unavailable. Please try again later." });
             }
+            catch (Neo4j.Driver.ConnectionReadTimeoutException)
+            {
+                // Neo4j read timed out — return 504 so clients can retry
+                return StatusCode(504, new { message = "Graph database request timed out. Please try again." });
+            }
         }
 
 
