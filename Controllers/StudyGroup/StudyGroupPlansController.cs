@@ -7,7 +7,7 @@ using System.Security.Claims;
 namespace Sciencetopia.Controllers.StudyGroups
 {
     [ApiController]
-    [Route("api/StudyGroups/{StudyGroupId}/Plans/{PlanId}")]
+    [Route("api/StudyGroups/{StudyGroupId}/Plans")]
     public class StudyGroupPlansController : ControllerBase
     {
         private readonly PlanSharingService _sharingService;
@@ -17,7 +17,14 @@ namespace Sciencetopia.Controllers.StudyGroups
             _sharingService = sharingService;
         }
 
-        [HttpPost("Share")]
+        [HttpGet]
+        public async Task<IActionResult> GetSharedPlans([FromRoute(Name = "StudyGroupId")] string studyGroupId)
+        {
+            var plans = await _sharingService.GetSharedPlansForStudyGroupAsync(studyGroupId);
+            return Ok(plans);
+        }
+
+        [HttpPost("{PlanId}/Share")]
         public async Task<IActionResult> ShareToStudyGroup([FromRoute(Name = "StudyGroupId")] string studyGroupId, [FromRoute(Name = "PlanId")] string planId, [FromBody] ShareStudyPlanRequest request)
         {
             var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
@@ -27,7 +34,7 @@ namespace Sciencetopia.Controllers.StudyGroups
             return Ok(rec);
         }
 
-        [HttpDelete]
+        [HttpDelete("{PlanId}")]
         public async Task<IActionResult> UnshareFromStudyGroup([FromRoute(Name = "StudyGroupId")] string studyGroupId, [FromRoute(Name = "PlanId")] string planId)
         {
             var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;

@@ -20,6 +20,17 @@ namespace Sciencetopia.Services
             _neo4j = neo4j;
         }
 
+        // Get shared plans for a StudyGroup
+        public async Task<List<StudyGroupStudyPlan>> GetSharedPlansForStudyGroupAsync(string studyGroupId)
+        {
+            var sgId = Guid.Parse(studyGroupId);
+            var planIds = await _db.StudyGroupStudyPlans
+                .AsNoTracking()
+                .Where(x => x.StudyGroupId == sgId)
+                .ToListAsync();
+            return planIds;
+        }
+
         // Share to StudyGroup (upsert)
         public async Task<StudyGroupStudyPlan> ShareToStudyGroupAsync(string studyGroupId, string studyPlanId, string permission, bool autoEnroll, bool useDraftFlow, string? createdBy)
         {

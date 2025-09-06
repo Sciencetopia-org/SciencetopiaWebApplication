@@ -23,6 +23,29 @@ namespace Sciencetopia.Controllers.SearchEngine
             _studyGroupService = studyGroupService;
         }
 
+        [HttpGet]
+        public async Task<IActionResult> SearchAsync(string query, int page = 1, int pageSize = 10)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return BadRequest("Query parameter is required.");
+
+            var skip = (page - 1) * pageSize;
+
+            // Run sequentially to avoid concurrent DbContext usage across scoped repositories
+            var knowledgeBase = await _knowledgeRepo.SearchKnowledgeNodesAsync(query, skip, pageSize);
+            var resources = await _searchService.SearchResourcesWithLinkedNodesAsync(query, skip, pageSize);
+            var studyGroups = await _studyGroupService.SearchStudyGroups(query, skip, pageSize);
+
+            var result = new
+            {
+                KnowledgeBase = knowledgeBase,
+                Resources = resources,
+                StudyGroups = studyGroups,
+                // StudyPlans = studyPlans
+            };
+            return Ok(result);
+        }
+
         [HttpGet("SearchKnowledgeBase")]
         public async Task<IActionResult> SearchKnowledgeBaseAsync(string query, int page = 1, int pageSize = 10)
         {

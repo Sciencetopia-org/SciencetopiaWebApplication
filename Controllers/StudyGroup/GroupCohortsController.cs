@@ -32,6 +32,37 @@ public class GroupCohortsController : ControllerBase
         public CohortEnrollMode? EnrollMode { get; set; }
     }
 
+    [HttpGet("CohortPlans")] // B5-4 list group-scoped
+    public async Task<IActionResult> List(Guid groupId)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        var cohorts = await _db.Cohorts.AsNoTracking().Where(c => c.StudyGroupId == groupId).ToListAsync();
+
+        // Get plan info
+        var planIds = cohorts.Select(c => c.StudyPlanId).Distinct().ToList();
+        var plans = await _db.StudyPlans.AsNoTracking().Where(p => planIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.Title, p.CurrentVersionId })
+            .ToDictionaryAsync(p => p.Id, p => new { p.Title, p.CurrentVersionId });
+
+        // return plan info only
+        var result = cohorts.Select(c => new
+        {
+            c.Id,
+            c.StudyPlanId,
+            PlanTitle = plans.ContainsKey(c.StudyPlanId) ? plans[c.StudyPlanId].Title : null,
+            PlanCurrentVersionId = plans.ContainsKey(c.StudyPlanId) ? plans[c.StudyPlanId].CurrentVersionId : null,
+            c.Title,
+            c.Visibility,
+            c.EnrollMode,
+            c.PinnedVersionId,
+            c.MembersCount,
+            c.CreatedAt,
+            c.CreatedBy
+        });
+        return Ok(result);
+    }
+
     [HttpPost("Plans/{planId:guid}/Cohorts")] // B5-4 create group-scoped
     [Authorize(Policy = "Plan.Edit")]
     public async Task<IActionResult> Create(Guid groupId, Guid planId, [FromBody] CreateGroupCohortRequest body)

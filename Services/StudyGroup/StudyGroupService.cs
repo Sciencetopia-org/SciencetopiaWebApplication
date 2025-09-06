@@ -809,6 +809,13 @@ using Sciencetopia.Models.Enums;
             .AnyAsync(x => x.GroupId == gid && x.UserId == userId && x.Role == GroupRole.Manager);
     }
 
+    public async Task<bool> IsUserMemberAsync(string studyGroupId, string userId)
+    {
+        if (!Guid.TryParse(studyGroupId, out var gid)) return false;
+        return await _context.StudyGroupUserRoles.AsNoTracking()
+            .AnyAsync(x => x.GroupId == gid && x.UserId == userId);
+    }
+
     public async Task<string> GetUserRoleInGroupAsync(string groupId, string userId)
     {
         using (var session = _neo4jDriver.AsyncSession())
