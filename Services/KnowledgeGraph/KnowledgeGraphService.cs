@@ -90,7 +90,6 @@ public class KnowledgeGraphService
         var nodeTagTriples = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevels);
         // var elapsed1 = DateTime.UtcNow - startTime;
         // Console.WriteLine($"GetAllNodesRelatedToTagsInViewAsync took {elapsed1.TotalSeconds} seconds.");
-
         var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
         var allTagIds = nodeTagTriples.Select(p => p.TagId).Distinct().ToList();
 
@@ -101,7 +100,7 @@ public class KnowledgeGraphService
 
         // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
         // Console.WriteLine($"Node to level mapping took {elapsed2.TotalSeconds} seconds.");
-        
+
         var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel);
         // var endTime = DateTime.UtcNow;
         // var elapsed3 = endTime - startTime - elapsed1 - elapsed2;
@@ -383,18 +382,19 @@ public class KnowledgeGraphService
             .ToDictionary(g => g.Key!, g => g.First().Id);
 
         var hierarchyRelations = new List<HierarchyRelationDTO>();
+        // 在构建 tagNameToNodeId 之后增加调试输出
         foreach (var relation in tagContainRelations)
         {
             if (tagIdToName.TryGetValue(relation.ParentTagId, out var parentName) &&
-                tagIdToName.TryGetValue(relation.ChildTagId, out var childName) &&
-                tagNameToNodeId.TryGetValue(parentName, out var parentNodeId) &&
-                tagNameToNodeId.TryGetValue(childName, out var childNodeId))
+            tagIdToName.TryGetValue(relation.ChildTagId, out var childName) &&
+            tagNameToNodeId.TryGetValue(parentName, out var parentNodeId) &&
+            tagNameToNodeId.TryGetValue(childName, out var childNodeId))
             {
-                hierarchyRelations.Add(new HierarchyRelationDTO
-                {
-                    ParentId = parentNodeId,
-                    ChildId = childNodeId
-                });
+            hierarchyRelations.Add(new HierarchyRelationDTO
+            {
+                ParentId = parentNodeId,
+                ChildId = childNodeId
+            });
             }
         }
 
@@ -658,7 +658,7 @@ public class KnowledgeGraphService
     {
         return await _tagRepo.SearchTagsAsync(query);
     }
-    
+
     public async Task<string> CreateNodeAsync(CreateNodeRequest request, string userId)
     {
         return await CreateNodeWithResourcesAsync(request, userId);

@@ -64,8 +64,8 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                 : string.Empty;
 
-            // Define the valid zoom levels
-            var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject" };
+            // Define the valid zoom levels (lowest -> highest)
+            var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject", "Discipline" };
             // Validate the zoom level
             if (!validZoomLevels.Contains(zoomLevel))
             {

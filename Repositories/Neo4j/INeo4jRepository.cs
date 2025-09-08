@@ -135,6 +135,7 @@ public class GraphRepository : IGraphRepository
             { "tagIds", allTagIds.Select(id => id.ToString()) }
         };
         var result = await session.RunAsync(cypher, parameters);
+
         return (await result.ToListAsync())
             .Select(record => new TagContainRelationDTO
             {
