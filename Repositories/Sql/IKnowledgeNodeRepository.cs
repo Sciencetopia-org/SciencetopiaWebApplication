@@ -1,16 +1,14 @@
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 public interface IKnowledgeNodeRepository
 {
     Task<IEnumerable<Guid>> GetAllNodeIdsAsync();
-    Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id);
-    Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids);
-    Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids);
+    Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id, string language = "zh");
+    Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids, string language = "zh");
+    Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids, string language = "zh");
     Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take);
-    // Dictionary<string, object> CreateNode(string id, string name, string description);
-    // bool UpdateNode(string id, string name, string description);
-    // bool DeleteNode(string id);
 }
 
 public class KnowledgeNodeRepository : IKnowledgeNodeRepository
@@ -22,7 +20,6 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
         _context = context;
     }
 
-    // 获取所有节点Id，转换为字符串
     public async Task<IEnumerable<Guid>> GetAllNodeIdsAsync()
     {
         return await _context.KnowledgeNodes
@@ -31,37 +28,40 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
                              .ToListAsync();
     }
 
-    public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id)
+    public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id, string language = "zh")
     {
-        var node = await _context.KnowledgeNodes
-            .Where(n => n.Id == id)
-            .Select(n => new
-            {
-                n.Name,
-                n.Description,
-                CreatedDate = n.CreatedDate,
-                UpdatedDate = n.UpdatedDate
-            })
-            .FirstOrDefaultAsync();
+        var node = await _context.KnowledgeNodes.FirstOrDefaultAsync(n => n.Id == id);
+        if (node == null) return null;
 
-        if (node == null)
+        // L10n-aware override if enabled
+        var opts = _context.GetService<Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions>>();
+        if (opts.Value.Enabled)
         {
-            return null;
+            var l10n = _context.GetService<Sciencetopia.Services.L10n.IL10nService>();
+            var title = await l10n.GetLocalizedAsync(id, "title", language);
+            var desc = await l10n.GetLocalizedAsync(id, "description", language);
+            return (
+                (title ?? node.Name) ?? string.Empty,
+                (desc ?? node.Description) ?? string.Empty,
+                node.CreatedDate ?? default,
+                node.UpdatedDate ?? default
+            );
         }
 
-        return (node.Name ?? string.Empty, node.Description ?? string.Empty,
-                node.CreatedDate.HasValue ? node.CreatedDate.Value : default,
-                node.UpdatedDate.HasValue ? node.UpdatedDate.Value : default
-                );
+        return (
+            node.Name ?? string.Empty,
+            node.Description ?? string.Empty,
+            node.CreatedDate ?? default,
+            node.UpdatedDate ?? default
+        );
     }
 
-    // 获取节点详情，投影时将 Guid 转为字符串
-    public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids)
+    public async Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids, string language = "zh")
     {
         var dict = new Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
         foreach (var id in ids)
         {
-            var details = await GetNodeDetailsByIdAsync(id);
+            var details = await GetNodeDetailsByIdAsync(id, language);
             if (details.HasValue)
             {
                 dict[id] = details.Value;
@@ -70,31 +70,27 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
         return dict;
     }
 
-    // 获取节点名称，投影时将 Guid 转为字符串
-    public async Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids)
+    public async Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids, string language = "zh")
     {
-        const int batchSize = 20;
-        var idList = ids.ToList();
-        var dict = new Dictionary<Guid, string>();
-
-        for (int i = 0; i < idList.Count; i += batchSize)
+        var opts = _context.GetService<Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions>>();
+        var l10n = _context.GetService<Sciencetopia.Services.L10n.IL10nService>();
+        if (opts.Value.Enabled)
         {
-            // 改为 HashSet 可防止 EF 使用 OPENJSON 优化路径
-            var batchSet = idList.Skip(i).Take(batchSize).ToHashSet();
-
-            var nodes = await _context.KnowledgeNodes
-                .Where(n => n.Id.HasValue && batchSet.Contains(n.Id.Value))
-                .Select(n => new { n.Id, n.Name })
-                .ToListAsync();
-
-            foreach (var node in nodes)
+            var dict = new Dictionary<Guid, string>();
+            foreach (var id in ids.Distinct())
             {
-                if (node.Id.HasValue)
-                    dict[node.Id.Value] = node.Name ?? string.Empty;
+                var title = await l10n.GetLocalizedAsync(id, "title", language);
+                dict[id] = string.IsNullOrWhiteSpace(title) ? id.ToString() : title!;
             }
+            return dict;
         }
-
-        return dict;
+        // fallback to base field only
+        var idSet = ids.ToHashSet();
+        var rows = await _context.KnowledgeNodes
+                          .Where(n => n.Id.HasValue && idSet.Contains(n.Id.Value))
+                          .Select(n => new { Id = n.Id!.Value, Name = n.Name })
+                          .ToListAsync();
+        return rows.GroupBy(r => r.Id).ToDictionary(g => g.Key, g => g.First().Name ?? string.Empty);
     }
 
     public async Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take)
@@ -107,49 +103,4 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
             .Take(take)
             .ToListAsync();
     }
-
-    // 创建知识节点：将传入的 id 转换为 Guid
-    // public Dictionary<string, object> CreateNode(string id, string name, string description)
-    // {
-    //     var node = new KnowledgeNode
-    //     {
-    //         Id = Guid.Parse(id),
-    //         Name = name,
-    //         Description = description,
-    //         CreatedDate = DateTime.Now,
-    //         UpdatedDate = DateTime.Now
-    //     };
-    //     _context.KnowledgeNodes.Add(node);
-    //     _context.SaveChanges();
-    //     return new Dictionary<string, object>
-    //     {
-    //         { "Id", node.Id.ToString() },
-    //         { "Name", node.Name },
-    //         { "Description", node.Description },
-    //         { "CreatedDate", node.CreatedDate },
-    //         { "UpdatedDate", node.UpdatedDate }
-    //     };
-    // }
-
-    // // 更新知识节点：使用 Guid.Parse 查找
-    // public bool UpdateNode(string id, string name, string description)
-    // {
-    //     var node = _context.KnowledgeNodes.Find(Guid.Parse(id));
-    //     if (node == null) return false;
-    //     node.Name = name;
-    //     node.Description = description;
-    //     node.UpdatedDate = DateTime.Now;
-    //     _context.SaveChanges();
-    //     return true;
-    // }
-
-    // // 删除知识节点：使用 Guid.Parse 查找
-    // public bool DeleteNode(string id)
-    // {
-    //     var node = _context.KnowledgeNodes.Find(Guid.Parse(id));
-    //     if (node == null) return false;
-    //     _context.KnowledgeNodes.Remove(node);
-    //     _context.SaveChanges();
-    //     return true;
-    // }
 }

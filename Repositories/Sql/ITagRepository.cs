@@ -11,7 +11,7 @@ public interface ITagRepository
     Task<List<TagDTO>> SearchTagsAsync(string query);
     Task<List<string>> SearchTagNamesAsync(string query);
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
-    Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids);
+    Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids, string language = "zh");
     Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds);
     Task<Guid> CreateIfNotExistsAsync(string tagName);
     Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy);
@@ -21,10 +21,16 @@ public interface ITagRepository
 public class TagRepository : ITagRepository
 {
     private readonly ApplicationDbContext _context;
+    private readonly Sciencetopia.Services.L10n.IL10nService _l10n;
+    private readonly Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> _l10nOptions;
 
-    public TagRepository(ApplicationDbContext context)
+    public TagRepository(ApplicationDbContext context,
+                         Sciencetopia.Services.L10n.IL10nService l10n,
+                         Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> l10nOptions)
     {
         _context = context;
+        _l10n = l10n;
+        _l10nOptions = l10nOptions;
     }
 
     public async Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType)
@@ -37,13 +43,11 @@ public class TagRepository : ITagRepository
                  .ToListAsync();
     }
 
-    // 获取所有Tag信息，转换Tag.Id为字符串
     public async Task<List<Tags>> GetAllTagsAsync()
     {
         return await _context.Tags
                              .Select(tag => new Tags
                              {
-                                 // 将 Guid 转换为字符串
                                  Id = tag.Id,
                                  Name = tag.Name,
                                  Description = tag.Description,
@@ -57,10 +61,9 @@ public class TagRepository : ITagRepository
     {
         if (inputTagNames == null || !inputTagNames.Any())
         {
-            return new List<TagDTO>(); // 输入为空，返回空列表
+            return new List<TagDTO>();
         }
 
-        // 使用 EF Core 查询匹配的标签
         var tags = await _context.Tags
             .Where(t => inputTagNames.Contains(t.Name))
             .Select(t => new TagDTO
@@ -113,7 +116,6 @@ public class TagRepository : ITagRepository
 
     public async Task<List<string>> GetAllTagSystemsAsync()
     {
-        // 获取所有标签系统的名称
         return await _context.TypesOfTags
             .Where(t => t.Type != null)
             .Select(t => t.Type!)
@@ -130,7 +132,6 @@ public class TagRepository : ITagRepository
                                 Id = tag.Id.Value,
                                 tag.Name,
                                 tag.Description,
-                                // 将 DateTime 转换为 DateTimeOffset（假设这里的 DateTime 为本地时间，可以根据实际情况调整）
                                 CreatedDate = tag.CreatedDate,
                                 UpdatedDate = tag.UpdatedDate
                             })
@@ -144,32 +145,27 @@ public class TagRepository : ITagRepository
         return dict;
     }
 
-    public async Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids)
+    public async Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids, string language = "zh")
     {
-        const int batchSize = 20;
-        var idList = ids.ToList();
-        var dict = new Dictionary<Guid, string>();
-
-        for (int i = 0; i < idList.Count; i += batchSize)
+        if (_l10nOptions.Value.Enabled)
         {
-            var batch = idList.Skip(i).Take(batchSize).ToList();
-
-            var tagNames = await _context.Tags
-                .Where(tag => tag.Id.HasValue && batch.Contains(tag.Id.Value))
-                .Select(tag => new { tag.Id, tag.Name })
-                .ToListAsync(); // 保持 IQueryable 流程
-
-            foreach (var tag in tagNames)
+            var dict = new Dictionary<Guid, string>();
+            foreach (var id in ids.Distinct())
             {
-                if (tag.Id.HasValue)
-                    dict[tag.Id.Value] = tag.Name ?? string.Empty;
+                var title = await _l10n.GetLocalizedForTagAsync(id, "title", language);
+                dict[id] = string.IsNullOrWhiteSpace(title) ? id.ToString() : title!;
             }
+            return dict;
         }
-
-        return dict;
+        // fallback to base field only
+        var idSet = ids.ToHashSet();
+        var rows = await _context.Tags
+                         .Where(t => t.Id.HasValue && idSet.Contains(t.Id.Value))
+                         .Select(t => new { Id = t.Id!.Value, Name = t.Name })
+                         .ToListAsync();
+        return rows.GroupBy(r => r.Id).ToDictionary(g => g.Key, g => g.First().Name ?? string.Empty);
     }
 
-    // 获取标签的代表节点；注意：此处 tagIds 为字符串，需要将 tag.Id 转换为字符串进行比较
     public Dictionary<string, (string Name, string Description, DateTime CreatedDate, DateTime UpdatedDate)> GetRepresentativeNodes(IEnumerable<string> tagIds)
     {
         var tagNameDict = _context.Tags
@@ -202,7 +198,6 @@ public class TagRepository : ITagRepository
             CreatedDate = DateTimeOffset.UtcNow,
             UpdatedDate = DateTimeOffset.UtcNow
         };
-        // Id 是 Guid 类型，EF Core 会自动生成
         _context.Tags.Add(newTag);
         await _context.SaveChangesAsync();
         return newTag.Id ?? throw new InvalidOperationException("The new tag ID is null.");
@@ -210,7 +205,6 @@ public class TagRepository : ITagRepository
 
     public async Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy)
     {
-        // 是否存在同名、未审的草稿（可避免重复提交）
         var existingDraft = await _context.TagDrafts
             .FirstOrDefaultAsync(td =>
                 td.Name == name &&
@@ -219,10 +213,10 @@ public class TagRepository : ITagRepository
 
         if (existingDraft != null)
         {
-            return existingDraft.TagId != Guid.Empty ? existingDraft.TagId : Guid.Empty; // 返回已存在的草稿 ID
+            return existingDraft.TagId != Guid.Empty ? existingDraft.TagId : Guid.Empty;
         }
 
-        var tagId = Guid.NewGuid(); // 生成新的 TagId
+        var tagId = Guid.NewGuid();
 
         var draft = new TagDraft
         {

@@ -44,13 +44,14 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         [HttpGet("GetNodes")]
         public async Task<IActionResult> GetKnowledgeGraph(
             [FromQuery] string tagSystem = "MainTag",
-            [FromQuery] string viewType = "network")
+            [FromQuery] string viewType = "network",
+            [FromQuery] string lang = "zh")
         {
             string userId = User?.Identity?.IsAuthenticated == true
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                 : string.Empty;
 
-            var result = await _knowledgeGraphService.GetKnowledgeGraphAsync(tagSystem, viewType, userId);
+            var result = await _knowledgeGraphService.GetKnowledgeGraphAsync(tagSystem, viewType, userId, lang);
             return Ok(result);
         }
 
@@ -58,7 +59,8 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         public async Task<IActionResult> GetNodeInView(
             [FromQuery] string tagSystem = "MainTag",
             [FromQuery] string viewType = "network",
-            string zoomLevel = "Field")
+            string zoomLevel = "Field",
+            [FromQuery] string lang = "zh")
         {
             string userId = User?.Identity?.IsAuthenticated == true
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
@@ -75,7 +77,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             // Find the zoom levels greater than or equal to the requested zoom level
             var zoomLevels = validZoomLevels.SkipWhile(z => z != zoomLevel).ToList();
 
-            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId);
+            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId, lang);
             return Ok(result);
         }
 
@@ -101,7 +103,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpGet("GetNodeDetails")]
-        public async Task<IActionResult> GetNodeDetails(string nodeId)
+        public async Task<IActionResult> GetNodeDetails(string nodeId, [FromQuery] string lang = "zh")
         {
             if (string.IsNullOrWhiteSpace(nodeId))
             {
@@ -115,7 +117,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 {
                     return BadRequest("Invalid Node ID format.");
                 }
-                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(parsedNodeId);
+                var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(parsedNodeId, lang);
                 if (data != null)
                 {
                     return Ok(data);
@@ -130,7 +132,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpGet("FilterByTags")]
-        public async Task<IActionResult> FilterByTags([FromQuery] List<string> tags, string? tagSystem)
+        public async Task<IActionResult> FilterByTags([FromQuery] List<string> tags, string? tagSystem, [FromQuery] string lang = "zh")
         {
             if (tags == null || tags.Count == 0)
             {
@@ -142,7 +144,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 var tagIds = await _knowledgeGraphService.GetTagIdsByTagNamesAsync(tags);
                 var nodeIds = await _knowledgeGraphService.GetNodeIdsByTagsAsync(tagIds);
                 var relatedTagIds = tagSystem != null ? await _knowledgeGraphService.GetTagIdsByTagTypeAmongNodesAsync(nodeIds, tagSystem) : await _knowledgeGraphService.GetTagIdsByTagTypeAmongNodesAsync(nodeIds, "MainTag");
-                var data = await _knowledgeGraphService.GetKnowledgeGraphDataByNodeId(nodeIds, relatedTagIds);
+                var data = await _knowledgeGraphService.GetKnowledgeGraphDataByNodeId(nodeIds, relatedTagIds, null, lang);
                 return Ok(data);
             }
             catch (Exception ex)

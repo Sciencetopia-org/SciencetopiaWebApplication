@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Sciencetopia.Data;
 
@@ -11,9 +12,11 @@ using Sciencetopia.Data;
 namespace SciencetopiaWebApplication.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250909083039_AddNodeAndTagTranslations")]
+    partial class AddNodeAndTagTranslations
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -88,9 +91,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<DateTimeOffset?>("CreatedDate")
                         .HasColumnType("datetimeoffset");
 
-                    b.Property<Guid?>("DefaultL10nSetId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.Property<string>("Description")
                         .HasColumnType("nvarchar(max)");
 
@@ -101,11 +101,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("DefaultL10nSetId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_KN_DefaultL10nSet")
-                        .HasFilter("[DefaultL10nSetId] IS NOT NULL");
 
                     b.ToTable("KnowledgeNodes", (string)null);
                 });
@@ -148,6 +143,39 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("NodeId");
 
                     b.ToTable("KnowledgeNodeDrafts");
+                });
+
+            modelBuilder.Entity("KnowledgeNodeTranslation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("CreatedDate")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Language")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("UpdatedDate")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NodeId", "Language")
+                        .IsUnique();
+
+                    b.ToTable("KnowledgeNodeTranslations", (string)null);
                 });
 
             modelBuilder.Entity("KnowledgeNodeVersion", b =>
@@ -539,185 +567,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("Favorites");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.L10nItem", b =>
-                {
-                    b.Property<Guid>("L10nItemId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("Content")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.Property<string>("FieldKey")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(32)
-                        .HasColumnType("nvarchar(32)")
-                        .HasDefaultValue("title");
-
-                    b.Property<byte>("Kind")
-                        .HasColumnType("tinyint");
-
-                    b.Property<string>("LangCode")
-                        .HasMaxLength(10)
-                        .HasColumnType("nvarchar(10)");
-
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("rowversion");
-
-                    b.Property<string>("ScriptCode")
-                        .HasMaxLength(10)
-                        .HasColumnType("nvarchar(10)");
-
-                    b.Property<int>("SortOrder")
-                        .HasColumnType("int");
-
-                    b.Property<string>("Text")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("L10nItemId");
-
-                    b.HasIndex("Text")
-                        .HasDatabaseName("IX_L10nItems_Text");
-
-                    b.HasIndex("FieldKey", "LangCode")
-                        .HasDatabaseName("IX_L10nItems_Field_Lang");
-
-                    b.ToTable("L10nItems", (string)null);
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.L10nSet", b =>
-                {
-                    b.Property<Guid>("L10nSetId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.Property<bool>("IsManaged")
-                        .HasColumnType("bit");
-
-                    b.Property<string>("PolicyJson")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<byte[]>("RowVersion")
-                        .IsConcurrencyToken()
-                        .ValueGeneratedOnAddOrUpdate()
-                        .HasColumnType("rowversion");
-
-                    b.Property<string>("Scope")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("L10nSetId");
-
-                    b.HasIndex("Scope")
-                        .HasDatabaseName("IX_L10nSets_Scope");
-
-                    b.ToTable("L10nSets", (string)null);
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.L10nSetItem", b =>
-                {
-                    b.Property<Guid>("L10nSetId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("L10nItemId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("L10nSetId", "L10nItemId");
-
-                    b.HasIndex("L10nItemId")
-                        .HasDatabaseName("IX_L10nSetItems_Item");
-
-                    b.ToTable("L10nSetItems", (string)null);
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.NodeL10nSet", b =>
-                {
-                    b.Property<Guid>("NodeId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("L10nSetId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<byte>("Relation")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint")
-                        .HasDefaultValue((byte)0);
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("NodeId", "L10nSetId", "Relation");
-
-                    b.HasIndex("L10nSetId")
-                        .HasDatabaseName("IX_NodeL10nSets_Set");
-
-                    b.HasIndex("NodeId")
-                        .HasDatabaseName("IX_NodeL10nSets_Node");
-
-                    b.ToTable("NodeL10nSets", (string)null);
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.TagL10nSet", b =>
-                {
-                    b.Property<Guid>("TagId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("L10nSetId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<byte>("Relation")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("tinyint")
-                        .HasDefaultValue((byte)0);
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetimeoffset")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("TagId", "L10nSetId", "Relation");
-
-                    b.HasIndex("L10nSetId")
-                        .HasDatabaseName("IX_TagL10nSets_Set");
-
-                    b.HasIndex("TagId")
-                        .HasDatabaseName("IX_TagL10nSets_Tag");
-
-                    b.ToTable("TagL10nSets", (string)null);
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.LessonDraft", b =>
@@ -1205,6 +1054,39 @@ namespace SciencetopiaWebApplication.Migrations
                     b.ToTable("TagDrafts");
                 });
 
+            modelBuilder.Entity("TagTranslation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("CreatedDate")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Language")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TagId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("UpdatedDate")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TagId", "Language")
+                        .IsUnique();
+
+                    b.ToTable("TagTranslations", (string)null);
+                });
+
             modelBuilder.Entity("TagTypes", b =>
                 {
                     b.Property<Guid>("TagId")
@@ -1260,9 +1142,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<DateTimeOffset?>("CreatedDate")
                         .HasColumnType("datetimeoffset");
 
-                    b.Property<Guid?>("DefaultL10nSetId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.Property<string>("Description")
                         .HasColumnType("nvarchar(max)");
 
@@ -1273,11 +1152,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("DefaultL10nSetId")
-                        .IsUnique()
-                        .HasDatabaseName("UX_Tag_DefaultL10nSet")
-                        .HasFilter("[DefaultL10nSetId] IS NOT NULL");
 
                     b.ToTable("Tags", (string)null);
                 });
@@ -1329,13 +1203,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("VisitLogs");
-                });
-
-            modelBuilder.Entity("KnowledgeNode", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
-                        .WithMany()
-                        .HasForeignKey("DefaultL10nSetId");
                 });
 
             modelBuilder.Entity("KnowledgeNodeDraft", b =>
@@ -1439,51 +1306,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired();
 
                     b.Navigation("User");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.L10nSetItem", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.L10n.L10nItem", null)
-                        .WithMany()
-                        .HasForeignKey("L10nItemId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
-                        .WithMany()
-                        .HasForeignKey("L10nSetId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.NodeL10nSet", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
-                        .WithMany()
-                        .HasForeignKey("L10nSetId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("KnowledgeNode", null)
-                        .WithMany()
-                        .HasForeignKey("NodeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.L10n.TagL10nSet", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
-                        .WithMany()
-                        .HasForeignKey("L10nSetId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Tags", null)
-                        .WithMany()
-                        .HasForeignKey("TagId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.LessonDraft", b =>
@@ -1598,13 +1420,6 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasForeignKey("TagId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("Tags", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
-                        .WithMany()
-                        .HasForeignKey("DefaultL10nSetId");
                 });
 
             modelBuilder.Entity("VisitLog", b =>

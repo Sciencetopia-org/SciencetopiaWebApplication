@@ -14,6 +14,8 @@ public class KnowledgeGraphService
     private readonly ITagRepository _tagRepo;
     private readonly INodeApprovalRepository _nodeApprovalRepo;
     private readonly IResourceRepository _resourceRepo;
+    private readonly Sciencetopia.Services.L10n.IL10nService _l10n;
+    private readonly Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> _l10nOptions;
 
     public KnowledgeGraphService(
         IDriver driver,
@@ -22,7 +24,9 @@ public class KnowledgeGraphService
         IKnowledgeNodeRepository knowledgeRepo,
         ITagRepository tagRepo,
         INodeApprovalRepository nodeApprovalRepo,
-        IResourceRepository resourceRepo)
+        IResourceRepository resourceRepo,
+        Sciencetopia.Services.L10n.IL10nService l10n,
+        Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> l10nOptions)
     {
         _driver = driver;
         _context = context;
@@ -31,21 +35,45 @@ public class KnowledgeGraphService
         _tagRepo = tagRepo;
         _nodeApprovalRepo = nodeApprovalRepo;
         _resourceRepo = resourceRepo;
+        _l10n = l10n;
+        _l10nOptions = l10nOptions;
     }
 
 
-    public async Task<object> GetKnowledgeGraphAsync(string tagSystem, string viewType, string userId)
+    public async Task<object> GetKnowledgeGraphAsync(string tagSystem, string viewType, string userId, string language = "zh")
     {
         var allTagIds = await GetTagIdsByTagTypeAsync(tagSystem);
 
         return viewType.ToLower() switch
         {
-            "venn" => await GetVennGraphDataAsync(allTagIds),
-            _ => await GetNetworkGraphDataAsync(allTagIds, userId)
+            "venn" => await GetVennGraphDataAsync(allTagIds, language),
+            _ => await GetNetworkGraphDataAsync(allTagIds, userId, language)
         };
     }
 
-    public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, IEnumerable<string> zoomLevels, string userId)
+    public async Task<object?> GetNodeDetailsByIdAsync(Guid nodeId, string language = "zh")
+    {
+        var details = await _knowledgeRepo.GetNodeDetailsByIdAsync(nodeId, language);
+        if (!details.HasValue) return null;
+        var d = details.Value;
+        if (_l10nOptions.Value.Enabled)
+        {
+            var title = await _l10n.GetLocalizedAsync(nodeId, "title", language);
+            var desc = await _l10n.GetLocalizedAsync(nodeId, "description", language);
+            if (!string.IsNullOrWhiteSpace(title)) d = (title!, d.Description, d.CreatedDate, d.UpdatedDate);
+            if (!string.IsNullOrWhiteSpace(desc)) d = (d.Name, desc!, d.CreatedDate, d.UpdatedDate);
+        }
+        return new
+        {
+            id = nodeId,
+            name = d.Name,
+            description = d.Description,
+            createdDate = d.CreatedDate,
+            updatedDate = d.UpdatedDate
+        };
+    }
+
+    public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, IEnumerable<string> zoomLevels, string userId, string language = "zh")
     {
         // var startTime = DateTime.UtcNow;
         var allTagIds = await _tagRepo.GetTagNodeIdsByTagTypeAsync(tagSystem);
@@ -57,12 +85,12 @@ public class KnowledgeGraphService
 
         return viewType.ToLower() switch
         {
-            "venn" => await GetVennGraphDataInViewAsync(allTagIds, zoomLevels),
-            _ => await GetNetworkGraphDataInViewAsync(allTagIds, userId, zoomLevels)
+            "venn" => await GetVennGraphDataInViewAsync(allTagIds, zoomLevels, language),
+            _ => await GetNetworkGraphDataInViewAsync(allTagIds, userId, zoomLevels, language)
         };
     }
 
-    private async Task<object> GetNetworkGraphDataAsync(IEnumerable<Guid> tagIds, string userId)
+    private async Task<object> GetNetworkGraphDataAsync(IEnumerable<Guid> tagIds, string userId, string language)
     {
         var nodeTagTriples = await _graphRepository.GetNodeTagTriplesRelatedToTagsAsync(tagIds);
 
@@ -73,7 +101,7 @@ public class KnowledgeGraphService
             .GroupBy(p => p.NodeId)
             .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds, nodeToLevel);
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds, nodeToLevel, language);
 
         if (!string.IsNullOrEmpty(userId))
         {
@@ -84,7 +112,7 @@ public class KnowledgeGraphService
         return new { data };
     }
 
-    private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<Guid> tagIds, string userId, IEnumerable<string> zoomLevels)
+    private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<Guid> tagIds, string userId, IEnumerable<string> zoomLevels, string language)
     {
         // var startTime = DateTime.UtcNow;
         var nodeTagTriples = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevels);
@@ -101,7 +129,7 @@ public class KnowledgeGraphService
         // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
         // Console.WriteLine($"Node to level mapping took {elapsed2.TotalSeconds} seconds.");
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel);
+        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel, language);
         // var endTime = DateTime.UtcNow;
         // var elapsed3 = endTime - startTime - elapsed1 - elapsed2;
         // Console.WriteLine($"GetKnowledgeGraphDataByNodeId took {elapsed3.TotalSeconds} seconds.");
@@ -115,7 +143,7 @@ public class KnowledgeGraphService
         return new { data };
     }
 
-    private async Task<object> GetVennGraphDataAsync(IEnumerable<Guid> tagIds)
+    private async Task<object> GetVennGraphDataAsync(IEnumerable<Guid> tagIds, string language)
     {
         // 获取所有标签→节点映射（不传递）
         var allVennGroups = await _graphRepository.GetVennTagNodeGroupsAsync();
@@ -147,11 +175,13 @@ public class KnowledgeGraphService
             .ToList();
 
         // 获取标签名称（从 SQL）
-        var tagMetaDict = await _tagRepo.GetTagNamesAsync(involvedTagIds);
+        var tagMetaDict = await _tagRepo.GetTagNamesAsync(involvedTagIds, language);
         // var tagMetaDict = await _tagRepo.GetTagDetailsAsync(involvedTagIds);
 
         // 获取节点名称（从 SQL）
-        var nodeMetaDict = await _knowledgeRepo.GetNodesNamesAsync(involvedNodeIds);
+        var nodeMetaDict = _l10nOptions.Value.Enabled
+            ? await GetNodeTitlesAsync(involvedNodeIds, language)
+            : await _knowledgeRepo.GetNodesNamesAsync(involvedNodeIds, language);
         // var nodeMetaDict = await _knowledgeRepo.GetNodesDetailsAsync(involvedNodeIds);
 
         // 构造 Venn 集合部分（sets）
@@ -188,7 +218,7 @@ public class KnowledgeGraphService
         return new { venn = new { sets, contain_relations = relations } };
     }
 
-    private async Task<object> GetVennGraphDataInViewAsync(IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels)
+    private async Task<object> GetVennGraphDataInViewAsync(IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels, string language)
     {
         // 记录请求的标签集合，便于后续查找
         var tagGuidSet = tagIds.ToHashSet();
@@ -227,11 +257,13 @@ public class KnowledgeGraphService
             .ToList();
 
         // 获取标签名称（从 SQL）
-        var tagMetaDict = await _tagRepo.GetTagNamesAsync(involvedTagIds);
+        var tagMetaDict = await _tagRepo.GetTagNamesAsync(involvedTagIds, language);
         // var tagMetaDict = await _tagRepo.GetTagDetailsAsync(involvedTagIds);
 
         // 获取节点名称（从 SQL）
-        var nodeMetaDict = await _knowledgeRepo.GetNodesNamesAsync(involvedNodeIds);
+        var nodeMetaDict = _l10nOptions.Value.Enabled
+            ? await GetNodeTitlesAsync(involvedNodeIds, language)
+            : await _knowledgeRepo.GetNodesNamesAsync(involvedNodeIds);
         // var nodeMetaDict = await _knowledgeRepo.GetNodesDetailsAsync(involvedNodeIds);
 
         // 构造 Venn 集合部分（sets）
@@ -317,7 +349,8 @@ public class KnowledgeGraphService
 
     public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds,
     IEnumerable<Guid> allTagIds,
-    IReadOnlyDictionary<Guid, string>? nodeToLevel = null)
+    IReadOnlyDictionary<Guid, string>? nodeToLevel = null,
+    string language = "zh")
     {
         // 如果调用方没传，就内部批量查一遍
         if (nodeToLevel is null)
@@ -328,7 +361,7 @@ public class KnowledgeGraphService
         }
 
         // 获取节点详情
-        var nodesDict = await _knowledgeRepo.GetNodesNamesAsync(allNodeIds);
+        var nodesDict = await _knowledgeRepo.GetNodesNamesAsync(allNodeIds, language);
 
         // 转换成 NodeDTO 列表
         var sqlNodes = nodesDict.Select(kvp => new NodeDTO
@@ -339,7 +372,7 @@ public class KnowledgeGraphService
         }).ToList();
 
         // 从 SQL 获取所有 Tag 信息
-        var sqlTags = await _tagRepo.GetTagNamesAsync(allTagIds);
+        var sqlTags = await _tagRepo.GetTagNamesAsync(allTagIds, language);
         var tagIdToName = sqlTags.ToDictionary(t => t.Key, t => t.Value);
 
         // // 获取 TagLevel 节点 ID
@@ -919,4 +952,14 @@ public class KnowledgeGraphService
         return await _graphRepository.LinkResourceToNodeAsync(nodeName, resourceId);
     }
 
+    private async Task<Dictionary<Guid, string>> GetNodeTitlesAsync(IEnumerable<Guid> nodeIds, string language)
+    {
+        var result = new Dictionary<Guid, string>();
+        foreach (var id in nodeIds.Distinct())
+        {
+            var title = await _l10n.GetLocalizedAsync(id, "title", language) ?? string.Empty;
+            result[id] = string.IsNullOrWhiteSpace(title) ? id.ToString() : title;
+        }
+        return result;
+    }
 }

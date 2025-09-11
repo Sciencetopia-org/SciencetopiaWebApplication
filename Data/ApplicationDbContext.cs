@@ -41,6 +41,12 @@ namespace Sciencetopia.Data
         public DbSet<StudyPlanUserRole> StudyPlanUserRoles => Set<StudyPlanUserRole>();
         public DbSet<StudyGroupUserRole> StudyGroupUserRoles => Set<StudyGroupUserRole>();
         public DbSet<StudyPlanCohort> Cohorts => Set<StudyPlanCohort>();
+        // L10n domain
+        public DbSet<Sciencetopia.Models.L10n.L10nSet> L10nSets => Set<Sciencetopia.Models.L10n.L10nSet>();
+        public DbSet<Sciencetopia.Models.L10n.L10nItem> L10nItems => Set<Sciencetopia.Models.L10n.L10nItem>();
+        public DbSet<Sciencetopia.Models.L10n.NodeL10nSet> NodeL10nSets => Set<Sciencetopia.Models.L10n.NodeL10nSet>();
+        public DbSet<Sciencetopia.Models.L10n.L10nSetItem> L10nSetItems => Set<Sciencetopia.Models.L10n.L10nSetItem>();
+        public DbSet<Sciencetopia.Models.L10n.TagL10nSet> TagL10nSets => Set<Sciencetopia.Models.L10n.TagL10nSet>();
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -51,6 +57,13 @@ namespace Sciencetopia.Data
             builder.Entity<TagTypes>().ToTable("TagTypes");
             builder.Entity<KnowledgeNode>().ToTable("KnowledgeNodes");
             builder.Entity<Resource>().ToTable("Resources");
+            
+            // L10n tables
+            builder.Entity<Sciencetopia.Models.L10n.L10nSet>().ToTable("L10nSets");
+            builder.Entity<Sciencetopia.Models.L10n.L10nItem>().ToTable("L10nItems");
+            builder.Entity<Sciencetopia.Models.L10n.NodeL10nSet>().ToTable("NodeL10nSets");
+            builder.Entity<Sciencetopia.Models.L10n.L10nSetItem>().ToTable("L10nSetItems");
+            builder.Entity<Sciencetopia.Models.L10n.TagL10nSet>().ToTable("TagL10nSets");
 
             // StudyPlans indexes & privacy (optional)
             builder.Entity<StudyPlanEntity>(eb =>
@@ -130,6 +143,105 @@ namespace Sciencetopia.Data
                 .WithMany()
                 .HasForeignKey(d => d.NodeId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Translations removed; L10n domain replaces them
+
+            // L10n Fluent mappings
+            builder.Entity<Sciencetopia.Models.L10n.L10nSet>(eb =>
+            {
+                eb.HasKey(x => x.L10nSetId);
+                eb.Property(x => x.Scope).HasMaxLength(50).IsRequired();
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.Property(x => x.UpdatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.Scope).HasDatabaseName("IX_L10nSets_Scope");
+            });
+
+            builder.Entity<Sciencetopia.Models.L10n.L10nItem>(eb =>
+            {
+                eb.HasKey(x => x.L10nItemId);
+                eb.Property(x => x.FieldKey).HasMaxLength(32).HasDefaultValue("name");
+                eb.Property(x => x.LangCode).HasMaxLength(10);
+                eb.Property(x => x.ScriptCode).HasMaxLength(10);
+                eb.Property(x => x.Text).HasMaxLength(200);
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.Property(x => x.UpdatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => new { x.FieldKey, x.LangCode }).HasDatabaseName("IX_L10nItems_Field_Lang");
+                eb.HasIndex(x => x.Text).HasDatabaseName("IX_L10nItems_Text");
+            });
+
+            builder.Entity<Sciencetopia.Models.L10n.NodeL10nSet>(eb =>
+            {
+                eb.HasKey(x => new { x.NodeId, x.L10nSetId, x.Relation });
+                eb.Property(x => x.Relation).HasDefaultValue((byte)0);
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.NodeId).HasDatabaseName("IX_NodeL10nSets_Node");
+                eb.HasIndex(x => x.L10nSetId).HasDatabaseName("IX_NodeL10nSets_Set");
+                eb.HasOne<KnowledgeNode>()
+                    .WithMany()
+                    .HasForeignKey(x => x.NodeId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                eb.HasOne<Sciencetopia.Models.L10n.L10nSet>()
+                    .WithMany()
+                    .HasForeignKey(x => x.L10nSetId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            builder.Entity<Sciencetopia.Models.L10n.L10nSetItem>(eb =>
+            {
+                eb.HasKey(x => new { x.L10nSetId, x.L10nItemId });
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.L10nItemId).HasDatabaseName("IX_L10nSetItems_Item");
+                eb.HasOne<Sciencetopia.Models.L10n.L10nSet>()
+                    .WithMany()
+                    .HasForeignKey(x => x.L10nSetId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                eb.HasOne<Sciencetopia.Models.L10n.L10nItem>()
+                    .WithMany()
+                    .HasForeignKey(x => x.L10nItemId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            // KnowledgeNodes: DefaultL10nSetId FK with filtered unique index
+            builder.Entity<KnowledgeNode>(eb =>
+            {
+                eb.HasIndex(x => x.DefaultL10nSetId)
+                  .HasDatabaseName("UX_KN_DefaultL10nSet")
+                  .IsUnique()
+                  .HasFilter("[DefaultL10nSetId] IS NOT NULL");
+                eb.HasOne<Sciencetopia.Models.L10n.L10nSet>()
+                  .WithMany()
+                  .HasForeignKey(x => x.DefaultL10nSetId);
+            });
+
+            // TagL10nSets
+            builder.Entity<Sciencetopia.Models.L10n.TagL10nSet>(eb =>
+            {
+                eb.HasKey(x => new { x.TagId, x.L10nSetId, x.Relation });
+                eb.Property(x => x.Relation).HasDefaultValue((byte)0);
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.TagId).HasDatabaseName("IX_TagL10nSets_Tag");
+                eb.HasIndex(x => x.L10nSetId).HasDatabaseName("IX_TagL10nSets_Set");
+                eb.HasOne<Tags>()
+                    .WithMany()
+                    .HasForeignKey(x => x.TagId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                eb.HasOne<Sciencetopia.Models.L10n.L10nSet>()
+                    .WithMany()
+                    .HasForeignKey(x => x.L10nSetId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            // Tags: DefaultL10nSetId
+            builder.Entity<Tags>(eb =>
+            {
+                eb.HasIndex(x => x.DefaultL10nSetId)
+                  .HasDatabaseName("UX_Tag_DefaultL10nSet")
+                  .IsUnique()
+                  .HasFilter("[DefaultL10nSetId] IS NOT NULL");
+                eb.HasOne<Sciencetopia.Models.L10n.L10nSet>()
+                  .WithMany()
+                  .HasForeignKey(x => x.DefaultL10nSetId);
+            });
 
             // Versions & Drafts (StudyPlan/Lesson)
             builder.Entity<StudyPlanVersion>(eb =>

@@ -51,6 +51,11 @@ builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<Sciencetopia.Services.PermissionService>();
 builder.Services.AddScoped<Sciencetopia.Services.Cohorts.ICohortService, Sciencetopia.Services.Cohorts.CohortService>();
+// L10n services
+builder.Services.Configure<Sciencetopia.Services.L10n.L10nOptions>(builder.Configuration.GetSection("L10n"));
+builder.Services.AddScoped<Sciencetopia.Services.L10n.IL10nService, Sciencetopia.Services.L10n.L10nService>();
+builder.Services.AddScoped<Sciencetopia.Services.L10n.L10nMigrationRunner>();
+builder.Services.AddSingleton<Sciencetopia.Middleware.ILanguageContext, Sciencetopia.Middleware.LanguageContext>();
 // Progress tracking services
 builder.Services.AddScoped<Sciencetopia.Repositories.Neo4j.INeo4jProgressRepository, Sciencetopia.Repositories.Neo4j.Neo4jProgressRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.Progress.IResourceProgressService, Sciencetopia.Services.Progress.ResourceProgressService>();
@@ -131,6 +136,14 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "Sciencetopia API", Version = "v1" });
+    // Avoid schemaId collisions for nested types with same simple name
+    c.CustomSchemaIds(type =>
+    {
+        var full = type.FullName;
+        return string.IsNullOrEmpty(full) ? type.Name : full.Replace('+', '.');
+    });
+    // In case two actions map to the same route/method, pick the first
+    c.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
 
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
@@ -217,6 +230,7 @@ var app = builder.Build();
 
 // Apply CORS dynamically based on request path or origin
 app.UseCors("VueCorsPolicy");
+app.UseMiddleware<Sciencetopia.Middleware.LanguageResolutionMiddleware>();
 
 app.Use(async (context, next) =>
 {
