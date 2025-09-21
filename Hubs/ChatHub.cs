@@ -6,16 +6,22 @@ using System.Linq;
 using Microsoft.EntityFrameworkCore;
 using System;
 using Sciencetopia.Data;
+using Sciencetopia.Services;
+using Sciencetopia.Services.Messaging;
 
 namespace Sciencetopia.Hubs
 {
     public class ChatHub : Hub
     {
         private readonly ApplicationDbContext _context;
+        private readonly UserService _userService;
+        private readonly MessageAttachmentService _attachmentService;
 
-        public ChatHub(ApplicationDbContext context)
+        public ChatHub(ApplicationDbContext context, UserService userService, MessageAttachmentService attachmentService)
         {
             _context = context;
+            _userService = userService;
+            _attachmentService = attachmentService;
         }
 
         public async Task SendMessage(string conversationId, string senderId, string receiverId, string content)
@@ -25,42 +31,39 @@ namespace Sciencetopia.Hubs
                 throw new HubException("Invalid conversation ID format");
             }
 
-            // Ensure the conversation exists
-            var conversation = await _context.Conversations
-                                     .Include(c => c.Messages)
-                                     .FirstOrDefaultAsync(c => c.Id == conversationGuid);
+            // Ensure the conversation exists, create with provided GUID if missing
+            var conversationExists = await _context.Conversations
+                .AsNoTracking()
+                .AnyAsync(c => c.Id == conversationGuid);
 
-            // If the conversation does not exist, optionally create a new one (or handle as needed)
-            if (conversation == null)
+            if (!conversationExists)
             {
-                conversation = new Conversation
-                {
-                    Id = Guid.NewGuid(),
-                    Messages = new List<Message>()
-                };
-                _context.Conversations.Add(conversation);
+                _context.Conversations.Add(new Conversation { Id = conversationGuid });
+                await _context.SaveChangesAsync();
             }
 
-            // Create and save the new message
+            // Create and save the new message (avoid relying on tracked navigation collections)
+            var normalizedContent = _attachmentService.NormalizeForStorage(content);
+
             var message = new Message
             {
                 Id = Guid.NewGuid(),
-                Content = content,
+                Content = normalizedContent,
                 SentTime = DateTimeOffset.UtcNow,
                 SenderId = senderId,
                 ReceiverId = receiverId,
-                ConversationId = conversation.Id,
-                IsRead = false // Assuming the message is unread when first sent
+                ConversationId = conversationGuid,
+                IsRead = false
             };
 
-            conversation.Messages.Add(message);
+            _context.Messages.Add(message);
             await _context.SaveChangesAsync();
 
             // After saving the message, convert it to DTO before sending
             var messageDto = new MessageWithUserDetailsDTO
             {
                 Id = message.Id,
-                Content = message.Content,
+                Content = _attachmentService.GetClientReadableContent(message.Content),
                 SentTime = message.SentTime,
                 Sender = new UserDetailsDTO
                 {
@@ -69,10 +72,7 @@ namespace Sciencetopia.Hubs
                         .Where(u => u.Id == message.SenderId)
                         .Select(u => u.UserName)
                         .FirstOrDefaultAsync(),
-                    AvatarUrl = await _context.Users
-                        .Where(u => u.Id == message.SenderId)
-                        .Select(u => u.AvatarUrl)
-                        .FirstOrDefaultAsync()
+                    AvatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(message.SenderId)
                 }
             };
 
@@ -171,6 +171,11 @@ namespace Sciencetopia.Hubs
                     ReceiverId = m.ReceiverId
                 })
                 .ToListAsync();
+
+            foreach (var message in messages)
+            {
+                message.Content = _attachmentService.GetClientReadableContent(message.Content);
+            }
 
             await Clients.Caller.SendAsync("LoadHistory", messages);
         }

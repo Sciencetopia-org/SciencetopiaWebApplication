@@ -16,6 +16,7 @@ namespace Sciencetopia.Services.L10n
     public interface IL10nService
     {
         Task<string?> GetLocalizedAsync(Guid nodeId, string fieldKey, string? lang);
+        Task<Dictionary<Guid, string>> GetLocalizedManyAsync(IEnumerable<Guid> nodeIds, string fieldKey, string? lang);
         Task<IReadOnlyList<L10nItemDto>> ListAsync(Guid nodeId, string fieldKey);
         Task<Guid> UpsertAsync(Guid nodeId, string fieldKey, string lang,
                          string value, bool isLongText = false,
@@ -24,6 +25,7 @@ namespace Sciencetopia.Services.L10n
 
         // Tag versions
         Task<string?> GetLocalizedForTagAsync(Guid tagId, string fieldKey, string? lang);
+        Task<Dictionary<Guid, string>> GetLocalizedForTagManyAsync(IEnumerable<Guid> tagIds, string fieldKey, string? lang);
         Task<IReadOnlyList<L10nItemDto>> ListForTagAsync(Guid tagId, string fieldKey);
         Task<Guid> UpsertForTagAsync(Guid tagId, string fieldKey, string lang,
                          string value, bool isLongText = false,
@@ -31,8 +33,8 @@ namespace Sciencetopia.Services.L10n
         Task RemoveForTagAsync(Guid tagId, Guid l10nItemId);
     }
 
-    public class L10nService : IL10nService
-    {
+        public class L10nService : IL10nService
+        {
         private readonly ApplicationDbContext _db;
         private readonly IMemoryCache _cache;
         private readonly IOptions<L10nOptions> _opts;
@@ -113,6 +115,47 @@ namespace Sciencetopia.Services.L10n
             return value;
         }
 
+        public async Task<Dictionary<Guid, string>> GetLocalizedManyAsync(IEnumerable<Guid> nodeIds, string fieldKey, string? lang)
+        {
+            var idSet = nodeIds?.ToHashSet() ?? new HashSet<Guid>();
+            var result = new Dictionary<Guid, string>();
+            if (idSet.Count == 0) return result;
+
+            var nodes = await _db.KnowledgeNodes
+                .Where(n => n.Id.HasValue && idSet.Contains(n.Id.Value))
+                .Select(n => new { NodeId = n.Id!.Value, n.DefaultL10nSetId })
+                .ToListAsync();
+
+            var mapNodeToSet = nodes.Where(x => x.DefaultL10nSetId.HasValue)
+                                     .ToDictionary(x => x.NodeId, x => x.DefaultL10nSetId!.Value);
+            if (mapNodeToSet.Count == 0) return result;
+
+            var setIds = mapNodeToSet.Values.Distinct().ToList();
+            var items = await (from si in _db.L10nSetItems
+                               join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
+                               where setIds.Contains(si.L10nSetId)
+                                     && i.FieldKey == fieldKey
+                                     && i.Kind == L10nItemKind.Primary
+                                     && (i.LangCode == lang || i.LangCode == null)
+                               select new { si.L10nSetId, i.LangCode, Text = i.Content ?? i.Text, i.SortOrder })
+                               .ToListAsync();
+
+            var bestBySet = items
+                .GroupBy(x => x.L10nSetId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderBy(x => x.LangCode == lang ? 0 : 1).ThenBy(x => x.SortOrder).First().Text ?? string.Empty
+                );
+
+            foreach (var (nodeId, setId) in mapNodeToSet)
+            {
+                if (bestBySet.TryGetValue(setId, out var text) && !string.IsNullOrWhiteSpace(text))
+                    result[nodeId] = text;
+            }
+
+            return result;
+        }
+
         public async Task<IReadOnlyList<L10nItemDto>> ListAsync(Guid nodeId, string fieldKey)
         {
             var setId = await _db.KnowledgeNodes.Where(n => n.Id == nodeId).Select(n => n.DefaultL10nSetId).FirstOrDefaultAsync();
@@ -191,6 +234,47 @@ namespace Sciencetopia.Services.L10n
             string? value = item == null ? null : (item.Content ?? item.Text);
             _cache.Set(key, value, TimeSpan.FromMinutes(5));
             return value;
+        }
+
+        public async Task<Dictionary<Guid, string>> GetLocalizedForTagManyAsync(IEnumerable<Guid> tagIds, string fieldKey, string? lang)
+        {
+            var idSet = tagIds?.ToHashSet() ?? new HashSet<Guid>();
+            var result = new Dictionary<Guid, string>();
+            if (idSet.Count == 0) return result;
+
+            var tags = await _db.Tags
+                .Where(t => t.Id.HasValue && idSet.Contains(t.Id.Value))
+                .Select(t => new { TagId = t.Id!.Value, t.DefaultL10nSetId })
+                .ToListAsync();
+
+            var mapTagToSet = tags.Where(x => x.DefaultL10nSetId.HasValue)
+                                   .ToDictionary(x => x.TagId, x => x.DefaultL10nSetId!.Value);
+            if (mapTagToSet.Count == 0) return result;
+
+            var setIds = mapTagToSet.Values.Distinct().ToList();
+            var items = await (from si in _db.L10nSetItems
+                               join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
+                               where setIds.Contains(si.L10nSetId)
+                                     && i.FieldKey == fieldKey
+                                     && i.Kind == L10nItemKind.Primary
+                                     && (i.LangCode == lang || i.LangCode == null)
+                               select new { si.L10nSetId, i.LangCode, Text = i.Content ?? i.Text, i.SortOrder })
+                               .ToListAsync();
+
+            var bestBySet = items
+                .GroupBy(x => x.L10nSetId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.OrderBy(x => x.LangCode == lang ? 0 : 1).ThenBy(x => x.SortOrder).First().Text ?? string.Empty
+                );
+
+            foreach (var (tagId, setId) in mapTagToSet)
+            {
+                if (bestBySet.TryGetValue(setId, out var text) && !string.IsNullOrWhiteSpace(text))
+                    result[tagId] = text;
+            }
+
+            return result;
         }
 
         public async Task<IReadOnlyList<L10nItemDto>> ListForTagAsync(Guid tagId, string fieldKey)

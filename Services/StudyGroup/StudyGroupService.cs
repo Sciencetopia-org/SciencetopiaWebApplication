@@ -13,18 +13,72 @@ using Sciencetopia.Models.Enums;
     private readonly IDriver _neo4jDriver;
     private readonly UserService _userService;
     private readonly ApplicationDbContext _context;
+    private readonly ITagResolutionService _tagResolution;
+    private readonly ITagRepository _tagRepo;
     private readonly IHubContext<ChatHub> _hubContext;
 
-    public StudyGroupService(IDriver neo4jDriver, UserService userService, IHubContext<ChatHub> hubContext, ApplicationDbContext context)
+    public StudyGroupService(IDriver neo4jDriver, UserService userService, IHubContext<ChatHub> hubContext, ApplicationDbContext context, ITagResolutionService tagResolution, ITagRepository tagRepo)
     {
         _neo4jDriver = neo4jDriver;
         _userService = userService;
         _hubContext = hubContext;
         _context = context;
+        _tagResolution = tagResolution;
+        _tagRepo = tagRepo;
     }
 
     public async Task<bool> CreateStudyGroupAsync(StudyGroupDTO studyGroupDTO, string userId)
     {
+        // Gather input tags: IDs and names
+        var tagIds = (studyGroupDTO.TagIds ?? new List<Guid>())
+            .Where(id => id != Guid.Empty)
+            .ToList();
+        var newTagNames = (studyGroupDTO.NewTagNames ?? new List<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .ToList();
+
+        // Check duplicate names (case-insensitive) in user input
+        var nameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var nm in newTagNames)
+        {
+            if (!nameSet.Add(nm))
+            {
+                return false; // duplicate names in input
+            }
+        }
+        // Dedupe tagIds
+        tagIds = tagIds.Distinct().ToList();
+
+        var preUniqueCount = tagIds.Count + nameSet.Count;
+
+        // Resolve or create new tag names, and ensure Uncategorized mapping
+        if (newTagNames.Count > 0)
+        {
+            var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newTagNames, userId);
+            tagIds.AddRange(resolved);
+        }
+
+        // Validate that referenced tag IDs exist
+        if (tagIds.Count > 0)
+        {
+            var existingSet = await _context.Tags
+                .Where(t => t.Id.HasValue && tagIds.Contains(t.Id.Value))
+                .Select(t => t.Id!.Value)
+                .ToListAsync();
+            tagIds = tagIds.Intersect(existingSet).Distinct().ToList();
+        }
+
+        // Enforce not introducing duplicates across ids and resolved names
+        tagIds = tagIds.Distinct().ToList();
+        if (tagIds.Count < preUniqueCount)
+        {
+            // duplicates detected between provided ids and names mapping
+            return false;
+        }
+
+        // Enforce maximum of 10 tags total
+        if (tagIds.Count > 10) return false;
         // Check for duplicate name
         if (!string.IsNullOrEmpty(studyGroupDTO.Name))
         {
@@ -73,7 +127,9 @@ using Sciencetopia.Models.Enums;
                     s.description = $description
                 WITH s
                 MATCH (u:User {id: $userId})
-                CREATE (u)-[:MEMBER_OF {role: 'manager', joinedAt: $joinedAt}]->(s)
+                MERGE (u)-[:MEMBER_OF {role: 'manager', joinedAt: $joinedAt}]->(s)
+                WITH s
+                FOREACH (tid IN $tagIds | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(s))
                 RETURN s.id AS groupId";
 
                 var groupParams = new Dictionary<string, object>
@@ -83,7 +139,8 @@ using Sciencetopia.Models.Enums;
                     {"joinedAt", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss")},
                     {"status", entity.Status ?? "pending_approval"},
                     {"name", entity.Name},
-                    {"description", entity.Description ?? string.Empty}
+                    {"description", entity.Description ?? string.Empty},
+                    {"tagIds", tagIds.Select(x => x.ToString()).ToList()}
                 };
                 var cursor = await tx.RunAsync(query, groupParams);
                 var record = await cursor.SingleAsync();
@@ -162,6 +219,119 @@ using Sciencetopia.Models.Enums;
         }
 
         return enrichedGroups;
+    }
+
+    public async Task<List<StudyGroup>> GetStudyGroupsPagedAsync(int skip, int take)
+    {
+        var sqlGroups = await _context.StudyGroups
+            .Where(g => g.Status == "approved")
+            .OrderByDescending(g => g.CreatedAt)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync();
+
+        var enrichedGroups = new List<StudyGroup>();
+        foreach (var entity in sqlGroups)
+        {
+            var groupId = entity.Id.ToString();
+            var members = await GetStudyGroupMembers(groupId);
+            enrichedGroups.Add(new StudyGroup
+            {
+                Id = groupId,
+                Name = entity.Name,
+                Description = entity.Description,
+                MemberIds = members,
+                Status = entity.Status,
+                ImageUrl = entity.ImageUrl
+            });
+        }
+        return enrichedGroups;
+    }
+
+    public async Task<List<TagDTO>> GetGroupTagsAsync(string groupId)
+    {
+        using var session = _neo4jDriver.AsyncSession();
+        var tagIdStrings = await session.ExecuteReadAsync(async tx =>
+        {
+            var query = @"MATCH (t:Tag)-[:TAGGED_WITH]->(s:StudyGroup {id: $groupId}) RETURN t.id AS tagId";
+            var cursor = await tx.RunAsync(query, new { groupId });
+            var list = await cursor.ToListAsync(r => r["tagId"].As<string?>());
+            return list.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+        });
+
+        var ids = new List<Guid>();
+        foreach (var s in tagIdStrings)
+        {
+            if (Guid.TryParse(s, out var gid)) ids.Add(gid);
+        }
+        if (ids.Count == 0) return new List<TagDTO>();
+        var nameMap = await _tagRepo.GetTagNamesAsync(ids);
+        return ids.Distinct().Select(id => new TagDTO { Id = id, Name = nameMap.TryGetValue(id, out var nm) ? nm : id.ToString() }).ToList();
+    }
+
+    public async Task<bool> UpdateGroupTagsAsync(string studyGroupId, List<Guid>? tagIds, List<string>? newTagNames, string userId)
+    {
+        var ids = (tagIds ?? new List<Guid>()).Where(x => x != Guid.Empty).Distinct().ToList();
+        var newNames = (newTagNames ?? new List<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .ToList();
+
+        // Prevent duplicates by names
+        var nameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var nm in newNames)
+        {
+            if (!nameSet.Add(nm)) return false;
+        }
+
+        // Resolve or create new tag names and ensure valid ids
+        if (newNames.Count > 0)
+        {
+            var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newNames, userId);
+            ids.AddRange(resolved);
+        }
+
+        // Validate that referenced tag IDs exist in SQL
+        if (ids.Count > 0)
+        {
+            var existingSet = await _context.Tags
+                .Where(t => t.Id.HasValue && ids.Contains(t.Id.Value))
+                .Select(t => t.Id!.Value)
+                .ToListAsync();
+            ids = ids.Intersect(existingSet).Distinct().ToList();
+        }
+
+        // Enforce maximum of 10 tags
+        if (ids.Count > 10) return false;
+
+        // Update Neo4j relationships atomically
+        using var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            var ok = await session.ExecuteWriteAsync(async tx =>
+            {
+                var cypher = @"
+                MATCH (s:StudyGroup {id: $groupId})
+                OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(s)
+                DELETE r
+                WITH s
+                FOREACH (tid IN $tagIds | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(s))
+                RETURN s.id AS id";
+                var p = new
+                {
+                    groupId = studyGroupId,
+                    tagIds = ids.Select(x => x.ToString()).ToList()
+                };
+                var cursor = await tx.RunAsync(cypher, p);
+                var record = await cursor.SingleAsync();
+                return record["id"].As<string>() != null;
+            });
+            return ok;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public async Task<List<GroupMember>> GetStudyGroupMembers(string groupId)
@@ -373,15 +543,39 @@ using Sciencetopia.Models.Enums;
 
             if (managerIds.Count > 0)
             {
-                // Send notification using SignalR's SendNotificationToUsers method from ChatHub
                 var notificationContent = $"User {userId} has applied to join your study group {studyGroupName}.";
                 var notificationType = "StudyGroupApplication";
-                // Only the URL to the join-request page is stored in the Data field
                 var notificationUrl = $"/studygroup/{studyGroupId}";
 
-                // Use the existing SendNotificationToUsers method from ChatHub
-                var chatHub = new ChatHub(_context); // Assuming _context is your ApplicationDbContext
-                await chatHub.SendNotificationToUsers(managerIds, notificationContent, notificationType, notificationUrl);
+                var createdAt = DateTime.UtcNow;
+
+                var notifications = managerIds.Select(managerId => new Notification
+                {
+                    Content = notificationContent,
+                    CreatedAt = createdAt,
+                    IsRead = false,
+                    UserId = managerId,
+                    Type = notificationType,
+                    Data = notificationUrl
+                }).ToList();
+
+                _context.Notifications.AddRange(notifications);
+                await _context.SaveChangesAsync();
+
+                foreach (var notification in notifications)
+                {
+                    await _hubContext.Clients.User(notification.UserId).SendAsync("ReceiveNotification", new
+                    {
+                        notification.Id,
+                        notification.Content,
+                        notification.CreatedAt,
+                        notification.IsRead,
+                        notification.Type,
+                        notification.Data
+                    });
+
+                    await _hubContext.Clients.User(notification.UserId).SendAsync("UpdateNotifications");
+                }
             }
         }
         finally

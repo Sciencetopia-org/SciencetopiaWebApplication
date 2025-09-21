@@ -16,6 +16,8 @@ public class StudyPlanDetail
     public List<Lesson>? MainCurriculum { get; set; }
     public List<Lesson>? AdvancedTopics { get; set; }
     public bool Completed { get; set; }
+    // Plan-level tags (optional)
+    public List<TagDTO>? Tags { get; set; }
 }
 
 public class Introduction
@@ -33,4 +35,6 @@ public class Lesson
     public List<ResourceDTO>? Resources { get; set; }
     public int FinishedResourcesCount { get; set; }
     public float ProgressPercentage { get; set; }
+    // Lesson-level tags (optional)
+    public List<TagDTO>? Tags { get; set; }
 }

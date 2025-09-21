@@ -3,14 +3,15 @@ using Sciencetopia.Services;
 using Sciencetopia.Models;
 using Sciencetopia.Authorization;
 using System.Threading.Tasks;
+using System.Security.Claims;
 
 namespace Sciencetopia.Controllers.StudyGroups;
 
 [ApiController]
 [Route("api/[controller]")]
-public class StudyGroupManageController : ControllerBase
-{
-    private readonly StudyGroupService _studyGroupService;
+    public class StudyGroupManageController : ControllerBase
+    {
+        private readonly StudyGroupService _studyGroupService;
 
     public StudyGroupManageController(StudyGroupService studyGroupService)
     {
@@ -160,5 +161,27 @@ public class StudyGroupManageController : ControllerBase
         {
             return BadRequest("Failed to update profile picture.");
         }
+    }
+
+    [HttpPost("UpdateTags/{studyGroupId}")]
+    [ServiceFilter(typeof(GroupManagerAuthorizeAttribute))]
+    public async Task<IActionResult> UpdateTags(string studyGroupId, [FromBody] StudyGroupDTO request)
+    {
+        // Extract userId for tag creation attribution
+        string userId = HttpContext?.User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+        if (string.IsNullOrEmpty(userId))
+            return Forbid();
+
+        // Validate up to 10 tags total
+        var total = (request?.TagIds?.Distinct().Count() ?? 0)
+                  + (request?.NewTagNames?.Select(s => s?.Trim()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase).Count() ?? 0);
+        if (total > 10)
+        {
+            return BadRequest("每个学习小组最多可添加 10 个标签。");
+        }
+
+        var ok = await _studyGroupService.UpdateGroupTagsAsync(studyGroupId, request?.TagIds, request?.NewTagNames, userId);
+        if (!ok) return BadRequest("更新标签失败，请检查输入是否有效或存在重复。");
+        return Ok("标签更新成功。");
     }
 }

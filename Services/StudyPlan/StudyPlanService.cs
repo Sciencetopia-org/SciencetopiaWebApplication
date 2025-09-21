@@ -1,5 +1,6 @@
 using Neo4j.Driver;
 using System.Linq;
+using Sciencetopia.Constants;
 using Sciencetopia.Models;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -9,6 +10,8 @@ public class StudyPlanService
     private readonly IDriver _neo4jDriver;
     private readonly ILogger<StudyPlanService> _logger;
     private readonly IStudyPlanRepository _sqlRepository;
+    private readonly ITagRepository? _tagRepo; // optional via DI in controller methods
+    private readonly ITagResolutionService? _tagResolution;
 
     public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository)
     {
@@ -17,7 +20,20 @@ public class StudyPlanService
         _sqlRepository = sqlRepository;
     }
 
-    public async Task<bool> SaveStudyPlanAsync(StudyPlanDTO studyPlanDTO, string userId)
+    // Secondary constructor for scenarios where tag services are injected explicitly
+    public StudyPlanService(
+        IDriver neo4jDriver,
+        ILogger<StudyPlanService> logger,
+        IStudyPlanRepository sqlRepository,
+        ITagRepository tagRepository,
+        ITagResolutionService tagResolution)
+        : this(neo4jDriver, logger, sqlRepository)
+    {
+        _tagRepo = tagRepository;
+        _tagResolution = tagResolution;
+    }
+
+    public async Task<string?> SaveStudyPlanAsync(StudyPlanDTO studyPlanDTO, string userId, bool autoTag = false)
     {
         var session = _neo4jDriver.AsyncSession();
         try
@@ -87,17 +103,13 @@ public class StudyPlanService
                             new { lessonId = lesson.Id, resourceId = resource.Id });
                     }
 
-                    // Associate Lesson with KnowledgeNodes
-                    if (lesson.AssociatedKnowledgeNodes != null)
-                    {
-                        foreach (var knowledgeNode in lesson.AssociatedKnowledgeNodes)
-                        {
-                            await transaction.RunAsync(@"
-                            MATCH (l:Lesson {id: $lessonId}), (k:KnowledgeNode {id: $knowledgeNodeId})
-                            MERGE (l)-[:ASSOCIATED_WITH]->(k)",
-                                new { lessonId = lesson.Id, knowledgeNodeId = knowledgeNode.Properties?.Link });
-                        }
-                    }
+                    // Recompute ASSOCIATED_WITH purely from resources so changes in resources auto-reflect
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[r:ASSOCIATED_WITH]->(:KnowledgeNode)
+DELETE r", new { lessonId = lesson.Id });
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)<-[:HAS_RESOURCE]-(k:KnowledgeNode)
+MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
                 }
 
                 // Associate StudyPlan Introduction with KnowledgeNodes
@@ -105,10 +117,12 @@ public class StudyPlanService
                 {
                     foreach (var knowledgeNode in studyPlan.Introduction.AssociatedKnowledgeNodes)
                     {
+                        var knId = knowledgeNode?.Properties?.Id ?? knowledgeNode?.Properties?.Link;
+                        if (string.IsNullOrWhiteSpace(knId)) continue;
                         await transaction.RunAsync(@"
                         MATCH (p:StudyPlan {id: $studyPlanId}), (k:KnowledgeNode {id: $knowledgeNodeId})
                         MERGE (p)-[:ASSOCIATED_WITH]->(k)",
-                            new { studyPlanId, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                            new { studyPlanId, knowledgeNodeId = knId });
                     }
                 }
 
@@ -116,9 +130,57 @@ public class StudyPlanService
                 MATCH (u:User {id: $userId}), (p:StudyPlan {id: $studyPlanId})
                 MERGE (u)-[:CREATED]->(p)",
                     new { userId, studyPlanId });
+
+                // Attach provided tags if any
+                var planTagIds = (studyPlan?.Tags ?? new List<TagDTO>()).Where(t => t?.Id != null).Select(t => t.Id!.Value.ToString()).Distinct().Take(10).ToList();
+                if (planTagIds.Count > 0)
+                {
+                    await transaction.RunAsync(@"MATCH (p:StudyPlan {id:$pid})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(p)
+DELETE r
+WITH p
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(p))",
+                        new { pid = studyPlanId, ids = planTagIds });
+                }
+
+                foreach (var (lesson, _) in GetLessonsWithType(studyPlan))
+                {
+                    var ltagIds = (lesson?.Tags ?? new List<TagDTO>()).Where(t => t?.Id != null).Select(t => t.Id!.Value.ToString()).Distinct().Take(10).ToList();
+                    if (ltagIds.Count == 0) continue;
+                    await transaction.RunAsync(@"MATCH (l:Lesson {id:$lid})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(l)
+DELETE r
+WITH l
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(l))",
+                        new { lid = lesson.Id, ids = ltagIds });
+                }
             });
 
-            // Step 4: Create initial version snapshot and versioned subgraph in Neo4j
+            // Step 4: Auto-generate tags (optional, for AI plans)
+            if (autoTag)
+            {
+                try
+                {
+                    // Plan-level suggestions
+                    var planSuggestions = await SuggestPlanTagsAsync(studyPlanId);
+                    var planIds = planSuggestions?.Where(t => t?.Id != null).Select(t => t.Id!.Value).ToList() ?? new List<Guid>();
+                    if (planIds.Count > 0)
+                        await UpdatePlanTagsAsync(studyPlanId, planIds, null, userId);
+
+                    // Lesson-level suggestions
+                    foreach (var (lesson, _) in GetLessonsWithType(studyPlan))
+                    {
+                        if (string.IsNullOrEmpty(lesson.Id)) continue;
+                        var ls = await SuggestLessonTagsAsync(studyPlanId, lesson.Id);
+                        var lids = ls?.Where(t => t?.Id != null).Select(t => t.Id!.Value).ToList() ?? new List<Guid>();
+                        if (lids.Count > 0)
+                            await UpdateLessonTagsAsync(studyPlanId, lesson.Id, lids, null, userId);
+                    }
+                }
+                catch { /* best-effort; ignore */ }
+            }
+
+            // Step 5: Create initial version snapshot and versioned subgraph in Neo4j
             try
             {
                 var snapshot = SerializePlan(studyPlanDTO);
@@ -127,7 +189,7 @@ public class StudyPlanService
             }
             catch { /* non-blocking */ }
 
-            return true;
+            return studyPlanId;
         }
         finally
         {
@@ -138,11 +200,11 @@ public class StudyPlanService
     private IEnumerable<(Lesson lesson, string type)> GetLessonsWithType(StudyPlanDetail studyPlan)
     {
         foreach (var lesson in studyPlan.Prerequisite)
-            yield return (lesson, "PREREQUISITE");
+            yield return (lesson, StudyPlanStepTypes.Prerequisite);
         foreach (var lesson in studyPlan.MainCurriculum)
-            yield return (lesson, "MAIN_CURRICULUM");
+            yield return (lesson, StudyPlanStepTypes.MainCurriculum);
         foreach (var lesson in studyPlan.AdvancedTopics)
-            yield return (lesson, "ADVANCED_TOPIC");
+            yield return (lesson, StudyPlanStepTypes.AdvancedTopic);
     }
 
     public async Task<bool> UpdateStudyPlanAsync(StudyPlanDTO updatedStudyPlan)
@@ -247,17 +309,15 @@ public class StudyPlanService
                     DELETE r",
                         new { lessonId = lesson.Id });
 
-                    // 重建新的 ASSOCIATED_WITH（Lesson）
-                    if (lesson.AssociatedKnowledgeNodes != null)
-                    {
-                        foreach (var knowledgeNode in lesson.AssociatedKnowledgeNodes)
-                        {
-                            await transaction.RunAsync(@"
-                            MATCH (l:Lesson {id: $lessonId}), (k:KnowledgeNode {id: $knowledgeNodeId})
-                            MERGE (l)-[:ASSOCIATED_WITH]->(k)",
-                                new { lessonId = lesson.Id, knowledgeNodeId = knowledgeNode.Properties?.Link });
-                        }
-                    }
+                    // 基于资源重建 ASSOCIATED_WITH，确保资源变动自动反映
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[r:ASSOCIATED_WITH]->(:KnowledgeNode)
+DELETE r",
+                        new { lessonId = lesson.Id });
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)<-[:HAS_RESOURCE]-(k:KnowledgeNode)
+MERGE (l)-[:ASSOCIATED_WITH]->(k)",
+                        new { lessonId = lesson.Id });
 
                     // 更新 Lesson 的 Resource 关系
                     foreach (var resource in lesson.Resources)
@@ -274,6 +334,15 @@ public class StudyPlanService
                                 new { lessonId = lesson.Id, resourceId = resource.Id, resourceName = resource.Name, resourceLink = resource.Link });
                         }
                     }
+                    // 再次基于资源重建 ASSOCIATED_WITH（以包含新/更新的资源）
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[r:ASSOCIATED_WITH]->(:KnowledgeNode)
+DELETE r",
+                        new { lessonId = lesson.Id });
+                    await transaction.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)<-[:HAS_RESOURCE]-(k:KnowledgeNode)
+MERGE (l)-[:ASSOCIATED_WITH]->(k)",
+                        new { lessonId = lesson.Id });
                 }
 
                 // 删除旧 ASSOCIATED_WITH（StudyPlan）
@@ -286,10 +355,40 @@ public class StudyPlanService
                 {
                     foreach (var knowledgeNode in studyPlan.Introduction.AssociatedKnowledgeNodes)
                     {
+                        var knId = knowledgeNode?.Properties?.Id ?? knowledgeNode?.Properties?.Link;
+                        if (string.IsNullOrWhiteSpace(knId)) continue;
                         await transaction.RunAsync(@"
                         MATCH (p:StudyPlan {id: $studyPlanId}), (k:KnowledgeNode {id: $knowledgeNodeId})
                         MERGE (p)-[:ASSOCIATED_WITH]->(k)",
-                            new { studyPlanId, knowledgeNodeId = knowledgeNode.Properties?.Link });
+                            new { studyPlanId, knowledgeNodeId = knId });
+                    }
+                }
+
+                // Update tags from DTO if provided
+                var planTagIds = (studyPlan?.Tags ?? new List<TagDTO>()).Where(t => t?.Id != null).Select(t => t.Id!.Value.ToString()).Distinct().Take(10).ToList();
+                await transaction.RunAsync(@"MATCH (p:StudyPlan {id:$pid})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(p)
+DELETE r",
+                    new { pid = studyPlanId });
+                if (planTagIds.Count > 0)
+                {
+                    await transaction.RunAsync(@"MATCH (p:StudyPlan {id:$pid})
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(p))",
+                        new { pid = studyPlanId, ids = planTagIds });
+                }
+
+                foreach (var (lesson, _) in GetLessonsWithType(studyPlan))
+                {
+                    await transaction.RunAsync(@"MATCH (l:Lesson {id:$lid})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(l)
+DELETE r",
+                        new { lid = lesson.Id });
+                    var ids = (lesson?.Tags ?? new List<TagDTO>()).Where(t => t?.Id != null).Select(t => t.Id!.Value.ToString()).Distinct().Take(10).ToList();
+                    if (ids.Count > 0)
+                    {
+                        await transaction.RunAsync(@"MATCH (l:Lesson {id:$lid})
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(l))",
+                            new { lid = lesson.Id, ids });
                     }
                 }
             });
@@ -619,11 +718,11 @@ public class StudyPlanService
                 }
 
                 var stepType = record["stepType"]?.As<string>();
-                if (stepType == "PREREQUISITE")
+                if (stepType == StudyPlanStepTypes.Prerequisite)
                     studyPlanDict[studyPlanId].StudyPlan.Prerequisite.Add(lesson);
-                else if (stepType == "MAIN_CURRICULUM")
+                else if (stepType == StudyPlanStepTypes.MainCurriculum)
                     studyPlanDict[studyPlanId].StudyPlan.MainCurriculum.Add(lesson);
-                else if (stepType == "ADVANCED_TOPIC")
+                else if (stepType == StudyPlanStepTypes.AdvancedTopic)
                     studyPlanDict[studyPlanId].StudyPlan.AdvancedTopics.Add(lesson);
             }
 
@@ -650,11 +749,158 @@ public class StudyPlanService
             Labels = n.Labels.ToList(),
             Properties = new NodeProperties
             {
+                Id = n.Properties.ContainsKey("id") ? n.Properties["id"]?.ToString() : null,
                 Link = n.Properties.ContainsKey("link") ? n.Properties["link"]?.ToString() : null,
                 Name = n.Properties.ContainsKey("name") ? n.Properties["name"]?.ToString() : null
             },
             ElementId = n.ElementId
         };
+    }
+
+    // Auto-find KnowledgeNodes for a set of lesson resources by either Resource.id or Resource.link
+    private async Task<List<Node>> AutoFindKnowledgeNodesForResourcesAsync(List<ResourceDTO>? resources)
+    {
+        var result = new List<Node>();
+        if (resources == null || resources.Count == 0) return result;
+
+        var ids = resources.Select(r => r?.Id).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+        var links = resources.Select(r => r?.Link).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+        if (ids.Count == 0 && links.Count == 0) return result;
+
+        using var session = _neo4jDriver.AsyncSession();
+        var cypher = @"
+MATCH (k:KnowledgeNode)-[:HAS_RESOURCE]->(r:Resource)
+WHERE (r.id IN $ids) OR (exists(r.link) AND r.link IN $links)
+RETURN DISTINCT k AS node";
+        var cursor = await session.RunAsync(cypher, new { ids, links });
+        await foreach (var record in cursor)
+        {
+            var node = record["node"] as INode;
+            if (node != null) result.Add(MapNode(node));
+        }
+        return result;
+    }
+
+    public class SuggestFromPayloadResult
+    {
+        public List<TagDTO> PlanTags { get; set; } = new();
+        public List<(string Key, string? LessonId, List<TagDTO> Tags)> Lessons { get; set; } = new();
+    }
+
+    public async Task<SuggestFromPayloadResult> SuggestFromPayloadAsync(StudyPlanDTO dto)
+    {
+        var result = new SuggestFromPayloadResult();
+        var sp = dto?.StudyPlan;
+        if (sp == null) return result;
+
+        // Build lesson node sets
+        var lessonEntries = new List<(string Key, string? LessonId, HashSet<Guid> NodeIds)>();
+        var sections = new List<(IEnumerable<Lesson>? List, string Name)>
+        {
+            (sp.Prerequisite, "prerequisite"),
+            (sp.MainCurriculum, "mainCurriculum"),
+            (sp.AdvancedTopics, "advancedTopics")
+        };
+        int idxSec = 0;
+        foreach (var (list, secName) in sections)
+        {
+            if (list == null) { idxSec++; continue; }
+            int idx = 0;
+            foreach (var lesson in list)
+            {
+                var key = !string.IsNullOrEmpty(lesson?.Id) ? lesson!.Id! : $"{secName}:{idx}:{lesson?.Name}";
+                var nodeSet = new HashSet<Guid>();
+                if (lesson?.AssociatedKnowledgeNodes != null)
+                {
+                    foreach (var kn in lesson.AssociatedKnowledgeNodes)
+                    {
+                        var idStr = kn?.Properties?.Id ?? kn?.Properties?.Link;
+                        if (Guid.TryParse(idStr, out var gid)) nodeSet.Add(gid);
+                    }
+                }
+                // Auto-resolve nodes from resources
+                var autoNodes = await AutoFindKnowledgeNodesForResourcesAsync(lesson?.Resources);
+                foreach (var kn in autoNodes)
+                {
+                    var idStr = kn?.Properties?.Id ?? kn?.Properties?.Link;
+                    if (Guid.TryParse(idStr, out var gid)) nodeSet.Add(gid);
+                }
+                lessonEntries.Add((key, lesson?.Id, nodeSet));
+                idx++;
+            }
+            idxSec++;
+        }
+
+        var allNodeIds = new HashSet<Guid>();
+        foreach (var e in lessonEntries) foreach (var n in e.NodeIds) allNodeIds.Add(n);
+
+        // Add plan-intro nodes
+        if (sp.Introduction?.AssociatedKnowledgeNodes != null)
+        {
+            foreach (var kn in sp.Introduction.AssociatedKnowledgeNodes)
+            {
+                var idStr = kn?.Properties?.Id ?? kn?.Properties?.Link;
+                if (Guid.TryParse(idStr, out var gid)) allNodeIds.Add(gid);
+            }
+        }
+
+        var graph = new GraphRepository(_neo4jDriver);
+        // Lesson tags suggestions
+        foreach (var e in lessonEntries)
+        {
+            if (e.NodeIds.Count == 0) { result.Lessons.Add((e.Key, e.LessonId, new List<TagDTO>())); continue; }
+            var tags = await graph.GetAllTagsRelatedToNodesAsync(e.NodeIds);
+            var tagList = tags.ToList();
+            if (_tagRepo != null && tagList.Count > 0)
+            {
+                var nameMap = await _tagRepo.GetTagNamesAsync(tagList);
+                result.Lessons.Add((e.Key, e.LessonId, tagList.Select(id => new TagDTO { Id = id, Name = nameMap.TryGetValue(id, out var nm) ? nm : null }).ToList()));
+            }
+            else
+            {
+                result.Lessons.Add((e.Key, e.LessonId, tagList.Select(id => new TagDTO { Id = id }).ToList()));
+            }
+        }
+
+        // Plan-level using scoring (coverage + lesson frequency)
+        if (allNodeIds.Count > 0)
+        {
+            var coverage = await graph.GetTagCountsForNodesAsync(allNodeIds);
+            var lessonFreq = new Dictionary<Guid, int>();
+            foreach (var e in lessonEntries)
+            {
+                if (e.NodeIds.Count == 0) continue;
+                var tags = await graph.GetAllTagsRelatedToNodesAsync(e.NodeIds);
+                foreach (var t in tags)
+                    lessonFreq[t] = lessonFreq.TryGetValue(t, out var v) ? (v + 1) : 1;
+            }
+
+            var maxCov = coverage.Count > 0 ? coverage.Values.Max() : 1;
+            var maxLesson = lessonEntries.Count > 0 ? lessonEntries.Count : 1;
+            var tagIds = new HashSet<Guid>(coverage.Keys.Concat(lessonFreq.Keys));
+            var scored = tagIds.Select(id => new
+            {
+                Id = id,
+                Score = 0.6 * ((coverage.TryGetValue(id, out var cc) ? (double)cc : 0) / maxCov)
+                      + 0.4 * ((lessonFreq.TryGetValue(id, out var ff) ? (double)ff : 0) / maxLesson)
+            })
+            .OrderByDescending(x => x.Score)
+            .Take(10)
+            .Select(x => x.Id)
+            .ToList();
+
+            if (_tagRepo != null)
+            {
+                var nameMap = await _tagRepo.GetTagNamesAsync(scored);
+                result.PlanTags = scored.Select(id => new TagDTO { Id = id, Name = nameMap.TryGetValue(id, out var nm) ? nm : null }).ToList();
+            }
+            else
+            {
+                result.PlanTags = scored.Select(id => new TagDTO { Id = id }).ToList();
+            }
+        }
+
+        return result;
     }
 
     // 小工具函数，计算Progress
@@ -913,12 +1159,16 @@ public class StudyPlanService
             OPTIONAL MATCH (sp)-[hs:HAS_STEP]->(l:Lesson)
             OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(lk:KnowledgeNode)
             OPTIONAL MATCH (sp)-[:ASSOCIATED_WITH]->(sk:KnowledgeNode)
+            OPTIONAL MATCH (tt:Tag)-[:TAGGED_WITH]->(sp)
+            OPTIONAL MATCH (t2:Tag)-[:TAGGED_WITH]->(l)
             RETURN sp.id AS studyPlanId,
                    l.id AS lessonId,
                    hs.type AS stepType,
                    hs.order AS stepOrder,
                    collect(DISTINCT lk) AS lessonKnowledgeNodes,
-                   collect(DISTINCT sk) AS studyPlanKnowledgeNodes
+                   collect(DISTINCT sk) AS studyPlanKnowledgeNodes,
+                   collect(DISTINCT tt.id) AS planTagIds,
+                   collect(DISTINCT t2.id) AS lessonTagIds
             ORDER BY hs.order";
 
             var result = await session.RunAsync(cypherQuery, new { studyPlanId });
@@ -946,8 +1196,20 @@ public class StudyPlanService
                 },
                 Prerequisite = new List<Lesson>(),
                 MainCurriculum = new List<Lesson>(),
-                AdvancedTopics = new List<Lesson>()
+                AdvancedTopics = new List<Lesson>(),
+                Tags = new List<TagDTO>()
             };
+
+            // Populate plan-level tags (IDs only to avoid extra DB hits here)
+            var planTagObjs = recordList.FirstOrDefault()?["planTagIds"]?.As<List<object>>() ?? new List<object>();
+            foreach (var o in planTagObjs)
+            {
+                if (o == null) continue;
+                if (Guid.TryParse(o.ToString(), out var gid))
+                {
+                    studyPlanDetail.Tags!.Add(new TagDTO { Id = gid });
+                }
+            }
 
             var lessonMap = new Dictionary<string, Lesson>();
             foreach (var record in recordList)
@@ -965,16 +1227,26 @@ public class StudyPlanService
                     // 懒加载：Resources 不在此接口返回
                     Resources = null,
                     AssociatedKnowledgeNodes = record["lessonKnowledgeNodes"]
-                        ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>()
+                        ?.As<List<INode>>()?.Select(MapNode).ToList() ?? new List<Node>(),
+                    Tags = new List<TagDTO>()
                 };
+                var lessonTagObjs = record["lessonTagIds"]?.As<List<object>>() ?? new List<object>();
+                foreach (var o in lessonTagObjs)
+                {
+                    if (o == null) continue;
+                    if (Guid.TryParse(o.ToString(), out var gid))
+                    {
+                        lesson.Tags!.Add(new TagDTO { Id = gid });
+                    }
+                }
                 lessonMap[lessonId] = lesson;
 
                 var stepType = record["stepType"]?.As<string>();
-                if (stepType == "PREREQUISITE")
+                if (stepType == StudyPlanStepTypes.Prerequisite)
                     studyPlanDetail.Prerequisite.Add(lesson);
-                else if (stepType == "MAIN_CURRICULUM")
+                else if (stepType == StudyPlanStepTypes.MainCurriculum)
                     studyPlanDetail.MainCurriculum.Add(lesson);
-                else if (stepType == "ADVANCED_TOPIC")
+                else if (stepType == StudyPlanStepTypes.AdvancedTopic)
                     studyPlanDetail.AdvancedTopics.Add(lesson);
             }
 
@@ -986,6 +1258,205 @@ public class StudyPlanService
         {
             await session.CloseAsync();
         }
+    }
+
+    // Tag helpers
+    public async Task<List<TagDTO>> GetPlanTagsAsync(string planId)
+    {
+        using var session = _neo4jDriver.AsyncSession();
+        var tagIds = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = "MATCH (t:Tag)-[:TAGGED_WITH]->(p:StudyPlan {id:$planId}) RETURN t.id AS id";
+            var cur = await tx.RunAsync(cypher, new { planId });
+            var list = await cur.ToListAsync(r => r["id"].As<string?>());
+            return list.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        });
+        var ids = new List<Guid>();
+        foreach (var s in tagIds) if (Guid.TryParse(s, out var g)) ids.Add(g);
+        if (_tagRepo == null || ids.Count == 0) return ids.Select(x => new TagDTO { Id = x }).ToList();
+        var names = await _tagRepo.GetTagNamesAsync(ids);
+        return ids.Select(id => new TagDTO { Id = id, Name = names.TryGetValue(id, out var nm) ? nm : null }).ToList();
+    }
+
+    public async Task<List<TagDTO>> GetLessonTagsAsync(string planId, string lessonId)
+    {
+        using var session = _neo4jDriver.AsyncSession();
+        var tagIds = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"MATCH (:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson {id:$lessonId})
+                           MATCH (t:Tag)-[:TAGGED_WITH]->(l)
+                           RETURN t.id AS id";
+            var cur = await tx.RunAsync(cypher, new { planId, lessonId });
+            var list = await cur.ToListAsync(r => r["id"].As<string?>());
+            return list.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        });
+        var ids = new List<Guid>();
+        foreach (var s in tagIds) if (Guid.TryParse(s, out var g)) ids.Add(g);
+        if (_tagRepo == null || ids.Count == 0) return ids.Select(x => new TagDTO { Id = x }).ToList();
+        var names = await _tagRepo.GetTagNamesAsync(ids);
+        return ids.Select(id => new TagDTO { Id = id, Name = names.TryGetValue(id, out var nm) ? nm : null }).ToList();
+    }
+
+    public async Task<bool> UpdatePlanTagsAsync(string planId, List<Guid>? tagIds, List<string>? newTagNames, string userId)
+    {
+        var ids = (tagIds ?? new List<Guid>()).Where(x => x != Guid.Empty).Distinct().ToList();
+        var newNames = (newTagNames ?? new List<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
+        // Resolve new names
+        if (newNames.Count > 0 && _tagResolution != null)
+        {
+            var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newNames, userId);
+            ids.AddRange(resolved);
+        }
+        ids = ids.Distinct().Take(10).ToList();
+        using var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            return await session.ExecuteWriteAsync(async tx =>
+            {
+                var cypher = @"
+MATCH (p:StudyPlan {id:$planId})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(p)
+DELETE r
+WITH p
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(p))
+RETURN p.id AS id";
+                var p = new { planId, ids = ids.Select(x => x.ToString()).ToList() };
+                var cur = await tx.RunAsync(cypher, p);
+                var rec = await cur.SingleAsync();
+                return rec["id"].As<string>() != null;
+            });
+        }
+        catch { return false; }
+    }
+
+    public async Task<bool> UpdateLessonTagsAsync(string planId, string lessonId, List<Guid>? tagIds, List<string>? newTagNames, string userId)
+    {
+        var ids = (tagIds ?? new List<Guid>()).Where(x => x != Guid.Empty).Distinct().ToList();
+        var newNames = (newTagNames ?? new List<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
+        if (newNames.Count > 0 && _tagResolution != null)
+        {
+            var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newNames, userId);
+            ids.AddRange(resolved);
+        }
+        ids = ids.Distinct().Take(10).ToList();
+        using var session = _neo4jDriver.AsyncSession();
+        try
+        {
+            return await session.ExecuteWriteAsync(async tx =>
+            {
+                var cypher = @"
+MATCH (:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson {id:$lessonId})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(l)
+DELETE r
+WITH l
+FOREACH (tid IN $ids | MERGE (t:Tag {id: tid}) MERGE (t)-[:TAGGED_WITH]->(l))
+RETURN l.id AS id";
+                var p = new { planId, lessonId, ids = ids.Select(x => x.ToString()).ToList() };
+                var cur = await tx.RunAsync(cypher, p);
+                var rec = await cur.SingleAsync();
+                return rec["id"].As<string>() != null;
+            });
+        }
+        catch { return false; }
+    }
+
+    public async Task<List<TagDTO>> SuggestLessonTagsAsync(string planId, string lessonId)
+    {
+        // Gather associated knowledge nodes from lesson and nodes inferred by resources
+        using var session = _neo4jDriver.AsyncSession();
+        var res = await session.RunAsync(@"
+MATCH (:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson {id:$lessonId})
+OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(k:KnowledgeNode)
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (k2:KnowledgeNode)-[:HAS_RESOURCE]->(r)
+RETURN collect(DISTINCT k.id) AS kn1, collect(DISTINCT k2.id) AS kn2",
+            new { planId, lessonId });
+        var rec = await res.SingleAsync();
+        var kn1 = rec["kn1"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        var kn2 = rec["kn2"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        var all = kn1.Concat(kn2).Distinct().ToList();
+        var gids = new List<Guid>();
+        foreach (var s in all) if (Guid.TryParse(s, out var g)) gids.Add(g);
+        if (_tagRepo == null || gids.Count == 0) return new List<TagDTO>();
+        // Tags related to these nodes
+        var graph = new GraphRepository(_neo4jDriver);
+        var tags = await graph.GetAllTagsRelatedToNodesAsync(gids);
+        var names = await _tagRepo.GetTagNamesAsync(tags);
+        return tags.Select(id => new TagDTO { Id = id, Name = names.TryGetValue(id, out var nm) ? nm : null }).ToList();
+    }
+
+    public async Task<List<TagDTO>> SuggestPlanTagsAsync(string planId)
+    {
+        // Compute plan-level tags differently from lesson-level: rank by (node coverage across plan) and (lesson frequency)
+        using var session = _neo4jDriver.AsyncSession();
+        var res = await session.RunAsync(@"
+MATCH (p:StudyPlan {id:$planId})
+OPTIONAL MATCH (p)-[:ASSOCIATED_WITH]->(kp:KnowledgeNode)
+OPTIONAL MATCH (p)-[:HAS_STEP]->(l:Lesson)
+OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(kl:KnowledgeNode)
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)<-[:HAS_RESOURCE]-(kr:KnowledgeNode)
+RETURN collect(DISTINCT kp.id) AS kpIds,
+       collect(DISTINCT l.id) AS lessonIds,
+       collect(DISTINCT kl.id) + collect(DISTINCT kr.id) AS lessonNodeIds",
+            new { planId });
+        var row = await res.SingleAsync();
+        var kpIds = row["kpIds"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+        var lessonIds = row["lessonIds"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+        var lessonNodeIds = row["lessonNodeIds"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+        var allNodeGuids = new HashSet<Guid>();
+        foreach (var s in kpIds.Concat(lessonNodeIds)) { if (Guid.TryParse(s, out var g)) allNodeGuids.Add(g); }
+
+        var graph = new GraphRepository(_neo4jDriver);
+        // Coverage: how many distinct nodes in the whole plan bear this tag
+        var coverage = await graph.GetTagCountsForNodesAsync(allNodeGuids);
+
+        // Lesson frequency: in how many lessons does the tag appear
+        var lessonFreq = new Dictionary<Guid, int>();
+        foreach (var lid in lessonIds)
+        {
+            if (string.IsNullOrWhiteSpace(lid)) continue;
+            // obtain node ids for this lesson
+            var cur = await session.RunAsync(@"
+MATCH (:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson {id:$lessonId})
+OPTIONAL MATCH (l)-[:ASSOCIATED_WITH]->(k:KnowledgeNode)
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)<-[:HAS_RESOURCE]-(k2:KnowledgeNode)
+RETURN collect(DISTINCT k.id) + collect(DISTINCT k2.id) AS ids",
+                new { planId, lessonId = lid });
+            var rec2 = await cur.SingleAsync();
+            var idStrs = rec2["ids"].As<List<object>>().Select(x => x?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+            var nodeSet = new HashSet<Guid>();
+            foreach (var s in idStrs) { if (Guid.TryParse(s, out var g)) nodeSet.Add(g); }
+            if (nodeSet.Count == 0) continue;
+            var tagsForLesson = await graph.GetAllTagsRelatedToNodesAsync(nodeSet);
+            foreach (var t in tagsForLesson)
+            {
+                lessonFreq[t] = lessonFreq.TryGetValue(t, out var v) ? (v + 1) : 1;
+            }
+        }
+
+        if (coverage.Count == 0 && lessonFreq.Count == 0) return new List<TagDTO>();
+        var maxCov = coverage.Count > 0 ? coverage.Values.Max() : 1;
+        var maxLesson = lessonIds.Count > 0 ? lessonIds.Count : 1;
+        // Combine scores
+        var tagIds = new HashSet<Guid>(coverage.Keys.Concat(lessonFreq.Keys));
+        var scored = tagIds.Select(id => new
+        {
+            Id = id,
+            Coverage = coverage.TryGetValue(id, out var c) ? c : 0,
+            LessonCount = lessonFreq.TryGetValue(id, out var f) ? f : 0,
+            Score = 0.6 * ((coverage.TryGetValue(id, out var cc) ? (double)cc : 0) / maxCov)
+                  + 0.4 * ((lessonFreq.TryGetValue(id, out var ff) ? (double)ff : 0) / maxLesson)
+        })
+        .OrderByDescending(x => x.Score)
+        .ThenByDescending(x => x.Coverage)
+        .ThenByDescending(x => x.LessonCount)
+        .Take(10)
+        .ToList();
+
+        if (_tagRepo == null)
+            return scored.Select(x => new TagDTO { Id = x.Id }).ToList();
+        var nameMap = await _tagRepo.GetTagNamesAsync(scored.Select(s => s.Id));
+        return scored.Select(x => new TagDTO { Id = x.Id, Name = nameMap.TryGetValue(x.Id, out var nm) ? nm : null }).ToList();
     }
 
     public class LessonDetailDto

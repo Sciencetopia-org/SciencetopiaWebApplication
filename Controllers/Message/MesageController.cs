@@ -2,6 +2,10 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
+using Sciencetopia.Services.Messaging;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Sciencetopia.Controllers.Messaging;
 
@@ -11,11 +15,15 @@ public class MessageController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly UserService _userService;
+    private readonly BlobServiceClient _blobServiceClient;
+    private readonly MessageAttachmentService _attachmentService;
 
-    public MessageController(ApplicationDbContext context, UserService userService)
+    public MessageController(ApplicationDbContext context, UserService userService, BlobServiceClient blobServiceClient, MessageAttachmentService attachmentService)
     {
         _context = context;
         _userService = userService;
+        _blobServiceClient = blobServiceClient;
+        _attachmentService = attachmentService;
     }
     // POST: api/Message
     [HttpPost("SendMessage")]
@@ -79,13 +87,17 @@ public class MessageController : ControllerBase
                 Messages = group.Messages,
             };
 
-            groupedMessageDto.PartnerAvatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(group.PartnerId);
+            if (!string.IsNullOrEmpty(group.PartnerId))
+            {
+                groupedMessageDto.PartnerAvatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(group.PartnerId);
+            }
 
             foreach (var message in groupedMessageDto.Messages)
             {
-                if (message.Sender != null)
+                message.Content = _attachmentService.GetClientReadableContent(message.Content);
+                if (message.Sender != null && !string.IsNullOrEmpty(message.Sender.Id))
                 {
-                    var avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(message.Sender.Id!);
+                    var avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(message.Sender.Id);
                     message.Sender.AvatarUrl = avatarUrl;
                 }
             }
@@ -132,7 +144,9 @@ public class MessageController : ControllerBase
 
         // Fetch partner details
         var partnerName = partnerId != null ? await _userService.GetUserNameByIdAsync(partnerId) : "Unknown";
-        var partnerAvatarUrl = partnerId != null ? await _userService.FetchUserAvatarUrlByIdAsync(partnerId) : null;
+        var partnerAvatarUrl = !string.IsNullOrEmpty(partnerId)
+            ? await _userService.FetchUserAvatarUrlByIdAsync(partnerId)
+            : null;
 
         // Step 4: Populate the DTO with message details
         var conversationDto = new GroupedMessageDTO
@@ -145,7 +159,7 @@ public class MessageController : ControllerBase
             Messages = conversationGroup.Select(m => new MessageWithUserDetailsDTO
             {
                 Id = m.Id,
-                Content = m.Content,
+                Content = _attachmentService.GetClientReadableContent(m.Content),
                 SentTime = m.SentTime,
                 Sender = new UserDetailsDTO
                 {
@@ -181,4 +195,39 @@ public class MessageController : ControllerBase
 
         return Ok(new { Message = "Messages marked as read" });
     }
+
+    [HttpPost("UploadAttachment")]
+    [RequestSizeLimit(10_000_000)] // 10 MB
+    [Authorize]
+    public async Task<IActionResult> UploadAttachment(IFormFile file)
+    {
+        if (file == null || file.Length == 0)
+        {
+            return BadRequest("Invalid file.");
+        }
+
+        try
+        {
+            var container = _blobServiceClient.GetBlobContainerClient("message-attachments");
+            await container.CreateIfNotExistsAsync();
+
+            var ext = Path.GetExtension(file.FileName);
+            var name = $"{Guid.NewGuid()}{ext}";
+            var blob = container.GetBlobClient(name);
+
+            await using (var stream = file.OpenReadStream())
+            {
+                await blob.UploadAsync(stream, new BlobHttpHeaders { ContentType = file.ContentType });
+            }
+
+            var storedContent = _attachmentService.NormalizeForStorage(blob.Uri.ToString());
+            var sasUri = _attachmentService.GetClientReadableContent(storedContent);
+            return Ok(new { url = sasUri });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
 }

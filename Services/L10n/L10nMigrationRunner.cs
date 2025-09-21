@@ -128,7 +128,7 @@ namespace Sciencetopia.Services.L10n
                     {
                         var item = new L10nItem
                         {
-                            FieldKey = "title",
+                            FieldKey = "name",
                             LangCode = t.Language,
                             Kind = L10nItemKind.Primary,
                             Text = t.Name,
@@ -169,7 +169,7 @@ namespace Sciencetopia.Services.L10n
                         var baseLang = DetectLangCode(node.Name);
                         var item = new L10nItem
                         {
-                            FieldKey = "title",
+                            FieldKey = "name",
                             LangCode = baseLang,
                             Kind = L10nItemKind.Primary,
                             Text = node.Name,
@@ -239,7 +239,7 @@ namespace Sciencetopia.Services.L10n
                     {
                         if (!string.IsNullOrWhiteSpace(tr.Name))
                         {
-                            var tItem = new L10nItem { FieldKey = "title", LangCode = tr.Language, Kind = L10nItemKind.Primary, Text = tr.Name };
+                            var tItem = new L10nItem { FieldKey = "name", LangCode = tr.Language, Kind = L10nItemKind.Primary, Text = tr.Name };
                             if (!dryRun)
                             {
                                 _db.L10nItems.Add(tItem);
@@ -264,7 +264,7 @@ namespace Sciencetopia.Services.L10n
                     if (!string.IsNullOrWhiteSpace(tag.Name))
                     {
                         var lang = DetectLangCode(tag.Name);
-                        var tItem = new L10nItem { FieldKey = "title", LangCode = lang, Kind = L10nItemKind.Primary, Text = tag.Name };
+                        var tItem = new L10nItem { FieldKey = "name", LangCode = lang, Kind = L10nItemKind.Primary, Text = tag.Name };
                         if (!dryRun)
                         {
                             _db.L10nItems.Add(tItem);

@@ -70,6 +70,7 @@ public interface IGraphRepository
     Task SetTagStatusRejectedAsync(string tagId);
     Task DetachResourcesFromNodeAsync(string nodeId);
     Task ApproveNodeResourceRelationsAsync(string nodeId);
+    Task<Dictionary<Guid, int>> GetTagCountsForNodesAsync(IEnumerable<Guid> nodeIds);
 }
 
 public class GraphRepository : IGraphRepository
@@ -259,25 +260,42 @@ public class GraphRepository : IGraphRepository
     public async Task<HashSet<(Guid NodeId, Guid TagId, string TagLevel)>> GetAllNodesRelatedToTagsInViewAsync(
         IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels)
     {
+        if (tagIds == null)
+        {
+            return new HashSet<(Guid, Guid, string)>();
+        }
+
+        var zoomLevelArray = (zoomLevels ?? Enumerable.Empty<string>()).ToArray();
+        if (zoomLevelArray.Length == 0)
+        {
+            return new HashSet<(Guid, Guid, string)>();
+        }
+
         using var session = _driver.AsyncSession();
         var query = @"
-        MATCH (t:Tag)
-        WHERE t.id IN $tagIds
-        MATCH (t)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+        UNWIND $tagIds AS id
+        MATCH (t:Tag {id: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
         WHERE l.name IN $zoomLevels
           AND (n.status IS NULL OR n.status <> 'pending_approval')
-        RETURN DISTINCT n.id AS NodeId, t.id AS TagId, l.name AS TagLevel
+        RETURN DISTINCT n.id AS NodeId, id AS TagId, l.name AS TagLevel
     ";
-        var result = await session.RunAsync(query, new { tagIds = tagIds.Select(id => id.ToString()), zoomLevels });
-        var records = await result.ToListAsync();
 
-        return records
-            .Select(r => (
-                NodeId: Guid.Parse(r["NodeId"].As<string>()),
-                TagId: Guid.Parse(r["TagId"].As<string>()),
-                TagLevel: r["TagLevel"].As<string>()
-            ))
-            .ToHashSet();
+        var nodeTagTriples = new HashSet<(Guid NodeId, Guid TagId, string TagLevel)>();
+        var tagIdStrings = tagIds.Select(id => id.ToString()).ToArray();
+
+        foreach (var chunk in tagIdStrings.Chunk(500))
+        {
+            var cursor = await session.RunAsync(query, new { tagIds = chunk, zoomLevels = zoomLevelArray });
+            await cursor.ForEachAsync(record =>
+            {
+                var nodeId = Guid.Parse(record["NodeId"].As<string>());
+                var tagId = Guid.Parse(record["TagId"].As<string>());
+                var tagLevel = record["TagLevel"].As<string>();
+                nodeTagTriples.Add((nodeId, tagId, tagLevel));
+            });
+        }
+
+        return nodeTagTriples;
     }
 
     public async Task<HashSet<Guid>> GetTagsRelatedToNodeAsync(Guid nodeId)
@@ -695,5 +713,26 @@ public class GraphRepository : IGraphRepository
         var records = await result.ToListAsync();
 
         return records.Select(r => Guid.Parse(r["NodeId"].As<string>())).ToHashSet();
+    }
+
+    public async Task<Dictionary<Guid, int>> GetTagCountsForNodesAsync(IEnumerable<Guid> nodeIds)
+    {
+        var result = new Dictionary<Guid, int>();
+        var ids = (nodeIds ?? Enumerable.Empty<Guid>()).Select(x => x.ToString()).Distinct().ToList();
+        if (ids.Count == 0) return result;
+        using var session = _driver.AsyncSession();
+        var cypher = @"
+UNWIND $nodeIds AS nid
+MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode {id: nid})
+RETURN t.id AS tagId, count(DISTINCT n) AS cnt";
+        var cursor = await session.RunAsync(cypher, new { nodeIds = ids });
+        var rows = await cursor.ToListAsync();
+        foreach (var r in rows)
+        {
+            var tagIdStr = r["tagId"].As<string?>();
+            var cnt = r["cnt"].As<int>();
+            if (Guid.TryParse(tagIdStr, out var gid)) result[gid] = cnt;
+        }
+        return result;
     }
 }

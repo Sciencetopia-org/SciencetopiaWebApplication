@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
+using Sciencetopia.Services.Messaging;
 using Sciencetopia.Models;
 using Sciencetopia.Hubs;
 using Sciencetopia.Authorization;
@@ -14,6 +15,7 @@ using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+// Modular backend moved into its own project
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -42,6 +44,7 @@ builder.Services.AddSingleton<IUserIdProvider, CustomUserIdProvider>();
 builder.Services.AddScoped<IGraphRepository, GraphRepository>();
 builder.Services.AddScoped<IKnowledgeNodeRepository, KnowledgeNodeRepository>();
 builder.Services.AddScoped<ITagRepository, TagRepository>();
+builder.Services.AddScoped<ITagResolutionService, TagResolutionService>();
 builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
 builder.Services.AddScoped<INodeApprovalRepository, NodeApprovalRepository>();
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
@@ -110,6 +113,7 @@ builder.Services.AddSingleton(x =>
     var connectionString = configuration["AzureBlobStorage:ConnectionString"];
     return new BlobServiceClient(connectionString);
 });
+builder.Services.AddSingleton<MessageAttachmentService>();
 
 // // 注册您的 DataSyncService 作为后台服务
 // builder.Services.AddHostedService<DataSyncService>();
@@ -157,7 +161,8 @@ builder.Services.AddSwaggerGen(c =>
 
     // Remove any global security requirements if present
     // This ensures that security is only applied where explicitly specified
-    c.OperationFilter<AuthorizeCheckOperationFilter>(); // Ensure this is added
+    c.OperationFilter<AuthorizeCheckOperationFilter>();
+    c.OperationFilter<SciencetopiaWebApplication.Filters.LangParameterOperationFilter>();
 });
 
 
@@ -201,6 +206,8 @@ builder.Services.AddAuthorization(options =>
 
 // Add logging service
 builder.Services.AddLogging();
+
+// Modular backend is no longer discovered in this app
 
 // Add OpenAI Service
 builder.Services.AddOpenAIService(options =>

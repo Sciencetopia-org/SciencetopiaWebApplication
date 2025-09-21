@@ -10,6 +10,7 @@ namespace Sciencetopia.Models
 
     public class NodeProperties
     {
+        public string? Id { get; set; }
         public string? Link { get; set; }
         public string? Name { get; set; }
     }

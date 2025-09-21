@@ -1,5 +1,6 @@
-using Neo4j.Driver;
+using System;
 using System.Linq;
+using Neo4j.Driver;
 using Sciencetopia.Models;
 using Microsoft.AspNetCore.Identity;
 using Azure.Storage.Blobs;
@@ -58,10 +59,12 @@ public class UserService
         return user?.UserName ?? string.Empty; // Return the UserName if user exists, otherwise an empty string
     }
 
-    private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, int validMinutes = 30)
+    private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, TimeSpan? lifetime = null)
     {
         var containerClient = blobServiceClient.GetBlobContainerClient(containerName);
         var blobClient = containerClient.GetBlobClient(blobName);
+
+        var sasLifetime = lifetime ?? TimeSpan.FromDays(30);
 
         var sasBuilder = new BlobSasBuilder()
         {
@@ -69,7 +72,7 @@ public class UserService
             BlobName = blobClient.Name,
             Resource = "b", // b for blob
             StartsOn = DateTimeOffset.UtcNow,
-            ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(validMinutes)
+            ExpiresOn = DateTimeOffset.UtcNow.Add(sasLifetime)
         };
 
         sasBuilder.SetPermissions(BlobSasPermissions.Read);

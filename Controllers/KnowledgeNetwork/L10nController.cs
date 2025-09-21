@@ -12,14 +12,14 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         public L10nController(IL10nService l10n) { _l10n = l10n; }
 
         [HttpGet("{id:guid}/l10n")]
-        public async Task<ActionResult<string?>> GetLocalized(Guid id, [FromQuery] string field = "title", [FromQuery] string? lang = null)
+        public async Task<ActionResult<string?>> GetLocalized(Guid id, [FromQuery] string field = "name", [FromQuery] string? lang = null)
         {
             var value = await _l10n.GetLocalizedAsync(id, field, lang);
             return Ok(value);
         }
 
         [HttpGet("{id:guid}/l10n/items")]
-        public async Task<ActionResult<IEnumerable<L10nItemDto>>> List(Guid id, [FromQuery] string field = "title")
+        public async Task<ActionResult<IEnumerable<L10nItemDto>>> List(Guid id, [FromQuery] string field = "name")
         {
             var items = await _l10n.ListAsync(id, field);
             return Ok(items);

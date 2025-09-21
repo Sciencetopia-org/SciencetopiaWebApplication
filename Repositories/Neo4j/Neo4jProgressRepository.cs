@@ -1,4 +1,5 @@
 using Neo4j.Driver;
+using Sciencetopia.Constants;
 using Sciencetopia.DTOs;
 
 namespace Sciencetopia.Repositories.Neo4j;
@@ -56,7 +57,7 @@ DELETE c
         var (completed, total) = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (p:StudyPlan {id:$planId})-[:HAS_LESSON]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
+MATCH (p:StudyPlan {id:$planId})-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
 OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
@@ -66,8 +67,25 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
             var rec = await cursor.SingleAsync();
             return (rec["completed"].As<int>(), rec["totalResources"].As<int>());
         });
-        var progress = total == 0 ? 0.0 : (double)completed / total;
-        return new UserPlanProgressDto(progress, Enumerable.Empty<UserLessonProgressDto>());
+        var progress = total == 0 ? 0.0 : ((double)completed / total) * 100.0;
+        // Advanced-only progress
+        var (advCompleted, advTotal) = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+MATCH (p:StudyPlan {id:$planId})-[hs:HAS_STEP]->(l:Lesson)
+WHERE hs.type IN $advancedTypes
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+WITH COLLECT(DISTINCT r) AS total
+OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+WHERE rc IN total
+RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
+";
+            var cursor = await tx.RunAsync(cypher, new { planId = planId.ToString(), userId, advancedTypes = StudyPlanStepTypes.AdvancedTopicAliases });
+            var rec = await cursor.SingleAsync();
+            return (rec["completed"].As<int>(), rec["totalResources"].As<int>());
+        });
+        var advProgress = advTotal == 0 ? 0.0 : ((double)advCompleted / advTotal) * 100.0;
+        return new UserPlanProgressDto(progress, Enumerable.Empty<UserLessonProgressDto>(), advProgress);
     }
 
     public async Task<UserLessonProgressDto> GetMyLessonProgressAsync(string userId, Guid lessonId)
@@ -101,7 +119,7 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
         var perLesson = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (p:StudyPlan {id:$planId})-[:HAS_LESSON]->(l:Lesson)
+MATCH (p:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson)
 OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
 WITH l, COLLECT(DISTINCT r) AS total
 OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
@@ -123,7 +141,7 @@ RETURN l.id AS lessonId, completed AS completed, totalResources AS totalResource
             return list;
         });
 
-        return new UserPlanProgressDto(overall.planProgress, perLesson);
+        return new UserPlanProgressDto(overall.planProgress, perLesson, overall.advancedTopicProgress);
     }
 
     public async Task<CohortSummaryDto> GetCohortSummaryAsync(Guid cohortId)

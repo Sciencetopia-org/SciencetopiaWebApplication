@@ -23,7 +23,7 @@ namespace Sciencetopia.Controllers.StudyPlan
         }
 
         [HttpPost("SaveStudyPlan")]
-        public async Task<IActionResult> SaveStudyPlan([FromBody] StudyPlanDTO studyPlanDTO)
+        public async Task<IActionResult> SaveStudyPlan([FromBody] StudyPlanDTO studyPlanDTO, [FromQuery] bool autoTag = false)
         {
             // Retrieve the user's ID from the ClaimsPrincipal
             string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
@@ -34,15 +34,12 @@ namespace Sciencetopia.Controllers.StudyPlan
                 return Unauthorized("User is not authenticated.");
             }
 
-            var result = await _studyPlanService.SaveStudyPlanAsync(studyPlanDTO, userId);
-            if (result)
+            var id = await _studyPlanService.SaveStudyPlanAsync(studyPlanDTO, userId, autoTag);
+            if (!string.IsNullOrEmpty(id))
             {
-                return Ok(); // Plan saved successfully
+                return Ok(new { studyPlanId = id }); // Plan saved successfully
             }
-            else
-            {
-                return BadRequest("该学习计划已经存在。");
-            }
+            return BadRequest("该学习计划已经存在。");
         }
 
         [HttpGet("FetchStudyPlans")]

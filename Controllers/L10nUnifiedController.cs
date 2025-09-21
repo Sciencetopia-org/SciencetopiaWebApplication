@@ -17,7 +17,7 @@ namespace SciencetopiaWebApplication.Controllers
         }
 
         [HttpGet("{scope}/{id:guid}")]
-        public async Task<ActionResult<string?>> Get(string scope, Guid id, [FromQuery] string field = "title", [FromQuery] string? lang = null)
+        public async Task<ActionResult<string?>> Get(string scope, Guid id, [FromQuery] string field = "name", [FromQuery] string? lang = null)
         {
             lang ??= _langCtx.EffectiveLang;
             string? value = scope switch
@@ -30,7 +30,7 @@ namespace SciencetopiaWebApplication.Controllers
         }
 
         [HttpGet("{scope}/{id:guid}/items")]
-        public async Task<ActionResult<IEnumerable<L10nItemDto>>> List(string scope, Guid id, [FromQuery] string field = "title")
+        public async Task<ActionResult<IEnumerable<L10nItemDto>>> List(string scope, Guid id, [FromQuery] string field = "name")
         {
             var items = scope switch
             {

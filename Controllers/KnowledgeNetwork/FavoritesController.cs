@@ -28,13 +28,17 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
-            // 查询该用户的默认收藏夹（type: "favorite"）
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'}), (n)
-                WHERE id(n) = $nodeId
+                MATCH (n {id: $nodeId})
+                MERGE (u:User {id: $userId})
+                MERGE (u)-[:OWNS]->(f:Favorite {type: 'favorite'})
+                WITH f, n
                 OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
                 WITH f, n, r
                 CALL apoc.do.when(
@@ -43,16 +47,21 @@ public class FavoritesController : ControllerBase
                     'DELETE r RETURN false AS favorited',
                     {f: f, n: n, r: r}
                 ) YIELD value
-                RETURN n, value.favorited AS favorited
+                RETURN value.favorited AS favorited
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var peek = await result.PeekAsync();
+            if (peek == null)
+            {
+                return NotFound(new { success = false, message = "Node not found." });
+            }
+
             var record = await result.SingleAsync();
 
-            bool isFavorited = record["favorited"].As<bool>();
-            var node = record["n"];
+            bool isFavorited = record?["favorited"].As<bool>() ?? false;
 
-            return Ok(new { success = true, node, favorited = isFavorited });
+            return Ok(new { success = true, nodeId = parsedNodeId, favorited = isFavorited });
         }
         catch (Exception ex)
         {
@@ -65,12 +74,17 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'}), (n)
-                WHERE id(n) = $nodeId
+                MATCH (n {id: $nodeId})
+                MERGE (u:User {id: $userId})
+                MERGE (u)-[:OWNS]->(f:Favorite {type: 'learned'})
+                WITH f, n
                 OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
                 WITH f, n, r
                 CALL apoc.do.when(
@@ -79,16 +93,21 @@ public class FavoritesController : ControllerBase
                     'DELETE r RETURN false AS learned',
                     {f: f, n: n, r: r}
                 ) YIELD value
-                RETURN n, value.learned AS learned
+                RETURN value.learned AS learned
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var peek = await result.PeekAsync();
+            if (peek == null)
+            {
+                return NotFound(new { success = false, message = "Node not found." });
+            }
+
             var record = await result.SingleAsync();
 
-            bool isLearned = record["learned"].As<bool>();
-            var node = record["n"];
+            bool isLearned = record?["learned"]?.As<bool>() ?? false;
 
-            return Ok(new { success = true, node, learned = isLearned });
+            return Ok(new { success = true, nodeId = parsedNodeId, learned = isLearned });
         }
         catch (Exception ex)
         {
@@ -101,20 +120,27 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Ok(new { success = true, favorited = false });
+            }
+
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'}), (n)
-                WHERE id(n) = $nodeId
-                OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
-                RETURN CASE WHEN r IS NULL THEN false ELSE true END AS favorited
+                MATCH (n {id: $nodeId})
+                OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
+                RETURN CASE WHEN f IS NULL THEN false ELSE true END AS favorited
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
             var record = await result.SingleAsync();
 
-            bool isFavorited = record["favorited"].As<bool>();
+            bool isFavorited = record?["favorited"].As<bool>() ?? false;
             return Ok(new { success = true, favorited = isFavorited });
         }
         catch (Exception ex)
@@ -128,20 +154,27 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Ok(new { success = true, learned = false });
+            }
+
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'}), (n)
-                WHERE id(n) = $nodeId
-                OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
-                RETURN CASE WHEN r IS NULL THEN false ELSE true END AS learned
+                MATCH (n {id: $nodeId})
+                OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
+                RETURN CASE WHEN f IS NULL THEN false ELSE true END AS learned
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
             var record = await result.SingleAsync();
 
-            bool isLearned = record["learned"].As<bool>();
+            bool isLearned = record?["learned"].As<bool>() ?? false;
             return Ok(new { success = true, learned = isLearned });
         }
         catch (Exception ex)
@@ -215,17 +248,19 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n)
-                WHERE id(n) = $nodeId
+                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n {id: $nodeId})
                 DELETE r
                 RETURN n
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
             if (await result.FetchAsync())
             {
                 return Ok(new { success = true, message = "Node removed from favorites." });
@@ -250,17 +285,19 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            int parsedNodeId = Int32.Parse(nodeId);
+            if (!Guid.TryParse(nodeId, out Guid parsedNodeId))
+            {
+                return BadRequest(new { success = false, message = "Invalid node ID format." });
+            }
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n)
-                WHERE id(n) = $nodeId
+                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n {id: $nodeId})
                 DELETE r
                 RETURN n
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId });
+            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
             if (await result.FetchAsync())
             {
                 return Ok(new { success = true, message = "Node removed from learned list." });

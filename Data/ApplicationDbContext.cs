@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Models;
 
@@ -47,25 +48,51 @@ namespace Sciencetopia.Data
         public DbSet<Sciencetopia.Models.L10n.NodeL10nSet> NodeL10nSets => Set<Sciencetopia.Models.L10n.NodeL10nSet>();
         public DbSet<Sciencetopia.Models.L10n.L10nSetItem> L10nSetItems => Set<Sciencetopia.Models.L10n.L10nSetItem>();
         public DbSet<Sciencetopia.Models.L10n.TagL10nSet> TagL10nSets => Set<Sciencetopia.Models.L10n.TagL10nSet>();
+        public DbSet<TagRepresentativeNode> TagRepresentativeNodes { get; set; }  // Add DbSet for the new table
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
             base.OnModelCreating(builder);
 
-            builder.Entity<Tags>().ToTable("Tags");
-            builder.Entity<TypesOfTags>().ToTable("TypesOfTags");
-            builder.Entity<TagTypes>().ToTable("TagTypes");
-            builder.Entity<KnowledgeNode>().ToTable("KnowledgeNodes");
-            builder.Entity<Resource>().ToTable("Resources");
-            
+            // Identity -> Users schema
+            builder.Entity<ApplicationUser>().ToTable("AspNetUsers", schema: "Users");
+            builder.Entity<IdentityRole>().ToTable("AspNetRoles", schema: "Users");
+            builder.Entity<IdentityUserRole<string>>().ToTable("AspNetUserRoles", schema: "Users");
+            builder.Entity<IdentityUserClaim<string>>().ToTable("AspNetUserClaims", schema: "Users");
+            builder.Entity<IdentityUserLogin<string>>().ToTable("AspNetUserLogins", schema: "Users");
+            builder.Entity<IdentityRoleClaim<string>>().ToTable("AspNetRoleClaims", schema: "Users");
+            builder.Entity<IdentityUserToken<string>>().ToTable("AspNetUserTokens", schema: "Users");
+
+            builder.Entity<Tags>().ToTable("Tags", schema: "KnowledgeGraph");
+            builder.Entity<TypesOfTags>().ToTable("TypesOfTags", schema: "KnowledgeGraph");
+            builder.Entity<TagTypes>().ToTable("TagTypes", schema: "KnowledgeGraph");
+            builder.Entity<KnowledgeNode>().ToTable("KnowledgeNodes", schema: "KnowledgeGraph");
+            builder.Entity<KnowledgeNodeDraft>().ToTable("KnowledgeNodeDrafts", schema: "KnowledgeGraph");
+            builder.Entity<KnowledgeNodeVersion>().ToTable("KnowledgeNodeVersions", schema: "KnowledgeGraph");
+            builder.Entity<TagDraft>().ToTable("TagDrafts", schema: "KnowledgeGraph");
+            builder.Entity<TagVersion>().ToTable("TagVersions", schema: "KnowledgeGraph");
+            builder.Entity<Resource>().ToTable("Resources", schema: "KnowledgeGraph");
+
+            // Messages schema
+            builder.Entity<Message>().ToTable("Messages", schema: "Messages");
+            builder.Entity<Conversation>().ToTable("Conversations", schema: "Messages");
+            builder.Entity<Notification>().ToTable("Notifications", schema: "Messages");
+
+            // Logs schema
+            builder.Entity<VisitLog>().ToTable("VisitLogs", schema: "Logs");
+            builder.Entity<DailySummary>().ToTable("DailySummaries", schema: "Logs");
+
             // L10n tables
-            builder.Entity<Sciencetopia.Models.L10n.L10nSet>().ToTable("L10nSets");
-            builder.Entity<Sciencetopia.Models.L10n.L10nItem>().ToTable("L10nItems");
-            builder.Entity<Sciencetopia.Models.L10n.NodeL10nSet>().ToTable("NodeL10nSets");
-            builder.Entity<Sciencetopia.Models.L10n.L10nSetItem>().ToTable("L10nSetItems");
-            builder.Entity<Sciencetopia.Models.L10n.TagL10nSet>().ToTable("TagL10nSets");
+            builder.Entity<Sciencetopia.Models.L10n.L10nSet>().ToTable("L10nSets", schema: "L10n");
+            builder.Entity<Sciencetopia.Models.L10n.L10nItem>().ToTable("L10nItems", schema: "L10n");
+            builder.Entity<Sciencetopia.Models.L10n.NodeL10nSet>().ToTable("NodeL10nSets", schema: "L10n");
+            builder.Entity<Sciencetopia.Models.L10n.L10nSetItem>().ToTable("L10nSetItems", schema: "L10n");
+            builder.Entity<Sciencetopia.Models.L10n.TagL10nSet>().ToTable("TagL10nSets", schema: "L10n");
 
             // StudyPlans indexes & privacy (optional)
+            builder.Entity<StudyPlanEntity>().ToTable("StudyPlans", schema: "StudyPlans");
+            builder.Entity<LessonEntity>().ToTable("Lessons", schema: "StudyPlans");
+            builder.Entity<StudyGroupEntity>().ToTable("StudyGroups", schema: "StudyGroups");
             builder.Entity<StudyPlanEntity>(eb =>
             {
                 eb.HasIndex(x => x.CreatorId);
@@ -108,6 +135,7 @@ namespace Sciencetopia.Data
             // Configure Favorites table
             builder.Entity<Favorite>(entity =>
             {
+                entity.ToTable("Favorites", schema: "KnowledgeGraph");
                 entity.HasKey(f => f.Id);
 
                 entity.Property(f => f.UserId)
@@ -246,7 +274,7 @@ namespace Sciencetopia.Data
             // Versions & Drafts (StudyPlan/Lesson)
             builder.Entity<StudyPlanVersion>(eb =>
             {
-                eb.ToTable("StudyPlanVersions");
+                eb.ToTable("StudyPlanVersions", schema: "StudyPlans");
                 eb.HasKey(x => x.Id);
 
                 eb.HasIndex(x => new { x.StudyPlanId, x.VersionNumber })
@@ -266,7 +294,7 @@ namespace Sciencetopia.Data
 
             builder.Entity<LessonVersion>(eb =>
             {
-                eb.ToTable("LessonVersions");
+                eb.ToTable("LessonVersions", schema: "StudyPlans");
                 eb.HasKey(x => x.Id);
 
                 eb.HasIndex(x => new { x.LessonId, x.VersionNumber })
@@ -285,7 +313,7 @@ namespace Sciencetopia.Data
 
             builder.Entity<StudyPlanDraft>(eb =>
             {
-                eb.ToTable("StudyPlanDrafts");
+                eb.ToTable("StudyPlanDrafts", schema: "StudyPlans");
                 eb.HasKey(x => x.Id);
                 eb.HasIndex(x => new { x.StudyPlanId, x.DraftNumber }).IsUnique();
 
@@ -307,7 +335,7 @@ namespace Sciencetopia.Data
 
             builder.Entity<LessonDraft>(eb =>
             {
-                eb.ToTable("LessonDrafts");
+                eb.ToTable("LessonDrafts", schema: "StudyPlans");
                 eb.HasKey(x => x.Id);
                 eb.HasIndex(x => new { x.LessonId, x.DraftNumber }).IsUnique();
 
@@ -329,7 +357,7 @@ namespace Sciencetopia.Data
             // StudyGroupStudyPlans
             builder.Entity<StudyGroupStudyPlan>(eb =>
             {
-                eb.ToTable("StudyGroupStudyPlans");
+                eb.ToTable("StudyGroupStudyPlans", schema: "StudyGroups");
                 eb.HasKey(x => x.Id);
                 eb.HasIndex(x => new { x.StudyGroupId, x.StudyPlanId }).IsUnique();
                 eb.Property(x => x.Permission).HasMaxLength(16).IsRequired();
@@ -349,7 +377,7 @@ namespace Sciencetopia.Data
             // StudyPlanUserRoles
             builder.Entity<StudyPlanUserRole>(b =>
             {
-                b.ToTable("StudyPlanUserRoles");
+                b.ToTable("StudyPlanUserRoles", schema: "StudyPlans");
                 b.HasKey(x => new { x.PlanId, x.UserId });
 
                 b.Property(x => x.Role).HasConversion<byte>();
@@ -373,7 +401,7 @@ namespace Sciencetopia.Data
             // StudyGroupUserRoles
             builder.Entity<StudyGroupUserRole>(b =>
             {
-                b.ToTable("StudyGroupUserRoles");
+                b.ToTable("StudyGroupUserRoles", schema: "StudyGroups");
                 b.HasKey(x => new { x.GroupId, x.UserId });
 
                 b.Property(x => x.Role).HasConversion<byte>();
@@ -397,7 +425,7 @@ namespace Sciencetopia.Data
             // Cohorts (StudyPlanCohort)
             builder.Entity<StudyPlanCohort>(b =>
             {
-                b.ToTable("Cohorts");
+                b.ToTable("Cohorts", schema: "StudyPlans");
                 b.HasKey(x => x.Id);
                 b.Property(x => x.Title).HasMaxLength(200);
                 b.Property(x => x.Visibility).HasMaxLength(20).HasDefaultValue("private");
@@ -423,7 +451,26 @@ namespace Sciencetopia.Data
                   .OnDelete(DeleteBehavior.SetNull);
             });
 
-            // CohortMembers removed: membership tracked in graph (Neo4j)
+            // 映射 TagRepresentativeNode 到 KnowledgeGraph 架构下的表
+            builder.Entity<TagRepresentativeNode>()
+                .ToTable("TagRepresentativeNode", "KnowledgeGraph");  // 确保使用正确的架构
+
+            // 配置复合主键
+            builder.Entity<TagRepresentativeNode>()
+                .HasKey(tr => new { tr.TagId, tr.NodeId });  // TagId 和 NodeId 作为复合主键
+
+            // 配置外键关系
+            builder.Entity<TagRepresentativeNode>()
+                .HasOne<Tags>()
+                .WithMany()
+                .HasForeignKey(tr => tr.TagId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            builder.Entity<TagRepresentativeNode>()
+                .HasOne<KnowledgeNode>()
+                .WithMany()
+                .HasForeignKey(tr => tr.NodeId)
+                .OnDelete(DeleteBehavior.Cascade);
         }
     }
 }

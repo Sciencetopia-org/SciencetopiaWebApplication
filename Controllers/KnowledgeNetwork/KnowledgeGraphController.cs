@@ -59,7 +59,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         public async Task<IActionResult> GetNodeInView(
             [FromQuery] string tagSystem = "MainTag",
             [FromQuery] string viewType = "network",
-            string zoomLevel = "Field",
+            [FromQuery] string zoomLevel = "Field",
             [FromQuery] string lang = "zh")
         {
             string userId = User?.Identity?.IsAuthenticated == true

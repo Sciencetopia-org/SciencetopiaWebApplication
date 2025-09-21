@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Sciencetopia.Data;
 
@@ -11,9 +12,11 @@ using Sciencetopia.Data;
 namespace SciencetopiaWebApplication.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20250913060426_UpdateSchema")]
+    partial class UpdateSchema
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1123,21 +1126,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.ToTable("StudyPlanVersions", "StudyPlans");
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.TagRepresentativeNode", b =>
-                {
-                    b.Property<Guid>("TagId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("NodeId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.HasKey("TagId", "NodeId");
-
-                    b.HasIndex("NodeId");
-
-                    b.ToTable("TagRepresentativeNode", "KnowledgeGraph");
-                });
-
             modelBuilder.Entity("StudyPlanEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1602,21 +1590,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasOne("StudyPlanEntity", null)
                         .WithMany()
                         .HasForeignKey("StudyPlanId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.TagRepresentativeNode", b =>
-                {
-                    b.HasOne("KnowledgeNode", null)
-                        .WithMany()
-                        .HasForeignKey("NodeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("Tags", null)
-                        .WithMany()
-                        .HasForeignKey("TagId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

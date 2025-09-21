@@ -25,6 +25,16 @@ public class StudyGroupController : ControllerBase
         return Ok(groups);
     }
 
+    [HttpGet("List")]
+    public async Task<ActionResult<IEnumerable<StudyGroup>>> List(int page = 1, int pageSize = 20)
+    {
+        if (page < 1 || pageSize < 1 || pageSize > 100)
+            return BadRequest("Invalid pagination parameters.");
+        var skip = (page - 1) * pageSize;
+        var groups = await _studyGroupService.GetStudyGroupsPagedAsync(skip, pageSize);
+        return Ok(groups);
+    }
+
     [HttpGet("GetStudyGroupById/{groupId}")]
     public async Task<ActionResult<StudyGroup>> GetStudyGroupById(string groupId)
     {
@@ -75,6 +85,17 @@ public class StudyGroupController : ControllerBase
             return NotFound("Study group not found.");
         }
         return Ok(members);
+    }
+
+    [HttpGet("Tags/{groupId}")]
+    public async Task<ActionResult<IEnumerable<TagDTO>>> GetStudyGroupTags(string groupId)
+    {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
+        var tags = await _studyGroupService.GetGroupTagsAsync(groupId);
+        return Ok(tags);
     }
 
     // [HttpGet("GetStudyGroupByUser/{userId}")]
@@ -145,6 +166,13 @@ public class StudyGroupController : ControllerBase
             return Unauthorized("User is not authenticated.");
         }
 
+        // Validate total tag count (<= 10), including new tag names
+        var totalCount = (studyGroupDTO?.TagIds?.Distinct().Count() ?? 0) + (studyGroupDTO?.NewTagNames?.Select(s => s?.Trim()).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase).Count() ?? 0);
+        if (totalCount > 10)
+        {
+            return BadRequest("每个学习小组最多可添加 10 个标签。");
+        }
+
         var result = await _studyGroupService.CreateStudyGroupAsync(studyGroupDTO, userId);
         if (result)
         {
@@ -152,7 +180,7 @@ public class StudyGroupController : ControllerBase
         }
         else
         {
-            return BadRequest("创建学习小组的申请失败！请检查小组名称是否已存在或其他错误。");
+            return BadRequest("创建学习小组的申请失败！请检查：小组名称是否已存在；标签是否重复、有效或数量不超过 10 个。");
         }
     }
 

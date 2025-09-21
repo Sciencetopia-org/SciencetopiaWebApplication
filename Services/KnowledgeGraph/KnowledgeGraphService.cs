@@ -58,7 +58,7 @@ public class KnowledgeGraphService
         var d = details.Value;
         if (_l10nOptions.Value.Enabled)
         {
-            var title = await _l10n.GetLocalizedAsync(nodeId, "title", language);
+            var title = await _l10n.GetLocalizedAsync(nodeId, "name", language);
             var desc = await _l10n.GetLocalizedAsync(nodeId, "description", language);
             if (!string.IsNullOrWhiteSpace(title)) d = (title!, d.Description, d.CreatedDate, d.UpdatedDate);
             if (!string.IsNullOrWhiteSpace(desc)) d = (d.Name, desc!, d.CreatedDate, d.UpdatedDate);
@@ -352,97 +352,77 @@ public class KnowledgeGraphService
     IReadOnlyDictionary<Guid, string>? nodeToLevel = null,
     string language = "zh")
     {
-        // 如果调用方没传，就内部批量查一遍
-        if (nodeToLevel is null)
+        // 标签与节点的本地化已在各仓储层处理，无需在此额外覆盖
+        // 使用 SQL 显式表获取代表节点详情（TagId -> NodeId + meta）
+        var repDetails = await _tagRepo.GetRepresentativeNodesAsync(allTagIds);
+        var repMap = repDetails.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.NodeId);
+        var repNodeIds = repMap.Values.Distinct().ToList();
+
+        // 扩充节点集：原始节点 + 代表节点
+        var nodeIdsToBuild = allNodeIds.Union(repNodeIds).Distinct().ToList();
+
+        // 统一获取节点层级：优先复用传入 map，并补齐代表节点
+        Dictionary<Guid, string> levelsMap;
+        if (nodeToLevel is not null && nodeToLevel.Count > 0)
         {
-            var map = await _graphRepository
-                .GetNodeLevelsByNodeIdsAsync(allNodeIds);
-            nodeToLevel = map;
+            levelsMap = new Dictionary<Guid, string>(nodeToLevel);
+            var missing = nodeIdsToBuild.Where(id => !levelsMap.ContainsKey(id)).ToList();
+            if (missing.Count > 0)
+            {
+                var fetched = await _graphRepository.GetNodeLevelsByNodeIdsAsync(missing);
+                foreach (var kv in fetched)
+                    levelsMap[kv.Key] = kv.Value;
+            }
+        }
+        else
+        {
+            levelsMap = await _graphRepository.GetNodeLevelsByNodeIdsAsync(nodeIdsToBuild);
         }
 
-        // 获取节点详情
-        var nodesDict = await _knowledgeRepo.GetNodesNamesAsync(allNodeIds, language);
+        // 获取节点标题（仓储内已 L10n 兼容）
+        var nodesDict = await _knowledgeRepo.GetNodesNamesAsync(nodeIdsToBuild, language);
 
         // 转换成 NodeDTO 列表
-        var sqlNodes = nodesDict.Select(kvp => new NodeDTO
+        var sqlNodes = nodesDict.Select(kvp =>
         {
-            Id = kvp.Key,
-            Name = kvp.Value,
-            TagLevel = nodeToLevel.TryGetValue(kvp.Key, out var lvl) ? lvl : "Keyword"
+            var nodeId = kvp.Key;
+            var name = kvp.Value;
+            return new NodeDTO
+            {
+                Id = nodeId,
+                Name = name,
+                TagLevel = levelsMap.TryGetValue(nodeId, out var lvl) ? lvl : "Keyword"
+            };
         }).ToList();
 
-        // 从 SQL 获取所有 Tag 信息
-        var sqlTags = await _tagRepo.GetTagNamesAsync(allTagIds, language);
-        var tagIdToName = sqlTags.ToDictionary(t => t.Key, t => t.Value);
-
-        // // 获取 TagLevel 节点 ID
-        // var tagLevelIdStrings = await _graphRepository.GetNodeIdsByLabelAsync("TagLevel");
-        // var tagLevelIdSet = tagLevelIdStrings
-        //     .Select(id => Guid.TryParse(id, out var guid) ? guid : Guid.Empty)
-        //     .Where(guid => guid != Guid.Empty)
-        //     .ToHashSet();
-
-        // var sqlTagLevels = await _tagRepo.GetTagNamesAsync(tagLevelIdSet);
-        // var tagLevelIdToName = sqlTagLevels.ToDictionary(t => t.Key, t => t.Value);
-
-        // // 从 Neo4j 获取节点和其 TagLevel 标签的对应关系
-        // var nodeIdToTagLevelId = await _graphRepository.GetNodeTagLevelRelationsAsync(allNodeIds.Select(id => id.ToString()));
-
-        // // 更新节点的 TagLevel
-        // foreach (var node in sqlNodes)
-        // {
-        //     if (nodeIdToTagLevelId.TryGetValue(node.Id.ToString(), out var tagLevelTagIdStr) &&
-        //         Guid.TryParse(tagLevelTagIdStr, out var tagLevelGuid) &&
-        //         tagLevelIdToName.TryGetValue(tagLevelGuid, out var tagLevelName))
-        //     {
-        //         node.TagLevel = tagLevelName;
-        //     }
-        //     else
-        //     {
-        //         node.TagLevel = "Keyword";
-        //     }
-        // }
+        // 旧的 TagLevel 反查逻辑已废弃，统一使用 levelsMap
 
         // 获取所有关系
         var taggedRelations = await _graphRepository.GetTaggedRelationsAsync(allNodeIds, allTagIds);
         var projectedRelations = new List<ProjectedRelationDTO>(); // 仍为空
         var tagContainRelations = await _graphRepository.GetPureTagContainRelationsAsync(allTagIds);
 
-        // 预构建知识节点名称到 ID 的映射（用于 CONTAIN 关系）
-        var tagNameToNodeId = sqlNodes
-            .Where(n => n.Name != null && tagIdToName.Values.Contains(n.Name))
-            .GroupBy(n => n.Name)
-            .ToDictionary(g => g.Key!, g => g.First().Id);
-
+        // 基于代表节点直接构建标签层次（CONTAIN）在知识图中的边
         var hierarchyRelations = new List<HierarchyRelationDTO>();
-        // 在构建 tagNameToNodeId 之后增加调试输出
         foreach (var relation in tagContainRelations)
         {
-            if (tagIdToName.TryGetValue(relation.ParentTagId, out var parentName) &&
-            tagIdToName.TryGetValue(relation.ChildTagId, out var childName) &&
-            tagNameToNodeId.TryGetValue(parentName, out var parentNodeId) &&
-            tagNameToNodeId.TryGetValue(childName, out var childNodeId))
+            if (repMap.TryGetValue(relation.ParentTagId, out var parentNodeId) &&
+                repMap.TryGetValue(relation.ChildTagId, out var childNodeId))
             {
-            hierarchyRelations.Add(new HierarchyRelationDTO
-            {
-                ParentId = parentNodeId,
-                ChildId = childNodeId
-            });
+                hierarchyRelations.Add(new HierarchyRelationDTO
+                {
+                    ParentId = parentNodeId,
+                    ChildId = childNodeId
+                });
             }
         }
 
-        // 处理 TAGGED_WITH 关系
-        var topicNodesByName = sqlNodes
-            .Where(n => !string.IsNullOrEmpty(n.Name))
-            .GroupBy(n => n.Name!)
-            .ToDictionary(g => g.Key, g => g.First().Id);
-
+        // 将 TAGGED_WITH 替换为 代表节点 -> 实际知识节点 的边（也用 CONTAIN 命名以适配前端）
         var replacedTaggedRelations = taggedRelations
-            .Where(t => tagIdToName.TryGetValue(t.TagId, out var tagName))
-            .Where(t => topicNodesByName.ContainsKey(tagIdToName[t.TagId]))
+            .Where(t => repMap.ContainsKey(t.TagId))
             .Select(t => new HierarchyRelationDTO
             {
-                ParentId = topicNodesByName[tagIdToName[t.TagId]],
+                ParentId = repMap[t.TagId],
                 ChildId = t.SourceId
             })
             .ToList();
@@ -476,134 +456,18 @@ public class KnowledgeGraphService
         };
     }
 
-    // public async Task<GraphDTO> GetKnowledgeGraphDataByNodeId(IEnumerable<Guid> allNodeIds, IEnumerable<Guid> allTagIds)
-    // {
-    //     // 获取节点详情
-    //     var nodesDict = await _knowledgeRepo.GetNodesDetailsAsync(allNodeIds);
-
-    //     // 转换成 NodeDTO 列表
-    //     var sqlNodes = nodesDict.Select(kvp => new NodeDTO
-    //     {
-    //         Id = kvp.Key,
-    //         Name = kvp.Value.Name,
-    //         Description = kvp.Value.Description,
-    //         CreatedDate = kvp.Value.CreatedDate.UtcDateTime,
-    //         UpdatedDate = kvp.Value.UpdatedDate.UtcDateTime,
-    //         TagLevel = "" // 后续赋值
-    //     }).ToList();
-
-    //     // 从 SQL 获取所有 Tag 信息
-    //     var sqlTags = await _tagRepo.GetTagDetailsAsync(allTagIds);
-    //     var tagIdToName = sqlTags.ToDictionary(t => t.Key, t => t.Value.Name);
-
-    //     // 获取 TagLevel 节点 ID
-    //     var tagLevelIdStrings = await _graphRepository.GetNodeIdsByLabelAsync("TagLevel");
-    //     var tagLevelIdSet = tagLevelIdStrings
-    //         .Select(id => Guid.TryParse(id, out var guid) ? guid : Guid.Empty)
-    //         .Where(guid => guid != Guid.Empty)
-    //         .ToHashSet();
-
-    //     var sqlTagLevels = await _tagRepo.GetTagDetailsAsync(tagLevelIdSet);
-    //     var tagLevelIdToName = sqlTagLevels.ToDictionary(t => t.Key, t => t.Value.Name);
-
-    //     // 从 Neo4j 获取节点和其 TagLevel 标签的对应关系
-    //     var nodeIdToTagLevelId = await _graphRepository.GetNodeTagLevelRelationsAsync(allNodeIds.Select(id => id.ToString()));
-
-    //     // 更新节点的 TagLevel
-    //     foreach (var node in sqlNodes)
-    //     {
-    //         if (nodeIdToTagLevelId.TryGetValue(node.Id.ToString(), out var tagLevelTagIdStr) &&
-    //             Guid.TryParse(tagLevelTagIdStr, out var tagLevelGuid) &&
-    //             tagLevelIdToName.TryGetValue(tagLevelGuid, out var tagLevelName))
-    //         {
-    //             node.TagLevel = tagLevelName;
-    //         }
-    //         else
-    //         {
-    //             node.TagLevel = "Keyword";
-    //         }
-    //     }
-
-    //     // 获取所有关系
-    //     var taggedRelations = await _graphRepository.GetTaggedRelationsAsync();
-    //     var projectedRelations = new List<ProjectedRelationDTO>(); // 仍为空
-    //     var tagContainRelations = await _graphRepository.GetPureTagContainRelationsAsync();
-
-    //     // 预构建知识节点名称到 ID 的映射（用于 CONTAIN 关系）
-    //     var tagNameToNodeId = sqlNodes
-    //         .Where(n => n.Name != null && tagIdToName.Values.Contains(n.Name))
-    //         .GroupBy(n => n.Name)
-    //         .ToDictionary(g => g.Key!, g => g.First().Id);
-
-    //     var hierarchyRelations = new List<HierarchyRelationDTO>();
-    //     foreach (var relation in tagContainRelations)
-    //     {
-    //         if (Guid.TryParse(relation.ParentTagId, out var parentGuid) &&
-    //             Guid.TryParse(relation.ChildTagId, out var childGuid) &&
-    //             tagIdToName.TryGetValue(parentGuid, out var parentName) &&
-    //             tagIdToName.TryGetValue(childGuid, out var childName) &&
-    //             tagNameToNodeId.TryGetValue(parentName, out var parentNodeId) &&
-    //             tagNameToNodeId.TryGetValue(childName, out var childNodeId))
-    //         {
-    //             hierarchyRelations.Add(new HierarchyRelationDTO
-    //             {
-    //                 ParentId = parentNodeId,
-    //                 ChildId = childNodeId
-    //             });
-    //         }
-    //     }
-
-    //     // 处理 TAGGED_WITH 关系
-    //     var topicNodesByName = sqlNodes
-    //         .Where(n => !string.IsNullOrEmpty(n.Name))
-    //         .GroupBy(n => n.Name!)
-    //         .ToDictionary(g => g.Key, g => g.First().Id);
-
-    //     var replacedTaggedRelations = taggedRelations
-    //         .Where(t => Guid.TryParse(t.TagId, out var tagGuid) && tagIdToName.TryGetValue(tagGuid, out var tagName))
-    //         .Where(t => topicNodesByName.ContainsKey(tagIdToName[Guid.Parse(t.TagId)]))
-    //         .Select(t => new HierarchyRelationDTO
-    //         {
-    //             ParentId = topicNodesByName[tagIdToName[Guid.Parse(t.TagId)]],
-    //             ChildId = Guid.Parse(t.SourceId)
-    //         })
-    //         .ToList();
-
-    //     // 构造 links
-    //     var linksDto = new List<LinkDTO>();
-    //     linksDto.AddRange(hierarchyRelations.Select(r => new LinkDTO
-    //     {
-    //         Source = r.ParentId,
-    //         Target = r.ChildId,
-    //         Relation = "CONTAIN"
-    //     }));
-    //     linksDto.AddRange(projectedRelations.Select(r => new LinkDTO
-    //     {
-    //         Source = Guid.TryParse(r.SourceId, out var sourceGuid) ? sourceGuid : Guid.Empty,
-    //         Target = Guid.TryParse(r.TargetId, out var targetGuid) ? targetGuid : Guid.Empty,
-    //         Relation = "projected",
-    //         Weight = r.Weight
-    //     }));
-    //     linksDto.AddRange(replacedTaggedRelations.Select(r => new LinkDTO
-    //     {
-    //         Source = r.ParentId,
-    //         Target = r.ChildId,
-    //         Relation = "CONTAIN"
-    //     }));
-
-    //     return new GraphDTO
-    //     {
-    //         Nodes = sqlNodes,
-    //         Links = linksDto
-    //     };
-    // }
+    // 旧版完整实现已移除，统一使用代表节点表
 
     public async Task<IEnumerable<string>> GetTagIdsByTagNamesAsync(IEnumerable<string> inputTagNames)
     {
         var tags = await _tagRepo.GetTagsByNameAsync(inputTagNames);
-        var tagNameToId = tags.Where(t => t.Name != null).ToDictionary(t => t.Name!, t => t.Id.ToString());
-
-        return inputTagNames.Select(name => tagNameToId.GetValueOrDefault(name, string.Empty));
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in tags)
+        {
+            if (t?.Name != null && t.Id.HasValue)
+                map[t.Name] = t.Id.Value.ToString();
+        }
+        return inputTagNames.Select(name => map.TryGetValue(name ?? string.Empty, out var id) ? id : string.Empty);
     }
 
     public async Task<IEnumerable<Guid>> GetNodeIdsByTagsAsync(IEnumerable<string> inputTagIds)
@@ -642,43 +506,7 @@ public class KnowledgeGraphService
         return Enumerable.Empty<Guid>();
     }
 
-    public async Task<object> GetNodeDetailsByIdAsync(Guid nodeId)
-    {
-        // Fetch node details from the knowledge repository
-        var nodeDetails = await _knowledgeRepo.GetNodeDetailsByIdAsync(nodeId);
-
-        if (!nodeDetails.HasValue)
-        {
-            throw new KeyNotFoundException($"Node with ID {nodeId} not found.");
-        }
-
-        // Fetch related tags and resources from the graph repository
-        var tagResourcePairs = await _graphRepository.GetTagsAndResourcesIdsRelatedToNodeAsync(nodeId.ToString());
-
-        // Separate tags and resource IDs
-        var relatedTags = tagResourcePairs.Select(pair => pair.TagId).Distinct().ToList();
-        var relatedResourcesIds = tagResourcePairs.Select(pair => pair.ResourceId).Distinct().ToList();
-
-        // // Fetch related tags from the graph repository
-        // var relatedTags = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId.ToString());
-
-        // // Fetch Id's of resources related to the node
-        // var relatedResourcesIds = await _graphRepository.GetResourcesIdsRelatedToNodeAsync(nodeId.ToString());
-
-        // Fetch resource details from the resource repository
-        var relatedResources = await _resourceRepo.GetResourcesByIdsAsync(relatedResourcesIds);
-
-        return new
-        {
-            Id = nodeId,
-            Name = nodeDetails.Value.Name,
-            nodeDetails.Value.Description,
-            CreatedDate = nodeDetails.Value.CreatedDate,
-            UpdatedDate = nodeDetails.Value.UpdatedDate,
-            Tags = relatedTags,
-            Resources = relatedResources
-        };
-    }
+    // 统一使用带语言参数的节点详情方法
 
     public async Task<object> SearchNodeAsync(string query)
     {
@@ -957,7 +785,7 @@ public class KnowledgeGraphService
         var result = new Dictionary<Guid, string>();
         foreach (var id in nodeIds.Distinct())
         {
-            var title = await _l10n.GetLocalizedAsync(id, "title", language) ?? string.Empty;
+            var title = await _l10n.GetLocalizedAsync(id, "name", language) ?? string.Empty;
             result[id] = string.IsNullOrWhiteSpace(title) ? id.ToString() : title;
         }
         return result;

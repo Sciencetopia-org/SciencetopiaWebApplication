@@ -47,7 +47,7 @@ public class ResourceProgressController : ControllerBase
     }
 
     [HttpDelete("{resourceId:guid}/Complete")]
-    public async Task<IActionResult> Undo(Guid resourceId, [FromQuery] Guid? planId = null)
+    public async Task<IActionResult> Undo(Guid resourceId, [FromQuery] Guid? planId = null, [FromQuery] Guid? lessonId = null)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
@@ -59,6 +59,26 @@ public class ResourceProgressController : ControllerBase
         }
 
         await _svc.UndoAsync(userId, resourceId);
-        return Ok();
+
+        // Compute updated progress to allow immediate UI refresh
+        double planProgress = 0;
+        double lessonProgress = 0;
+        int lessonCompleted = 0;
+        int lessonTotal = 0;
+
+        if (planId.HasValue)
+        {
+            var plan = await _svc.GetPlanProgressAsync(userId, planId.Value);
+            planProgress = plan.planProgress;
+        }
+        if (lessonId.HasValue)
+        {
+            var les = await _svc.GetLessonProgressAsync(userId, lessonId.Value);
+            lessonProgress = les.lessonProgress;
+            lessonCompleted = les.completedCount;
+            lessonTotal = les.totalResources;
+        }
+
+        return Ok(new ResourceProgressResult(planProgress, lessonProgress, lessonCompleted, lessonTotal));
     }
 }
