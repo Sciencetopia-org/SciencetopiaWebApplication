@@ -55,7 +55,7 @@ namespace SciencetopiaWebApplication.Controllers.StudyPlan
                 tagIds.AddRange(resolved);
             }
             tagIds = tagIds.Distinct().ToList();
-            var ok = await _service.UpdatePlanTagsAsync(planId, tagIds, null, uid);
+            var ok = await _service.UpdatePlanTagsAsync(planId, tagIds, req.NewTagNames, uid);
             return ok ? Ok() : BadRequest();
         }
 
@@ -82,7 +82,7 @@ namespace SciencetopiaWebApplication.Controllers.StudyPlan
                 tagIds.AddRange(resolved);
             }
             tagIds = tagIds.Distinct().ToList();
-            var ok = await _service.UpdateLessonTagsAsync(planId, lessonId, tagIds, null, uid);
+            var ok = await _service.UpdateLessonTagsAsync(planId, lessonId, tagIds, req.NewTagNames, uid);
             return ok ? Ok() : BadRequest();
         }
 

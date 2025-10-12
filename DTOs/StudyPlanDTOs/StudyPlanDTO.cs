@@ -8,6 +8,11 @@ public class StudyPlanDTO
 public class StudyPlanDetail
 {
     public string? Id { get; set; }
+    public string? StableId { get; set; }
+    public int VersionNumber { get; set; }
+    public bool IsCurrent { get; set; }
+    public string Status { get; set; } = "Current";
+    public DateTimeOffset? PublishedAt { get; set; }
     public string? Title { get; set; }
     public Introduction? Introduction { get; set; }
     public float ProgressPercentage { get; set; }
@@ -29,6 +34,8 @@ public class Introduction
 public class Lesson
 {
     public string? Id { get; set; }
+    public string? StableId { get; set; }
+    public int VersionNumber { get; set; }
     public string? Name { get; set; }
     public string? Description { get; set; }
     public List<Node>? AssociatedKnowledgeNodes { get; set; }

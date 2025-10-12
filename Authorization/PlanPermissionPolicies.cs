@@ -75,7 +75,7 @@ public class PlanPermissionHandler : AuthorizationHandler<PlanPermissionRequirem
         {
             planId = await _db.Cohorts.AsNoTracking()
                 .Where(c => c.Id == cohortId.Value)
-                .Select(c => c.StudyPlanId)
+                .Select(c => c.StudyPlanStableId)
                 .FirstOrDefaultAsync();
         }
 

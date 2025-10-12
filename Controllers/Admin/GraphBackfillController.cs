@@ -26,13 +26,10 @@ public class GraphBackfillController : ControllerBase
         int pinnedLinked = 0;
         int activeLinked = 0;
 
-        // 1) OF_VERSION per cohort from SQL PinnedVersionId -> versionNumber
+        // 1) OF_VERSION per cohort from SQL pinned version number
         var items = await _db.Cohorts.AsNoTracking()
-            .Where(c => c.PinnedVersionId != null)
-            .Join(_db.StudyPlanVersions,
-                  c => c.PinnedVersionId,
-                  v => v.Id,
-                  (c, v) => new { cohortId = c.Id, planId = c.StudyPlanId, versionNumber = v.VersionNumber })
+            .Where(c => c.PinnedVersionNumber != null)
+            .Select(c => new { cohortId = c.Id, planId = c.StudyPlanStableId, versionNumber = c.PinnedVersionNumber!.Value })
             .ToListAsync();
 
         await using (var session = _driver.AsyncSession())

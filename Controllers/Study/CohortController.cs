@@ -36,23 +36,13 @@ public class CohortController : ControllerBase
         var c = await _db.Cohorts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == cohortId);
         if (c == null) return NotFound();
 
-        int? pinnedVersionNumber = null;
-        if (c.PinnedVersionId.HasValue)
-        {
-            pinnedVersionNumber = await _db.StudyPlanVersions
-                .Where(v => v.Id == c.PinnedVersionId.Value)
-                .Select(v => (int?)v.VersionNumber)
-                .FirstOrDefaultAsync();
-        }
-
         return Ok(new
         {
             id = c.Id,
-            studyPlanId = c.StudyPlanId,
+            studyPlanStableId = c.StudyPlanStableId,
             studyGroupId = c.StudyGroupId,
             enrollMode = c.EnrollMode.ToString(),
-            pinnedVersionId = c.PinnedVersionId,
-            pinnedVersionNumber,
+            pinnedVersionNumber = c.PinnedVersionNumber,
             membersCount = c.MembersCount,
             createdAt = c.CreatedAt,
             createdBy = c.CreatedBy,

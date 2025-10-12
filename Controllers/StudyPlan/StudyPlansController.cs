@@ -33,8 +33,8 @@ namespace Sciencetopia.Controllers.StudyPlan
             // Single query: compute visibility in DB, avoid description, no tracking
             var baseQ = _db.StudyPlans.AsNoTracking().Where(p =>
                 p.CreatorId == ug
-                || _db.StudyPlanUserRoles.Any(r => r.PlanId == p.Id && r.UserId == userId)
-                || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanId == p.Id &&
+                || _db.StudyPlanUserRoles.Any(r => r.PlanStableId == p.StableId && r.UserId == userId)
+                || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanStableId == p.StableId &&
                        _db.StudyGroupUserRoles.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
                 || EF.Property<string>(p, "Privacy") == "public"
             );
@@ -54,21 +54,69 @@ namespace Sciencetopia.Controllers.StudyPlan
             var total = await baseQ.CountAsync();
 
             // Project only Id and Title for speed
-            var items = await baseQ
+            var slice = await baseQ
                 .Skip((page - 1) * pageSize)
                 .Take(pageSize)
-                .Select(p => new { p.Id, p.Title })
+                .Select(p => new
+                {
+                    p.Id,
+                    p.StableId,
+                    p.VersionNumber,
+                    p.IsCurrent,
+                    p.Status,
+                    p.Title,
+                    p.Description,
+                    p.CreatedDate,
+                    p.UpdatedDate
+                })
                 .ToListAsync();
 
-            // Compute roles concurrently; PermissionService is cached internally
-            var projected = await Task.WhenAll(items.Select(async p => new
+            var stableIds = slice.Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId).Distinct().ToList();
+
+            var aggregates = await _db.StudyPlans.AsNoTracking()
+                .Where(p => stableIds.Contains(p.StableId == Guid.Empty ? p.Id : p.StableId))
+                .GroupBy(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .Select(g => new
+                {
+                    StableId = g.Key,
+                    LatestVersionNumber = g.Max(p => p.VersionNumber),
+                    CurrentVersionNumber = g.Where(p => p.IsCurrent).Select(p => (int?)p.VersionNumber).FirstOrDefault()
+                })
+                .ToListAsync();
+
+            var aggregatesDict = aggregates.ToDictionary(a => a.StableId, a => a);
+
+            var items = await Task.WhenAll(slice.Select(async p =>
             {
-                id = p.Id,
-                title = p.Title,
-                role = (await _perm.GetEffectivePlanRoleAsync(userId, p.Id)).ToString()
+                var stableId = p.StableId == Guid.Empty ? p.Id : p.StableId;
+                var agg = aggregatesDict.TryGetValue(stableId, out var entry)
+                    ? entry
+                    : new { StableId = stableId, LatestVersionNumber = p.VersionNumber, CurrentVersionNumber = (int?) (p.IsCurrent ? p.VersionNumber : (int?)null) };
+
+                var currentVersionNumber = agg.CurrentVersionNumber ?? agg.LatestVersionNumber;
+                var hasUpgrade = !p.IsCurrent && p.VersionNumber < agg.LatestVersionNumber;
+
+                var role = (await _perm.GetEffectivePlanRoleAsync(userId, p.Id)).ToString();
+
+                return new
+                {
+                    id = p.Id,
+                    stableId,
+                    versionNumber = p.VersionNumber,
+                    latestVersionNumber = agg.LatestVersionNumber,
+                    currentVersionNumber,
+                    isCurrent = p.IsCurrent,
+                    status = p.Status,
+                    title = p.Title,
+                    description = p.Description,
+                    updatedAt = p.UpdatedDate,
+                    createdAt = p.CreatedDate,
+                    hasUpgrade,
+                    role
+                };
             }));
 
-            return Ok(new { total, page, pageSize, items = projected });
+            return Ok(new { total, page, pageSize, items });
         }
 
         [HttpGet("{id}")]
@@ -80,31 +128,32 @@ namespace Sciencetopia.Controllers.StudyPlan
 
             var plan = await _db.StudyPlans.FirstOrDefaultAsync(p => p.Id == id);
             if (plan == null) return NotFound();
-            // Determine current version id and number
-            long? currentVersionId = plan.CurrentVersionId;
-            int? currentVersionNumber = null;
-            if (currentVersionId.HasValue)
+
+            var stableId = plan.StableId == Guid.Empty ? plan.Id : plan.StableId;
+
+            var current = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.StableId == stableId)
+                .OrderByDescending(p => p.IsCurrent)
+                .ThenByDescending(p => p.VersionNumber)
+                .Select(p => new { p.Id, p.VersionNumber, p.IsCurrent })
+                .FirstOrDefaultAsync();
+
+            var latestVersionNumber = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.StableId == stableId)
+                .MaxAsync(p => (int?)p.VersionNumber) ?? plan.VersionNumber;
+
+            return Ok(new
             {
-                currentVersionNumber = await _db.StudyPlanVersions
-                    .Where(v => v.Id == currentVersionId.Value)
-                    .Select(v => (int?)v.VersionNumber)
-                    .FirstOrDefaultAsync();
-            }
-            else
-            {
-                // fallback: compute latest
-                var latest = await _db.StudyPlanVersions
-                    .Where(v => v.StudyPlanId == id)
-                    .OrderByDescending(v => v.VersionNumber)
-                    .Select(v => new { v.Id, v.VersionNumber })
-                    .FirstOrDefaultAsync();
-                if (latest != null)
-                {
-                    currentVersionId = latest.Id;
-                    currentVersionNumber = latest.VersionNumber;
-                }
-            }
-            return Ok(new { id = plan.Id, title = plan.Title, description = plan.Description, currentVersionId, currentVersionNumber });
+                id = plan.Id,
+                stableId,
+                versionNumber = plan.VersionNumber,
+                isCurrent = plan.IsCurrent,
+                currentVersionId = current?.Id,
+                currentVersionNumber = current?.VersionNumber,
+                latestVersionNumber,
+                title = plan.Title,
+                description = plan.Description
+            });
         }
 
         // B4-2: GET /StudyPlans/{id}/enrollment/me
@@ -127,8 +176,14 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
             if (!await _perm.CanReadAsync(userId, id)) return Forbid();
 
+            var stableId = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.Id == id)
+                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .FirstOrDefaultAsync();
+            if (stableId == Guid.Empty) return NotFound();
+
             var cohorts = await _db.Cohorts.AsNoTracking()
-                .Where(c => c.StudyPlanId == id)
+                .Where(c => c.StudyPlanStableId == stableId)
                 .Select(c => new { c.Id, c.Title, c.StudyGroupId, c.Visibility })
                 .ToListAsync();
 
@@ -137,7 +192,7 @@ namespace Sciencetopia.Controllers.StudyPlan
             {
                 alreadyActive = await session.ExecuteReadAsync(async tx =>
                 {
-                    var cur = await tx.RunAsync("MATCH (u:User {id:$userId})-[:ENROLLED_IN]->(:PlanVersion {studyPlanId:$planId}) RETURN true LIMIT 1", new { planId = id.ToString(), userId });
+                    var cur = await tx.RunAsync("MATCH (u:User {id:$userId})-[:ENROLLED_IN]->(:PlanVersion {studyPlanId:$planId}) RETURN true LIMIT 1", new { planId = stableId.ToString(), userId });
                     return await cur.PeekAsync() != null;
                 });
             }
@@ -183,17 +238,23 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (!await _perm.CanShareAsync(actorId, id)) return Forbid();
             if (string.IsNullOrEmpty(req.UserId)) return BadRequest("UserId required");
 
-            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanId == id && r.UserId == req.UserId);
+            var stableId = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.Id == id)
+                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .FirstOrDefaultAsync();
+            if (stableId == Guid.Empty) return NotFound();
+
+            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanStableId == stableId && r.UserId == req.UserId);
             if (existing == null)
             {
-                _db.StudyPlanUserRoles.Add(new StudyPlanUserRole { PlanId = id, UserId = req.UserId!, Role = req.Role });
+                _db.StudyPlanUserRoles.Add(new StudyPlanUserRole { PlanStableId = stableId, UserId = req.UserId!, Role = req.Role });
             }
             else
             {
                 existing.Role = req.Role;
             }
             await _db.SaveChangesAsync();
-            _perm.Invalidate(req.UserId!, id);
+            await _perm.InvalidateAsync(req.UserId!, id, HttpContext.RequestAborted);
             return Ok();
         }
 
@@ -204,12 +265,18 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (string.IsNullOrEmpty(actorId)) return Unauthorized();
             if (!await _perm.CanShareAsync(actorId, id)) return Forbid();
 
-            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanId == id && r.UserId == userId);
+            var stableId = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.Id == id)
+                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .FirstOrDefaultAsync();
+            if (stableId == Guid.Empty) return NotFound();
+
+            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanStableId == stableId && r.UserId == userId);
             if (existing != null)
             {
                 _db.StudyPlanUserRoles.Remove(existing);
                 await _db.SaveChangesAsync();
-                _perm.Invalidate(userId, id);
+                await _perm.InvalidateAsync(userId, id, HttpContext.RequestAborted);
             }
             return Ok();
         }

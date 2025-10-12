@@ -62,12 +62,14 @@ public interface IGraphRepository
     Task<List<string>> GetResourcesIdsRelatedToNodeAsync(string nodeId);
     Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId);
     Task<int> CountApprovedLinksByUserAsync(string userId);
-    Task<bool> LinkResourceToNodeAsync(string nodeName, string resourceId);
+    Task<bool> LinkResourceToNodeAsync(string nodeStableId, string resourceId, string? userId = null);
     Task CreateTagNodeIfNotExistsAsync(string tagId);
     Task RelateTagToNodeAsync(string tagId, string nodeId);
     Task CreatePendingTagNodeAsync(string tagId);
     Task SetTagStatusApprovedAsync(string tagId);
     Task SetTagStatusRejectedAsync(string tagId);
+    Task PromoteTagRelationsAsync(string nodeId);
+    Task MarkTagRelationsRejectedAsync(string nodeId);
     Task DetachResourcesFromNodeAsync(string nodeId);
     Task ApproveNodeResourceRelationsAsync(string nodeId);
     Task<Dictionary<Guid, int>> GetTagCountsForNodesAsync(IEnumerable<Guid> nodeIds);
@@ -87,8 +89,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
             MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-            WHERE (n.id) IN $nodeIds AND (t.id) IN $tagIds
-            RETURN n.id AS SourceId, t.id AS TagId
+            WHERE n.stableId IN $nodeIds AND t.stableId IN $tagIds
+            RETURN n.stableId AS SourceId, t.stableId AS TagId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -111,8 +113,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
     MATCH (t:Tag)-[:TAGGED_WITH]->(:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
-    WHERE t.id IN $tagIds AND l.name IN $zoomLevels
-    RETURN DISTINCT t.id AS TagId;
+    WHERE t.stableId IN $tagIds AND l.name IN $zoomLevels
+    RETURN DISTINCT t.stableId AS TagId;
     ";
         var result = await session.RunAsync(cypher, new { zoomLevels, tagIds = allTagIds.Select(id => id.ToString()) });
         var records = await result.ToListAsync();
@@ -126,10 +128,10 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
         MATCH (parent:Tag)-[:CONTAIN]->(child:Tag)
-        WHERE parent.id IN $tagIds AND child.id IN $tagIds
+        WHERE parent.stableId IN $tagIds AND child.stableId IN $tagIds
         WITH parent, child
-        WHERE parent.id <> child.id
-        RETURN parent.id AS ParentTagId, child.id AS ChildTagId
+        WHERE parent.stableId <> child.stableId
+        RETURN parent.stableId AS ParentTagId, child.stableId AS ChildTagId
     ";
         var parameters = new Dictionary<string, object>
         {
@@ -153,7 +155,7 @@ public class GraphRepository : IGraphRepository
             MATCH (n:KnowledgeNode)<-[:TAGGED_WITH]-(t:Tag)-[:TAGGED_WITH]->(m:KnowledgeNode)
             WHERE n <> m
             WITH n, m, count(*) AS weight
-            RETURN n.id AS SourceId, m.id AS TargetId, weight
+            RETURN n.stableId AS SourceId, m.stableId AS TargetId, weight
         ";
         var result = await session.RunAsync(cypher);
         return (await result.ToListAsync())
@@ -171,8 +173,8 @@ public class GraphRepository : IGraphRepository
 
         var query = @"
         MATCH (tagLevel:TagLevel)-[:TAGGED_WITH]->(node:KnowledgeNode)
-        WHERE node.id IN $nodeIds
-        RETURN node.id AS NodeId, tagLevel.id AS TagLevelId
+        WHERE node.stableId IN $nodeIds
+        RETURN node.stableId AS NodeId, tagLevel.id AS TagLevelId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -198,8 +200,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE t.id IN $tagIds AND (n.status IS NULL OR n.status <> 'pending_approval')
-        RETURN n.id AS NodeId
+        WHERE t.stableId IN $tagIds AND coalesce(n.status, 'Current') = 'Current'
+        RETURN n.stableId AS NodeId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -220,7 +222,7 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
         UNWIND $nodeIds AS nid
-        MATCH (n:KnowledgeNode {id: nid})<-[:TAGGED_WITH]-(l:TagLevel)
+        MATCH (n:KnowledgeNode {stableId: nid})<-[:TAGGED_WITH]-(l:TagLevel)
         RETURN nid AS NodeId, l.name AS TagLevel
     ";
         var cursor = await session.RunAsync(cypher, new { nodeIds = nodeIds.Select(id => id.ToString()) });
@@ -241,9 +243,9 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         UNWIND $tagIds AS id
-        MATCH (t:Tag {id: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
-        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
-        RETURN DISTINCT n.id AS NodeId, id AS TagId, l.name AS TagLevel
+        MATCH (t:Tag {stableId: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+        WHERE coalesce(n.status, 'Current') = 'Current'
+        RETURN DISTINCT n.stableId AS NodeId, id AS TagId, l.name AS TagLevel
     ";
         var result = await session.RunAsync(query, new { tagIds = tagIds.Select(id => id.ToString()) });
         var records = await result.ToListAsync();
@@ -274,10 +276,10 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         UNWIND $tagIds AS id
-        MATCH (t:Tag {id: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
+        MATCH (t:Tag {stableId: id})-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(l:TagLevel)
         WHERE l.name IN $zoomLevels
-          AND (n.status IS NULL OR n.status <> 'pending_approval')
-        RETURN DISTINCT n.id AS NodeId, id AS TagId, l.name AS TagLevel
+          AND coalesce(n.status, 'Current') = 'Current'
+        RETURN DISTINCT n.stableId AS NodeId, id AS TagId, l.name AS TagLevel
     ";
 
         var nodeTagTriples = new HashSet<(Guid NodeId, Guid TagId, string TagLevel)>();
@@ -303,8 +305,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE n.id = $nodeId
-        RETURN t.id AS TagId
+        WHERE n.stableId = $nodeId
+        RETURN t.stableId AS TagId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -322,8 +324,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE n.id IN $nodeIds
-        RETURN t.id AS TagId
+        WHERE n.stableId IN $nodeIds
+        RETURN t.stableId AS TagId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -341,8 +343,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var query = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)-[:HAS_RESOURCE]->(r:Resource)
-        WHERE n.id = $nodeId
-        RETURN t.id AS TagId, r.id AS ResourceId
+        WHERE n.stableId = $nodeId
+        RETURN t.stableId AS TagId, r.id AS ResourceId
         ";
         var parameters = new Dictionary<string, object>
         {
@@ -371,7 +373,7 @@ public class GraphRepository : IGraphRepository
         // 直接拼接 label 到查询字符串
         string query = $@"
         MATCH (t:{label})
-        RETURN t.id AS TagId
+        RETURN t.stableId AS TagId
     ";
 
         using var session = _driver.AsyncSession();
@@ -389,8 +391,8 @@ public class GraphRepository : IGraphRepository
 
         var query = @"
         MATCH (parent:Tag)-[:CONTAIN*]->(child:Tag)
-        WHERE parent.id IN $tagIds
-        RETURN DISTINCT child.id AS tagId";
+        WHERE parent.stableId IN $tagIds
+        RETURN DISTINCT child.stableId AS tagId";
 
         var parameters = new { tagIds };
 
@@ -404,23 +406,20 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)
-        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
-        RETURN t.id AS TagId, n.id AS NodeId
+        WHERE coalesce(n.status, 'Current') = 'Current'
+        RETURN t.stableId AS TagId, collect(DISTINCT n.stableId) AS NodeIds
     ";
 
         var result = await session.RunAsync(cypher);
         var records = await result.ToListAsync();
 
         return records
-        .Select(r => new TagNodeGroup
-        {
-            TagId = Guid.Parse(r["TagId"].As<string>()), // Convert TagId once
-            NodeIds = r["NodeIds"].As<List<string>>()
-                .Select(nodeId => Guid.Parse(nodeId))  // Convert NodeIds once
-                .Distinct()
-                .ToList()
-        })
-        .ToList();
+            .Select(r => new TagNodeGroup
+            {
+                TagId = Guid.Parse(r["TagId"].As<string>()),
+                NodeIds = r["NodeIds"].As<List<string>>().Select(Guid.Parse).ToList()
+            })
+            .ToList();
     }
 
     public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsInViewAsync(IEnumerable<string> zoomLevels)
@@ -434,9 +433,9 @@ public class GraphRepository : IGraphRepository
             using var session = _driver.AsyncSession();
             var cypher = @"
         MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode)<-[:TAGGED_WITH]-(t2:TagLevel)
-        WHERE (n.status IS NULL OR n.status <> 'pending_approval')
+        WHERE coalesce(n.status, 'Current') = 'Current'
           AND t2.name IN $zoomLevels
-        RETURN t.id AS TagId, n.id AS NodeId
+        RETURN t.stableId AS TagId, collect(DISTINCT n.stableId) AS NodeIds
     ";
 
             var result = await session.RunAsync(cypher, new { zoomLevels });
@@ -444,11 +443,10 @@ public class GraphRepository : IGraphRepository
             var records = await result.ToListAsync();
 
             return records
-                .GroupBy(r => r["TagId"].As<string>())
-                .Select(g => new TagNodeGroup
+                .Select(r => new TagNodeGroup
                 {
-                    TagId = Guid.Parse(g.Key),
-                    NodeIds = g.Select(r => Guid.Parse(r["NodeId"].As<string>())).Distinct().ToList()
+                    TagId = Guid.Parse(r["TagId"].As<string>()),
+                    NodeIds = r["NodeIds"].As<List<string>>().Select(Guid.Parse).ToList()
                 })
                 .ToList();
         }
@@ -464,7 +462,7 @@ public class GraphRepository : IGraphRepository
         var session = _driver.AsyncSession();
         var result = await session.RunAsync(@"
         UNWIND $ids AS nodeId
-        MATCH (n:KnowledgeNode {id: nodeId})-[:HAS_RESOURCE]->(r:Resource)
+        MATCH (n:KnowledgeNode {stableId: nodeId})-[:HAS_RESOURCE]->(r:Resource)
         RETURN DISTINCT r.id AS resourceId", new { ids = knowledgeNodeIds.Select(id => id.ToString()) });
 
         await foreach (var record in result)
@@ -484,7 +482,7 @@ public class GraphRepository : IGraphRepository
 
         using var session = _driver.AsyncSession();
         var query = @"
-        MATCH (n:KnowledgeNode {id: $nodeId})-[:HAS_RESOURCE]->(r:Resource)
+        MATCH (n:KnowledgeNode {stableId: $nodeId})-[:HAS_RESOURCE]->(r:Resource)
         RETURN r.id AS ResourceId";
 
         var result = await session.RunAsync(query, new { nodeId });
@@ -497,14 +495,14 @@ public class GraphRepository : IGraphRepository
     public async Task CreateNodeAndResourceInGraphAsync(string nodeId, string name, string description, IEnumerable<string> links, string userId)
     {
         var query = @"
-        MERGE (n:KnowledgeNode {id: $nodeId})
+        MERGE (n:KnowledgeNode {stableId: $nodeId})
         SET n.name = $name, n.description = $description
-        SET n.status = 'pending_approval'
+        SET n.status = 'Draft'
         WITH n
         UNWIND $links AS l
         MERGE (r:Resource {link: l})
-        SET r.status = 'pending_approval'
-        MERGE (n)-[:HAS_RESOURCE {status: 'pending_approval', contributor: $userId}]->(r)
+        SET r.status = 'Draft'
+        MERGE (n)-[:HAS_RESOURCE {status: 'Draft', contributor: $userId}]->(r)
         WITH n
         MERGE (u:User {id: $userId})
         MERGE (u)-[:CREATED]->(n)";
@@ -527,7 +525,7 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var result = await session.RunAsync(@"
             MATCH (n)-[rel]->(m)
-            WHERE rel.userId = $userId AND rel.status <> 'pending_approval'
+            WHERE rel.userId = $userId AND coalesce(rel.status, 'Current') = 'Current'
             RETURN COUNT(rel) AS linkCount
         ", new { userId });
 
@@ -539,20 +537,21 @@ public class GraphRepository : IGraphRepository
         return 0;
     }
 
-    public async Task<bool> LinkResourceToNodeAsync(string nodeName, string resourceId)
+    public async Task<bool> LinkResourceToNodeAsync(string nodeStableId, string resourceId, string? userId = null)
     {
         var query = @"
-            MATCH (n:KnowledgeNode)
-            WHERE n.name = $nodeName
+            MATCH (n:KnowledgeNode {stableId: $nodeId})
             MERGE (r:Resource {id: $resourceId})
-            MERGE (n)-[:HAS_RESOURCE]->(r)
-            SET r.status = 'pending_approval'
+            SET r.status = coalesce(r.status, 'Draft')
+            MERGE (n)-[rel:HAS_RESOURCE]->(r)
+            SET rel.status = 'Draft',
+                rel.contributor = coalesce($userId, rel.contributor)
             RETURN r";
 
         try
         {
             using var session = _driver.AsyncSession();
-            var result = await session.RunAsync(query, new { nodeName, resourceId });
+            var result = await session.RunAsync(query, new { nodeId = nodeStableId, resourceId, userId });
             return await result.FetchAsync();
         }
         catch (Exception ex)
@@ -564,7 +563,7 @@ public class GraphRepository : IGraphRepository
 
     public async Task CreateTagNodeIfNotExistsAsync(string tagId)
     {
-        var query = @"MERGE (t:Tag {id: $tagId})";
+        var query = @"MERGE (t:Tag {stableId: $tagId})";
         using var session = _driver.AsyncSession();
         var results = await session.RunAsync(query, new Dictionary<string, object> { { "tagId", tagId.ToString() } });
         await results.FetchAsync();
@@ -573,9 +572,9 @@ public class GraphRepository : IGraphRepository
     public async Task RelateTagToNodeAsync(string tagId, string nodeId)
     {
         var query = @"
-        MATCH (t:Tag {id: $tagId})
-        MATCH (n:KnowledgeNode {id: $nodeId})
-        MERGE (t)-[:TAGGED_WITH {status: 'pending_approval'}]->(n)";
+        MATCH (t:Tag {stableId: $tagId})
+        MATCH (n:KnowledgeNode {stableId: $nodeId})
+        MERGE (t)-[:TAGGED_WITH {status: 'Draft'}]->(n)";
 
         var parameters = new Dictionary<string, object>
     {
@@ -598,8 +597,8 @@ public class GraphRepository : IGraphRepository
     public async Task CreatePendingTagNodeAsync(string tagId)
     {
         var query = @"
-        MERGE (t:Tag {id: $tagId})
-        SET t.status = 'pending_approval'";
+        MERGE (t:Tag {stableId: $tagId})
+        SET t.status = 'Draft'";
 
         var parameters = new Dictionary<string, object>
     {
@@ -621,8 +620,8 @@ public class GraphRepository : IGraphRepository
     public async Task SetTagStatusApprovedAsync(string tagId)
     {
         var query = @"
-        MATCH (t:Tag {id: $tagId})
-        REMOVE t.status";
+        MATCH (t:Tag {stableId: $tagId})
+        SET t.status = 'Current'";
 
         var parameters = new Dictionary<string, object>
     {
@@ -645,8 +644,8 @@ public class GraphRepository : IGraphRepository
     public async Task SetTagStatusRejectedAsync(string tagId)
     {
         var query = @"
-        MATCH (t:Tag {id: $tagId})
-        SET t.status = 'rejected'";
+        MATCH (t:Tag {stableId: $tagId})
+        SET t.status = 'Rejected'";
 
         var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
         try
@@ -659,10 +658,30 @@ public class GraphRepository : IGraphRepository
         }
     }
 
+    public async Task PromoteTagRelationsAsync(string nodeId)
+    {
+        var query = @"
+        MATCH (:Tag)-[r:TAGGED_WITH]->(n:KnowledgeNode {stableId: $nodeId})
+        SET r.status = 'Current'";
+
+        using var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
+        await session.RunAsync(query, new { nodeId });
+    }
+
+    public async Task MarkTagRelationsRejectedAsync(string nodeId)
+    {
+        var query = @"
+        MATCH (:Tag)-[r:TAGGED_WITH]->(n:KnowledgeNode {stableId: $nodeId})
+        SET r.status = 'Rejected'";
+
+        using var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
+        await session.RunAsync(query, new { nodeId });
+    }
+
     public async Task DetachResourcesFromNodeAsync(string nodeId)
     {
         var query = @"
-        MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(:Resource)
+        MATCH (n:KnowledgeNode {stableId: $nodeId})-[r:HAS_RESOURCE]->(:Resource)
         DELETE r";
 
         var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
@@ -679,8 +698,9 @@ public class GraphRepository : IGraphRepository
     public async Task ApproveNodeResourceRelationsAsync(string nodeId)
     {
         var query = @"
-        MATCH (n:KnowledgeNode {id: $nodeId})-[r:LINKED_TO]->(res:Resource)
-        REMOVE r.status";
+        MATCH (n:KnowledgeNode {stableId: $nodeId})-[r:HAS_RESOURCE]->(res:Resource)
+        SET r.status = 'Current',
+            res.status = 'Current'";
 
         var session = _driver.AsyncSession(o => o.WithDefaultAccessMode(AccessMode.Write).WithDatabase("neo4j"));
         try
@@ -700,8 +720,8 @@ public class GraphRepository : IGraphRepository
         var query = @"
         MATCH (p:KnowledgeNode)<-[:TAGGED_WITH]-(pt:Tag)
         MATCH (pt)-[:CONTAIN*0..]->(ct:Tag)-[:TAGGED_WITH]->(c:KnowledgeNode)<-[:TAGGED_WITH]-(lvl:TagLevel {name: $targetLevel})
-        WHERE p.id IN $parentIds AND (c.status IS NULL OR c.status <> 'pending_approval')
-        RETURN DISTINCT c.id AS NodeId";
+        WHERE p.stableId IN $parentIds AND coalesce(c.status, 'Current') = 'Current'
+        RETURN DISTINCT c.stableId AS NodeId";
 
         var parameters = new Dictionary<string, object>
         {
@@ -723,8 +743,8 @@ public class GraphRepository : IGraphRepository
         using var session = _driver.AsyncSession();
         var cypher = @"
 UNWIND $nodeIds AS nid
-MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode {id: nid})
-RETURN t.id AS tagId, count(DISTINCT n) AS cnt";
+MATCH (t:Tag)-[:TAGGED_WITH]->(n:KnowledgeNode {stableId: nid})
+RETURN t.stableId AS tagId, count(DISTINCT n) AS cnt";
         var cursor = await session.RunAsync(cypher, new { nodeIds = ids });
         var rows = await cursor.ToListAsync();
         foreach (var r in rows)

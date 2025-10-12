@@ -6,7 +6,7 @@ using Microsoft.AspNetCore.Authorization;
 using Sciencetopia.Services;
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
-
+using Sciencetopia.Services.KnowledgeGraph;
 
 namespace Sciencetopia.Controllers.KnowledgeNetwork
 {
@@ -263,6 +263,10 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 var responseMessage = await _knowledgeGraphService.CreateNodeAsync(request, userId);
                 return Ok(responseMessage);
             }
+            catch (DraftingFrozenException ex)
+            {
+                return StatusCode(503, ex.Message);
+            }
             catch (InvalidOperationException ex)
             {
                 return Conflict(ex.Message);
@@ -312,13 +316,12 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             try
             {
                 string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
-
-                var tagId = await _tagRepository.CreateTagDraftAsync(request.Name, request.Description, userId);
-
-                await _graphRepository.CreatePendingTagNodeAsync(tagId.ToString());
-
-                // 无论是否重复，CreateTagDraftAsync 已处理好，我们统一返回成功提示
+                await _knowledgeGraphService.CreateTagDraftAsync(request.Name, request.Description, userId);
                 return Ok("Tag draft submitted (new or already exists).");
+            }
+            catch (DraftingFrozenException ex)
+            {
+                return StatusCode(503, ex.Message);
             }
             catch (Exception ex)
             {
@@ -340,6 +343,10 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 var responseMessage = await _knowledgeGraphService.EditNodeAsync(request, userId);
                 return Ok(responseMessage);
             }
+            catch (DraftingFrozenException ex)
+            {
+                return StatusCode(503, ex.Message);
+            }
             catch (InvalidOperationException ex)
             {
                 return Conflict(ex.Message);
@@ -352,18 +359,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
 
         [HttpPost("ApproveNode")]
         [Authorize(Roles = "administrator")]
-        public async Task<IActionResult> ApproveNode(string nodeName)
+        public async Task<IActionResult> ApproveNode(Guid versionId)
         {
-            if (string.IsNullOrWhiteSpace(nodeName))
+            if (versionId == Guid.Empty)
             {
-                return BadRequest("Node name is required.");
+                return BadRequest("Version identifier is required.");
             }
 
             try
             {
                 string adminId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
-                // 这里的 adminId 是从 JWT 中获取的，假设你已经在 JWT 中存储了管理员的 ID
-                bool success = await _knowledgeGraphService.ApproveNodeAsync(nodeName, adminId);
+                bool success = await _knowledgeGraphService.ApproveNodeAsync(versionId, adminId);
                 if (success)
                     return Ok("Node approval successful.");
                 else
@@ -377,16 +383,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
 
         [HttpPost("RejectNode")]
         [Authorize(Roles = "administrator")]
-        public async Task<IActionResult> DisapproveNode(string nodeName)
+        public async Task<IActionResult> DisapproveNode(Guid versionId)
         {
-            if (string.IsNullOrWhiteSpace(nodeName))
+            if (versionId == Guid.Empty)
             {
-                return BadRequest("Node name is required.");
+                return BadRequest("Version identifier is required.");
             }
 
             try
             {
-                bool success = await _knowledgeGraphService.DisapproveNodeAsync(nodeName);
+                string adminId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                bool success = await _knowledgeGraphService.DisapproveNodeAsync(versionId, adminId);
                 if (success)
                     return Ok("Node disapproval successful.");
                 else
@@ -399,16 +406,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("ResubmitNode")]
-        public async Task<IActionResult> ResubmitNode(string nodeName)
+        public async Task<IActionResult> ResubmitNode(Guid versionId)
         {
-            if (string.IsNullOrWhiteSpace(nodeName))
+            if (versionId == Guid.Empty)
             {
-                return BadRequest("Node name is required.");
+                return BadRequest("Version identifier is required.");
             }
 
             try
             {
-                bool success = await _knowledgeGraphService.ResubmitNodeAsync(nodeName);
+                string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                bool success = await _knowledgeGraphService.ResubmitNodeAsync(versionId, userId);
                 if (success)
                     return Ok("Node resubmission successful.");
                 else
@@ -508,6 +516,10 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                     return Ok();
                 else
                     return NotFound("Node not found.");
+            }
+            catch (DraftingFrozenException ex)
+            {
+                return StatusCode(503, ex.Message);
             }
             catch (Exception ex)
             {

@@ -48,6 +48,22 @@ public interface ICohortService
         _driver = driver;
     }
 
+    private async Task<Guid> ResolvePlanStableIdAsync(Guid identifier, CancellationToken ct = default)
+    {
+        var stable = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.Id == identifier)
+            .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+            .FirstOrDefaultAsync(ct);
+        if (stable != Guid.Empty)
+        {
+            return stable;
+        }
+
+        var exists = await _db.StudyPlans.AsNoTracking()
+            .AnyAsync(p => p.StableId == identifier, ct);
+        return exists ? identifier : Guid.Empty;
+    }
+
     public async Task<Sciencetopia.DTOs.EnrollmentMeDto> GetEnrollmentForUserAsync(Guid planId, string userId, CancellationToken ct = default)
     {
         var dto = new Sciencetopia.DTOs.EnrollmentMeDto();
@@ -123,8 +139,11 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
 
     public async Task<List<CohortViewDto>> ListByPlanAsync(Guid planId)
     {
+        var stableId = await ResolvePlanStableIdAsync(planId);
+        if (stableId == Guid.Empty) return new List<CohortViewDto>();
+
         var list = await _db.Cohorts.AsNoTracking()
-            .Where(x => x.StudyPlanId == planId)
+            .Where(x => x.StudyPlanStableId == stableId)
             .OrderBy(x => x.StartAt ?? x.CreatedAt)
             .ToListAsync();
         return list.Select(ToDto).ToList();
@@ -151,7 +170,7 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
 
     public async Task<Guid?> GetPlanIdAsync(Guid cohortId)
         => await _db.Cohorts.Where(x => x.Id == cohortId)
-                            .Select(x => (Guid?)x.StudyPlanId)
+                            .Select(x => (Guid?)x.StudyPlanStableId)
                             .FirstOrDefaultAsync();
 
     // Removed EnrollAsync (deprecated)
@@ -242,7 +261,7 @@ RETURN c.id AS cohortId;";
     {
         var info = await _db.Cohorts.AsNoTracking()
             .Where(x => x.Id == cohortId)
-            .Select(x => new { x.StudyPlanId, x.StudyGroupId })
+            .Select(x => new { x.StudyPlanStableId, x.StudyGroupId })
             .FirstOrDefaultAsync(ct);
         if (info == null) throw new KeyNotFoundException("cohort_not_found");
 
@@ -254,7 +273,7 @@ RETURN c.id AS cohortId;";
             .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId, ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
-        return info.StudyPlanId;
+        return info.StudyPlanStableId;
     }
 
     public async Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, bool shareMetrics = true, string? migrationStrategy = null, CancellationToken ct = default)
@@ -262,10 +281,11 @@ RETURN c.id AS cohortId;";
         // Validate target cohort belongs to plan
         var target = await _db.Cohorts.AsNoTracking()
             .Where(x => x.Id == toCohortId)
-            .Select(x => new { x.StudyPlanId, x.StudyGroupId })
+            .Select(x => new { x.StudyPlanStableId, x.StudyGroupId })
             .FirstOrDefaultAsync(ct);
         if (target == null) throw new KeyNotFoundException("cohort_not_found");
-        if (target.StudyPlanId != planId) throw new InvalidOperationException("cohort_plan_mismatch");
+        var stableId = await ResolvePlanStableIdAsync(planId, ct);
+        if (stableId == Guid.Empty || target.StudyPlanStableId != stableId) throw new InvalidOperationException("cohort_plan_mismatch");
 
         if (!target.StudyGroupId.HasValue) throw new InvalidOperationException("cohort_not_group_scoped");
         var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
@@ -289,7 +309,7 @@ RETURN '' AS fromCohortId, to.id AS toCohortId;";
         if (!string.IsNullOrEmpty(fromStr))
             fromId = Guid.Parse(fromStr);
 
-        return (planId, fromId, toCohortId);
+        return (stableId, fromId, toCohortId);
     }
 
     private async Task UpsertCohortNodeAsync(StudyPlanCohort c)
@@ -306,7 +326,7 @@ MERGE (c)-[:FOR_PLAN]->(p)
             await tx.RunAsync(cypher, new
             {
                 id = c.Id,
-                planId = c.StudyPlanId,
+                planId = c.StudyPlanStableId,
                 title = c.Title,
                 visibility = c.Visibility,
                 startAt = c.StartAt,
@@ -396,28 +416,31 @@ RETURN count(res) AS migrated";
 
     public async Task<int> EnsureEnrollmentToCurrentVersionAsync(Guid planId, string userId, CancellationToken ct = default)
     {
-        // Resolve current or latest version number
-        long? currentId = await _db.StudyPlans.AsNoTracking()
+        var planEntity = await _db.StudyPlans.AsNoTracking()
             .Where(p => p.Id == planId)
-            .Select(p => p.CurrentVersionId)
+            .Select(p => new { p.StableId, p.VersionNumber, p.IsCurrent })
             .FirstOrDefaultAsync(ct);
 
-        int versionNumber;
-        if (currentId.HasValue)
+        Guid stableId;
+        if (planEntity != null)
         {
-            versionNumber = await _db.StudyPlanVersions
-                .Where(v => v.Id == currentId.Value)
-                .Select(v => v.VersionNumber)
-                .FirstOrDefaultAsync(ct);
+            stableId = planEntity.StableId == Guid.Empty ? planId : planEntity.StableId;
         }
         else
         {
-            versionNumber = await _db.StudyPlanVersions
-                .Where(v => v.StudyPlanId == planId)
-                .OrderByDescending(v => v.VersionNumber)
-                .Select(v => v.VersionNumber)
-                .FirstOrDefaultAsync(ct);
+            stableId = await ResolvePlanStableIdAsync(planId, ct);
+            if (stableId == Guid.Empty)
+            {
+                return 0;
+            }
         }
+
+        var versionNumber = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == stableId)
+            .OrderByDescending(p => p.IsCurrent)
+            .ThenByDescending(p => p.VersionNumber)
+            .Select(p => p.VersionNumber)
+            .FirstOrDefaultAsync(ct);
 
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
@@ -426,12 +449,12 @@ RETURN count(res) AS migrated";
 MERGE (pv:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
 MERGE (u:User {id:$userId})
 MERGE (u)-[:ENROLLED_IN]->(pv)";
-            await tx.RunAsync(cypher, new { planId = planId.ToString(), userId, versionNumber });
+            await tx.RunAsync(cypher, new { planId = stableId.ToString(), userId, versionNumber });
         });
 
         return versionNumber;
     }
 
     private static CohortViewDto ToDto(StudyPlanCohort c)
-        => new CohortViewDto(c.Id, c.StudyPlanId, c.Title, c.Visibility, c.StartAt, c.EndAt, c.CreatedBy, c.CreatedAt);
+        => new CohortViewDto(c.Id, c.StudyPlanStableId, c.Title, c.Visibility, c.StartAt, c.EndAt, c.CreatedBy, c.CreatedAt);
 }

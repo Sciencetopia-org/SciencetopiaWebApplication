@@ -9,7 +9,7 @@ public class StudyPlanCohort
     public Guid Id { get; set; } = Guid.NewGuid();
 
     [Required]
-    public Guid StudyPlanId { get; set; }
+    public Guid StudyPlanStableId { get; set; }
 
     [MaxLength(200)]
     public string? Title { get; set; }
@@ -25,9 +25,6 @@ public class StudyPlanCohort
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-    // Navigation
-    public StudyPlanEntity? Plan { get; set; }
-
     // Group-scoped cohort (optional)
     public Guid? StudyGroupId { get; set; }
 
@@ -35,6 +32,7 @@ public class StudyPlanCohort
     public CohortEnrollMode EnrollMode { get; set; } = CohortEnrollMode.OptIn;
 
     // Version pinning and member count
-    public long? PinnedVersionId { get; set; }
+    public int? PinnedVersionNumber { get; set; }
     public int MembersCount { get; set; }
+
 }

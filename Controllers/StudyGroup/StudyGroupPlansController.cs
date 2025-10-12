@@ -30,7 +30,7 @@ namespace Sciencetopia.Controllers.StudyGroups
             var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
 
-            var rec = await _sharingService.ShareToStudyGroupAsync(studyGroupId, planId, request.Permission, request.AutoEnroll, request.UseDraftFlow, userId);
+            var rec = await _sharingService.ShareToStudyGroupAsync(studyGroupId, planId, request.Permission, request.AutoEnroll, request.VersionNumber, userId);
             return Ok(rec);
         }
 

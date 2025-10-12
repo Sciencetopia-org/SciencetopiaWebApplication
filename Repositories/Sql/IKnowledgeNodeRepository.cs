@@ -26,14 +26,18 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
     public async Task<IEnumerable<Guid>> GetAllNodeIdsAsync()
     {
         return await _context.KnowledgeNodes
-                             .Where(node => node.Id != null)
-                             .Select(node => node.Id.Value)
+                             .Where(node => node.IsCurrent && node.Status == "Current")
+                             .Select(node => node.StableId)
                              .ToListAsync();
     }
 
     public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id, string language = "zh")
     {
-        var node = await _context.KnowledgeNodes.FirstOrDefaultAsync(n => n.Id == id);
+        var node = await _context.KnowledgeNodes
+            .Where(n => n.IsCurrent && n.Status == "Current" &&
+                        ((n.Id.HasValue && n.Id.Value == id) || n.StableId == id))
+            .OrderByDescending(n => n.VersionNumber)
+            .FirstOrDefaultAsync();
         if (node == null) return null;
 
         // L10n-aware override if enabled
@@ -46,16 +50,16 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
             return (
                 (title ?? node.Name) ?? string.Empty,
                 (desc ?? node.Description) ?? string.Empty,
-                node.CreatedDate ?? default,
-                node.UpdatedDate ?? default
+                node.CreatedAt ?? default,
+                node.PublishedAt ?? node.ApprovedAt ?? node.CreatedAt ?? default
             );
         }
 
         return (
             node.Name ?? string.Empty,
             node.Description ?? string.Empty,
-            node.CreatedDate ?? default,
-            node.UpdatedDate ?? default
+            node.CreatedAt ?? default,
+            node.PublishedAt ?? node.ApprovedAt ?? node.CreatedAt ?? default
         );
     }
 
@@ -80,10 +84,18 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
 
         // Base names in one query
         var baseRows = await _context.KnowledgeNodes
-                              .Where(n => n.Id.HasValue && idSet.Contains(n.Id.Value))
-                              .Select(n => new { Id = n.Id!.Value, Name = n.Name })
+                              .Where(n => n.IsCurrent && n.Status == "Current" &&
+                                          ((n.Id.HasValue && idSet.Contains(n.Id.Value)) || idSet.Contains(n.StableId)))
+                              .Select(n => new { n.Id, n.StableId, n.Name })
                               .ToListAsync();
-        var baseMap = baseRows.ToDictionary(r => r.Id, r => r.Name ?? string.Empty);
+        var baseMap = new Dictionary<Guid, string>();
+        foreach (var row in baseRows)
+        {
+            if (row.Id.HasValue && idSet.Contains(row.Id.Value))
+                baseMap[row.Id.Value] = row.Name ?? string.Empty;
+            if (idSet.Contains(row.StableId))
+                baseMap[row.StableId] = row.Name ?? string.Empty;
+        }
 
         // If L10n enabled, try to bulk fetch localized titles and overlay
         var opts = _context.GetService<Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions>>();
@@ -117,7 +129,7 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
             // Find nodes whose L10n name/description matches, in preferred lang or null
             var l10nMatches = await (
                 from n in _context.KnowledgeNodes
-                where n.Id.HasValue
+                where n.Id.HasValue && n.IsCurrent && n.Status == "Current"
                 join nls in _context.NodeL10nSets on n.Id!.Value equals nls.NodeId
                 join si in _context.L10nSetItems on nls.L10nSetId equals si.L10nSetId
                 join i in _context.L10nItems on si.L10nItemId equals i.L10nItemId
@@ -127,7 +139,7 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
                           || (i.Content != null && EF.Functions.Like(i.Content, $"%{q}%")))
                 select n
             )
-            .OrderByDescending(n => n.UpdatedDate)
+            .OrderByDescending(n => n.PublishedAt ?? n.ApprovedAt ?? n.CreatedAt ?? DateTimeOffset.MinValue)
             .Skip(skip)
             .Take(take)
             .ToListAsync();
@@ -138,9 +150,10 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
         }
 
         return await _context.KnowledgeNodes
-            .Where(n => EF.Functions.Like(n.Name ?? string.Empty, $"%{q}%") ||
-                         EF.Functions.Like(n.Description ?? string.Empty, $"%{q}%"))
-            .OrderByDescending(n => n.UpdatedDate)
+            .Where(n => n.IsCurrent && n.Status == "Current" &&
+                        (EF.Functions.Like(n.Name ?? string.Empty, $"%{q}%") ||
+                         EF.Functions.Like(n.Description ?? string.Empty, $"%{q}%")))
+            .OrderByDescending(n => n.PublishedAt ?? n.ApprovedAt ?? n.CreatedAt ?? DateTimeOffset.MinValue)
             .Skip(skip)
             .Take(take)
             .ToListAsync();

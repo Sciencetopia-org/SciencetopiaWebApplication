@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
+using Sciencetopia.Services.KnowledgeGraph;
 using Sciencetopia.Services.Messaging;
 using Sciencetopia.Models;
 using Sciencetopia.Hubs;
@@ -25,7 +26,13 @@ Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 // Add services to the container.
 builder.Services.AddTransient<IEmailSender, EmailSender>();
 builder.Services.AddTransient<ISmsSender, SmsSender>();
-builder.Services.AddScoped<StudyPlanService>();
+builder.Services.AddScoped<StudyPlanService>(sp =>
+    new StudyPlanService(
+        sp.GetRequiredService<IDriver>(),
+        sp.GetRequiredService<ILogger<StudyPlanService>>(),
+        sp.GetRequiredService<IStudyPlanRepository>(),
+        sp.GetRequiredService<ITagRepository>(),
+        sp.GetRequiredService<ITagResolutionService>()));
 builder.Services.AddScoped<StudyGroupService>();
 builder.Services.AddScoped<LearningService>();
 builder.Services.AddScoped<UserService>();
@@ -46,7 +53,7 @@ builder.Services.AddScoped<IKnowledgeNodeRepository, KnowledgeNodeRepository>();
 builder.Services.AddScoped<ITagRepository, TagRepository>();
 builder.Services.AddScoped<ITagResolutionService, TagResolutionService>();
 builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
-builder.Services.AddScoped<INodeApprovalRepository, NodeApprovalRepository>();
+builder.Services.AddSingleton<IDraftFreezeService, DraftFreezeService>();
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
 builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
 builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
@@ -54,11 +61,14 @@ builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<Sciencetopia.Services.PermissionService>();
 builder.Services.AddScoped<Sciencetopia.Services.Cohorts.ICohortService, Sciencetopia.Services.Cohorts.CohortService>();
+builder.Services.AddScoped<IVersioningService, VersioningService>();
+builder.Services.AddScoped<IKnowledgeGraphWorkflowService, KnowledgeGraphWorkflowService>();
 // L10n services
 builder.Services.Configure<Sciencetopia.Services.L10n.L10nOptions>(builder.Configuration.GetSection("L10n"));
 builder.Services.AddScoped<Sciencetopia.Services.L10n.IL10nService, Sciencetopia.Services.L10n.L10nService>();
 builder.Services.AddScoped<Sciencetopia.Services.L10n.L10nMigrationRunner>();
 builder.Services.AddSingleton<Sciencetopia.Middleware.ILanguageContext, Sciencetopia.Middleware.LanguageContext>();
+builder.Services.Configure<DraftFreezeOptions>(builder.Configuration.GetSection("KnowledgeGraph:DraftFreeze"));
 // Progress tracking services
 builder.Services.AddScoped<Sciencetopia.Repositories.Neo4j.INeo4jProgressRepository, Sciencetopia.Repositories.Neo4j.Neo4jProgressRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.Progress.IResourceProgressService, Sciencetopia.Services.Progress.ResourceProgressService>();

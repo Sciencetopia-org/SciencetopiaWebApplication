@@ -24,31 +24,75 @@ namespace Sciencetopia.Services
         public async Task<List<StudyGroupStudyPlan>> GetSharedPlansForStudyGroupAsync(string studyGroupId)
         {
             var sgId = Guid.Parse(studyGroupId);
-            var planIds = await _db.StudyGroupStudyPlans
+            return await _db.StudyGroupStudyPlans
                 .AsNoTracking()
                 .Where(x => x.StudyGroupId == sgId)
                 .ToListAsync();
-            return planIds;
         }
 
         // Share to StudyGroup (upsert)
-        public async Task<StudyGroupStudyPlan> ShareToStudyGroupAsync(string studyGroupId, string studyPlanId, string permission, bool autoEnroll, bool useDraftFlow, string? createdBy)
+        private async Task<(Guid stableId, IReadOnlyList<StudyPlanEntity> versions)> LoadPlanVersionsAsync(Guid identifier)
+        {
+            var byStable = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.StableId == identifier)
+                .OrderByDescending(p => p.VersionNumber)
+                .ToListAsync();
+
+            if (byStable.Count > 0)
+            {
+                return (identifier, byStable);
+            }
+
+            var version = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.Id == identifier)
+                .OrderByDescending(p => p.VersionNumber)
+                .ToListAsync();
+
+            if (version.Count == 0)
+            {
+                throw new InvalidOperationException($"Study plan {identifier} not found.");
+            }
+
+            var stableId = version.First().StableId == Guid.Empty ? version.First().Id : version.First().StableId;
+            if (stableId != identifier)
+            {
+                var fullSet = await _db.StudyPlans.AsNoTracking()
+                    .Where(p => p.StableId == stableId)
+                    .OrderByDescending(p => p.VersionNumber)
+                    .ToListAsync();
+                return (stableId, fullSet.Count > 0 ? fullSet : version);
+            }
+
+            return (stableId, version);
+        }
+
+        public async Task<StudyGroupStudyPlan> ShareToStudyGroupAsync(string studyGroupId, string studyPlanId, string permission, bool autoEnroll, int? requestedVersionNumber, string? createdBy)
         {
             var sgId = Guid.Parse(studyGroupId);
-            var spId = Guid.Parse(studyPlanId);
+            var planIdentifier = Guid.Parse(studyPlanId);
+
+            var (stableId, versions) = await LoadPlanVersionsAsync(planIdentifier);
+            var targetVersion = requestedVersionNumber.HasValue
+                ? versions.FirstOrDefault(p => p.VersionNumber == requestedVersionNumber.Value)
+                : versions.FirstOrDefault(p => p.IsCurrent) ?? versions.First();
+
+            if (targetVersion == null)
+            {
+                throw new InvalidOperationException($"Study plan {stableId} has no versions.");
+            }
 
             var existing = await _db.StudyGroupStudyPlans
-                .FirstOrDefaultAsync(x => x.StudyGroupId == sgId && x.StudyPlanId == spId);
+                .FirstOrDefaultAsync(x => x.StudyGroupId == sgId && x.StudyPlanStableId == stableId);
 
             if (existing == null)
             {
                 existing = new StudyGroupStudyPlan
                 {
                     StudyGroupId = sgId,
-                    StudyPlanId = spId,
+                    StudyPlanStableId = stableId,
+                    PinnedVersionNumber = targetVersion.VersionNumber,
                     Permission = permission,
                     AutoEnroll = autoEnroll,
-                    UseDraftFlow = useDraftFlow,
                     CreatedBy = createdBy,
                     CreatedDate = DateTime.UtcNow,
                     UpdatedDate = DateTime.UtcNow
@@ -59,12 +103,13 @@ namespace Sciencetopia.Services
             {
                 existing.Permission = permission;
                 existing.AutoEnroll = autoEnroll;
-                existing.UseDraftFlow = useDraftFlow;
+                existing.PinnedVersionNumber = targetVersion.VersionNumber;
                 existing.UpdatedDate = DateTime.UtcNow;
             }
+
             await _db.SaveChangesAsync();
 
-            // Neo4j relationship
+            var planNodeId = stableId.ToString();
             using var session = _neo4j.AsyncSession();
             var cypher = @"
 MERGE (p:StudyPlan {id: $planId})
@@ -72,31 +117,30 @@ MERGE (g:StudyGroup {id: $groupId})
 MERGE (g)-[r:SHARES_PLAN]->(p)
 SET r.permission = $permission,
     r.autoEnroll = $autoEnroll,
-    r.useDraftFlow = $useDraftFlow,
+    r.pinnedVersion = $pinnedVersion,
     r.updatedAt = timestamp()
 RETURN id(r) as relId;";
-            await session.RunAsync(cypher, new { planId = studyPlanId, groupId = studyGroupId, permission, autoEnroll, useDraftFlow });
+            await session.RunAsync(cypher, new
+            {
+                planId = planNodeId,
+                groupId = studyGroupId,
+                permission,
+                autoEnroll,
+                pinnedVersion = targetVersion.VersionNumber
+            });
 
             if (autoEnroll)
             {
-                // AutoEnroll members to the plan's current (or latest) PlanVersion
-                // Resolve version from SQL
-                long? pinned = await _db.StudyPlans.AsNoTracking().Where(p => p.Id == spId).Select(p => p.CurrentVersionId).FirstOrDefaultAsync();
-                int versionNumber;
-                if (pinned.HasValue)
-                {
-                    versionNumber = await _db.StudyPlanVersions.Where(v => v.Id == pinned.Value).Select(v => v.VersionNumber).FirstOrDefaultAsync();
-                }
-                else
-                {
-                    versionNumber = await _db.StudyPlanVersions.Where(v => v.StudyPlanId == spId).OrderByDescending(v => v.VersionNumber).Select(v => v.VersionNumber).FirstOrDefaultAsync();
-                }
-
                 var enrollCypher = @"
 MATCH (g:StudyGroup {id:$groupId})<-[:MEMBER_OF]-(u:User)
 MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
 MERGE (u)-[:ENROLLED_IN]->(v);";
-                await session.RunAsync(enrollCypher, new { groupId = studyGroupId, planId = studyPlanId, versionNumber });
+                await session.RunAsync(enrollCypher, new
+                {
+                    groupId = studyGroupId,
+                    planId = planNodeId,
+                    versionNumber = targetVersion.VersionNumber
+                });
             }
 
             return existing;
@@ -105,39 +149,47 @@ MERGE (u)-[:ENROLLED_IN]->(v);";
         public async Task<bool> UnshareFromStudyGroupAsync(string studyGroupId, string studyPlanId)
         {
             var sgId = Guid.Parse(studyGroupId);
-            var spId = Guid.Parse(studyPlanId);
+            var planIdentifier = Guid.Parse(studyPlanId);
+
+            var (stableId, _) = await LoadPlanVersionsAsync(planIdentifier);
 
             var existing = await _db.StudyGroupStudyPlans
-                .FirstOrDefaultAsync(x => x.StudyGroupId == sgId && x.StudyPlanId == spId);
-            if (existing != null)
+                .FirstOrDefaultAsync(x => x.StudyGroupId == sgId && x.StudyPlanStableId == stableId);
+            if (existing == null)
             {
-                _db.StudyGroupStudyPlans.Remove(existing);
-                await _db.SaveChangesAsync();
+                return false;
             }
+
+            _db.StudyGroupStudyPlans.Remove(existing);
+            await _db.SaveChangesAsync();
 
             using var session = _neo4j.AsyncSession();
             var cypher = @"
 MATCH (:StudyGroup {id:$groupId})-[r:SHARES_PLAN]->(:StudyPlan {id:$planId})
 DELETE r";
-            await session.RunAsync(cypher, new { groupId = studyGroupId, planId = studyPlanId });
+            await session.RunAsync(cypher, new { groupId = studyGroupId, planId = stableId.ToString() });
             return true;
         }
 
         // Permission calculation
         public async Task<object> GetEffectivePermissionsAsync(string planId, string userId)
         {
+            var identifier = Guid.Parse(planId);
+            var (stableId, _) = await LoadPlanVersionsAsync(identifier);
+            var nodeId = stableId.ToString();
+
             using var session = _neo4j.AsyncSession();
 
             // Owner check
             var ownerQuery = @"MATCH (u:User {id:$userId})-[:CREATED]->(p:StudyPlan {id:$planId}) RETURN COUNT(p) > 0 AS isOwner";
-            var ownerRes = await session.RunAsync(ownerQuery, new { userId, planId });
+            var ownerRes = await session.RunAsync(ownerQuery, new { userId, planId = nodeId });
             var isOwner = (await ownerRes.SingleAsync())[0].As<bool>();
 
             // Collect group-based permissions
             var permQuery = @"
 MATCH (u:User {id:$userId})- [m:MEMBER_OF]-> (sg:StudyGroup)- [r:SHARES_PLAN]-> (p:StudyPlan {id:$planId})
 RETURN collect({groupId: sg.id, permission: r.permission, role: m.role}) AS sources";
-            var permRes = await session.RunAsync(permQuery, new { userId, planId });
+            var permRes = await session.RunAsync(permQuery, new { userId, planId = nodeId });
             var sources = (await permRes.SingleAsync())[0].As<List<object>>();
 
             // Evaluate

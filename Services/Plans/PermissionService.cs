@@ -18,27 +18,55 @@ namespace Sciencetopia.Services;
         _cache = cache;
     }
 
+    private async Task<(Guid stableId, Guid? creatorId, string? privacy)> ResolvePlanMetadataAsync(Guid identifier, CancellationToken ct)
+    {
+        var plan = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.Id == identifier)
+            .Select(p => new
+            {
+                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                p.CreatorId,
+                Privacy = (string?)EF.Property<string>(p, "Privacy")
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (plan != null)
+        {
+            return (plan.StableId, plan.CreatorId, plan.Privacy);
+        }
+
+        var fallback = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == identifier)
+            .OrderByDescending(p => p.IsCurrent)
+            .ThenByDescending(p => p.VersionNumber)
+            .Select(p => new
+            {
+                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                p.CreatorId,
+                Privacy = (string?)EF.Property<string>(p, "Privacy")
+            })
+            .FirstOrDefaultAsync(ct);
+
+        return fallback == null ? (Guid.Empty, null, null) : (fallback.StableId, fallback.CreatorId, fallback.Privacy);
+    }
+
     public async Task<PlanRole> GetEffectivePlanRoleAsync(string userId, Guid planId, CancellationToken ct = default)
     {
-        var cacheKey = $"perm:plan:{planId}:user:{userId}";
+        var (stableId, creatorId, privacy) = await ResolvePlanMetadataAsync(planId, ct);
+        if (stableId == Guid.Empty)
+        {
+            return PlanRole.Viewer;
+        }
+
+        var cacheKey = $"perm:plan:{stableId}:user:{userId}";
         if (_cache.TryGetValue(cacheKey, out PlanRole cached))
             return cached;
 
         // Owner via StudyPlans.CreatorId (GUID stored)
         var userGuid = Guid.TryParse(userId, out var ug) ? ug : Guid.Empty;
 
-        var plan = await _db.StudyPlans
-            .Where(p => p.Id == planId)
-            .Select(p => new { p.Id, p.Title, p.Description, p.CreatorId, Privacy = (string?)EF.Property<string>(p, "Privacy") })
-            .FirstOrDefaultAsync(ct);
-
-        if (plan == null)
-        {
-            return PlanRole.Viewer; // non-existing plan → minimal
-        }
-
         // a) Owner
-        if (plan.CreatorId == userGuid)
+        if (creatorId.HasValue && creatorId.Value == userGuid)
         {
             return SetCache(cacheKey, PlanRole.Owner);
         }
@@ -47,7 +75,7 @@ namespace Sciencetopia.Services;
 
         // b) Direct user role
         var direct = await _db.StudyPlanUserRoles
-            .Where(r => r.PlanId == planId && r.UserId == userId)
+            .Where(r => r.PlanStableId == stableId && r.UserId == userId)
             .Select(r => r.Role)
             .FirstOrDefaultAsync(ct);
         if (direct > best) best = direct;
@@ -56,13 +84,13 @@ namespace Sciencetopia.Services;
         var hasGroupLink = await _db.StudyGroupUserRoles
             .Where(gr => gr.UserId == userId)
             .Join(_db.StudyGroupStudyPlans, gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => new { gr, gp })
-            .AnyAsync(x => x.gp.StudyPlanId == planId, ct);
+            .AnyAsync(x => x.gp.StudyPlanStableId == stableId, ct);
         if (hasGroupLink && best < PlanRole.Viewer)
             best = PlanRole.Viewer; // default visibility level from group
 
         // d) Privacy fallback (Public → Viewer)
-        var privacy = plan.Privacy?.ToLowerInvariant();
-        if (privacy == "public" && best < PlanRole.Viewer)
+        var privacyLevel = privacy?.ToLowerInvariant();
+        if (privacyLevel == "public" && best < PlanRole.Viewer)
             best = PlanRole.Viewer;
 
         return SetCache(cacheKey, best);
@@ -95,10 +123,14 @@ namespace Sciencetopia.Services;
         return predicate(role);
     }
 
-    public void Invalidate(string userId, Guid planId)
+    public async Task InvalidateAsync(string userId, Guid planId, CancellationToken ct = default)
     {
-        var cacheKey = $"perm:plan:{planId}:user:{userId}";
-        _cache.Remove(cacheKey);
+        _cache.Remove($"perm:plan:{planId}:user:{userId}");
+        var (stableId, _, _) = await ResolvePlanMetadataAsync(planId, ct);
+        if (stableId != Guid.Empty)
+        {
+            _cache.Remove($"perm:plan:{stableId}:user:{userId}");
+        }
     }
 
     // Returns an aggregated boolean permissions view for a given user/plan/cohort.

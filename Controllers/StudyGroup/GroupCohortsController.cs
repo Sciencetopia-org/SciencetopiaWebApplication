@@ -37,64 +37,84 @@ public class GroupCohortsController : ControllerBase
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var cohorts = await _db.Cohorts.AsNoTracking().Where(c => c.StudyGroupId == groupId).ToListAsync();
+        var cohorts = await _db.Cohorts.AsNoTracking()
+            .Where(c => c.StudyGroupId == groupId)
+            .ToListAsync();
 
-        // Get plan info
-        var planIds = cohorts.Select(c => c.StudyPlanId).Distinct().ToList();
-        var plans = await _db.StudyPlans.AsNoTracking().Where(p => planIds.Contains(p.Id))
-            .Select(p => new { p.Id, p.Title, p.CurrentVersionId })
-            .ToDictionaryAsync(p => p.Id, p => new { p.Title, p.CurrentVersionId });
+        var stableIds = cohorts.Select(c => c.StudyPlanStableId).Distinct().ToList();
+        var planSummaries = await _db.StudyPlans.AsNoTracking()
+            .Where(p => stableIds.Contains(p.StableId))
+            .Select(p => new { p.StableId, p.VersionNumber, p.IsCurrent, p.Title })
+            .ToListAsync();
 
-        // return plan info only
+        var currentVersionLookup = planSummaries
+            .GroupBy(p => p.StableId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(x => x.IsCurrent).ThenByDescending(x => x.VersionNumber).First().VersionNumber
+            );
+
+        var titleLookup = planSummaries
+            .GroupBy(p => p.StableId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(x => x.VersionNumber).First().Title
+            );
+
         var result = cohorts.Select(c => new
         {
             c.Id,
-            c.StudyPlanId,
-            PlanTitle = plans.ContainsKey(c.StudyPlanId) ? plans[c.StudyPlanId].Title : null,
-            PlanCurrentVersionId = plans.ContainsKey(c.StudyPlanId) ? plans[c.StudyPlanId].CurrentVersionId : null,
+            StudyPlanStableId = c.StudyPlanStableId,
+            PlanTitle = titleLookup.TryGetValue(c.StudyPlanStableId, out var title) ? title : null,
+            PlanCurrentVersionNumber = currentVersionLookup.TryGetValue(c.StudyPlanStableId, out var current) ? current : (int?)null,
             c.Title,
             c.Visibility,
             c.EnrollMode,
-            c.PinnedVersionId,
+            c.PinnedVersionNumber,
             c.MembersCount,
             c.CreatedAt,
             c.CreatedBy
         });
+
         return Ok(result);
     }
 
-    [HttpPost("Plans/{planId:guid}/Cohorts")] // B5-4 create group-scoped
+    [HttpPost("Plans/{planStableId:guid}/Cohorts")] // B5-4 create group-scoped
     [Authorize(Policy = "Plan.Edit")]
-    public async Task<IActionResult> Create(Guid groupId, Guid planId, [FromBody] CreateGroupCohortRequest body)
+    public async Task<IActionResult> Create(Guid groupId, Guid planStableId, [FromBody] CreateGroupCohortRequest body)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
         var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
         if (!isManager) return Forbid();
 
-        // Determine pin target
-        var pinned = await _db.StudyPlans.AsNoTracking().Where(p => p.Id == planId).Select(p => p.CurrentVersionId).FirstOrDefaultAsync();
-        if (!pinned.HasValue)
-        {
-            pinned = await _db.StudyPlanVersions.Where(v => v.StudyPlanId == planId).OrderByDescending(v => v.VersionNumber).Select(v => (long?)v.Id).FirstOrDefaultAsync();
-        }
-        var pinnedNo = pinned.HasValue
-            ? await _db.StudyPlanVersions.Where(v => v.Id == pinned.Value).Select(v => v.VersionNumber).FirstOrDefaultAsync()
-            : 0;
+        var planVersions = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == planStableId)
+            .OrderByDescending(p => p.VersionNumber)
+            .ToListAsync();
 
-        var c = new StudyPlanCohort
+        if (planVersions.Count == 0)
+        {
+            return NotFound(new { message = "Study plan not found." });
+        }
+
+        var current = planVersions.FirstOrDefault(p => p.IsCurrent) ?? planVersions.First();
+        var pinnedNo = current.VersionNumber;
+
+        var cohort = new StudyPlanCohort
         {
             Id = Guid.NewGuid(),
-            StudyPlanId = planId,
+            StudyPlanStableId = planStableId,
             StudyGroupId = groupId,
             Title = body.Title,
             Visibility = string.IsNullOrEmpty(body.Visibility) ? "group" : body.Visibility,
             EnrollMode = body.EnrollMode ?? CohortEnrollMode.OptIn,
-            PinnedVersionId = pinned,
+            PinnedVersionNumber = pinnedNo,
             CreatedAt = DateTime.UtcNow,
             CreatedBy = userId
         };
-        _db.Cohorts.Add(c);
+
+        _db.Cohorts.Add(cohort);
         await _db.SaveChangesAsync();
 
         // Neo4j wiring
@@ -112,17 +132,24 @@ MERGE (c)-[:SCOPED_BY]->(g)
 MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
 MERGE (c)-[:OF_VERSION]->(v)
 ";
-                await tx.RunAsync(cypher, new { planId = planId.ToString(), cohortId = c.Id.ToString(), title = c.Title, visibility = c.Visibility, groupId = groupId.ToString(), versionNumber = pinnedNo });
+                await tx.RunAsync(cypher, new
+                {
+                    planId = planStableId.ToString(),
+                    cohortId = cohort.Id.ToString(),
+                    title = cohort.Title,
+                    visibility = cohort.Visibility,
+                    groupId = groupId.ToString(),
+                    versionNumber = pinnedNo
+                });
             });
         }
 
-        return Ok(new { cohortId = c.Id });
+        return Ok(new { cohortId = cohort.Id, pinnedVersionNumber = pinnedNo });
     }
 
     public class UpdateGroupCohortRequest
     {
         public CohortEnrollMode? EnrollMode { get; set; }
-        public long? PinnedVersionId { get; set; }
         public int? PinnedVersionNumber { get; set; }
     }
 
@@ -135,25 +162,29 @@ MERGE (c)-[:OF_VERSION]->(v)
         var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
         if (!isManager) return Forbid();
 
-        var c = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
-        if (c == null) return NotFound();
+        var cohort = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
+        if (cohort == null) return NotFound();
 
-        if (body.EnrollMode.HasValue) c.EnrollMode = body.EnrollMode.Value;
+        if (body.EnrollMode.HasValue)
+        {
+            cohort.EnrollMode = body.EnrollMode.Value;
+        }
 
-        long? pinnedId = c.PinnedVersionId;
         int? pinnedNo = null;
-        if (body.PinnedVersionId.HasValue)
+        if (body.PinnedVersionNumber.HasValue)
         {
-            pinnedId = body.PinnedVersionId.Value;
-            pinnedNo = await _db.StudyPlanVersions.Where(v => v.Id == pinnedId).Select(v => (int?)v.VersionNumber).FirstOrDefaultAsync();
-        }
-        else if (body.PinnedVersionNumber.HasValue)
-        {
-            pinnedNo = body.PinnedVersionNumber.Value;
-            pinnedId = await _db.StudyPlanVersions.Where(v => v.StudyPlanId == c.StudyPlanId && v.VersionNumber == pinnedNo.Value).Select(v => (long?)v.Id).FirstOrDefaultAsync();
+            var requestedNo = body.PinnedVersionNumber.Value;
+            var exists = await _db.StudyPlans.AsNoTracking()
+                .AnyAsync(p => p.StableId == cohort.StudyPlanStableId && p.VersionNumber == requestedNo);
+            if (!exists)
+            {
+                return BadRequest(new { code = "version_not_found", versionNumber = requestedNo });
+            }
+
+            cohort.PinnedVersionNumber = requestedNo;
+            pinnedNo = requestedNo;
         }
 
-        c.PinnedVersionId = pinnedId;
         await _db.SaveChangesAsync();
 
         if (pinnedNo.HasValue)
@@ -174,7 +205,11 @@ OPTIONAL MATCH (u:User)-[:IN_COHORT]->(c)
 WITH c, v AS pv, collect(u) AS users
 UNWIND users AS u
 MERGE (u)-[:ENROLLED_IN]->(pv)";
-                await tx.RunAsync(cypher, new { cohortId = cohortId.ToString(), versionNumber = pinnedNo.Value });
+                await tx.RunAsync(cypher, new
+                {
+                    cohortId = cohortId.ToString(),
+                    versionNumber = pinnedNo.Value
+                });
             });
         }
 
@@ -190,12 +225,21 @@ MERGE (u)-[:ENROLLED_IN]->(pv)";
         var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
         if (!isManager) return Forbid();
 
-        var c = await _db.Cohorts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
-        if (c == null) return NotFound();
+        var cohort = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
+        if (cohort == null) return NotFound();
 
-        var pinned = await _db.StudyPlans.AsNoTracking().Where(p => p.Id == c.StudyPlanId).Select(p => p.CurrentVersionId).FirstOrDefaultAsync();
-        if (!pinned.HasValue) return BadRequest(new { code = "no_current_version" });
-        var pinnedNo = await _db.StudyPlanVersions.Where(v => v.Id == pinned.Value).Select(v => v.VersionNumber).FirstOrDefaultAsync();
+        var current = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == cohort.StudyPlanStableId)
+            .OrderByDescending(p => p.IsCurrent)
+            .ThenByDescending(p => p.VersionNumber)
+            .FirstOrDefaultAsync();
+
+        if (current == null)
+        {
+            return BadRequest(new { code = "no_versions" });
+        }
+
+        var pinnedNo = current.VersionNumber;
 
         await using (var session = _driver.AsyncSession())
         {
@@ -218,14 +262,9 @@ MERGE (u)-[:ENROLLED_IN]->(pv)";
             });
         }
 
-        // also persist in SQL
-        var entity = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId);
-        if (entity != null)
-        {
-            entity.PinnedVersionId = pinned;
-            await _db.SaveChangesAsync();
-        }
+        cohort.PinnedVersionNumber = pinnedNo;
+        await _db.SaveChangesAsync();
 
-        return Ok(new { pinnedVersionId = pinned, pinnedVersionNumber = pinnedNo });
+        return Ok(new { pinnedVersionNumber = pinnedNo });
     }
 }

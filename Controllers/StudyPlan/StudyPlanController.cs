@@ -112,7 +112,7 @@ namespace Sciencetopia.Controllers.StudyPlan
 
 
         [HttpPost("UpdateStudyPlan")]
-        public async Task<IActionResult> UpdateStudyPlan([FromBody] StudyPlanDTO studyPlanDTO)
+        public async Task<IActionResult> UpdateStudyPlan([FromBody] StudyPlanDTO studyPlanDTO, [FromQuery] bool createNewVersion = false)
         {
             string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
 
@@ -122,40 +122,17 @@ namespace Sciencetopia.Controllers.StudyPlan
                 return Unauthorized("User is not authenticated.");
             }
 
-            var success = await _studyPlanService.UpdateStudyPlanAsync(studyPlanDTO);
-            if (success)
-            {
-                return Ok(new { message = "Study plan updated successfully." });
-            }
-            else
+            var (success, planId) = await _studyPlanService.UpdateStudyPlanAsync(studyPlanDTO, userId, createNewVersion);
+            if (!success)
             {
                 return NotFound(new { message = "Study plan not found or could not be updated." });
             }
-        }
 
-        [HttpPost("SaveStudyPlanDraft")]
-        public async Task<IActionResult> SaveStudyPlanDraft([FromBody] SaveStudyPlanDraftRequest request)
-        {
-            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
-            if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
-            if (request?.Payload?.StudyPlan?.Id == null) return BadRequest("studyPlanId is required.");
-
-            var (ok, draftNumber) = await _studyPlanService.SaveStudyPlanDraftAsync(request.Payload!, userId, request.ChangeNotes);
-            if (!ok) return BadRequest("Failed to save draft.");
-            return Ok(new { draftNumber });
-        }
-
-        [HttpPost("PublishStudyPlanDraft")]
-        public async Task<IActionResult> PublishStudyPlanDraft([FromBody] PublishStudyPlanDraftRequest request)
-        {
-            string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
-            if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
-            if (string.IsNullOrEmpty(request?.StudyPlanId) || request.DraftNumber <= 0)
-                return BadRequest("Invalid studyPlanId or draftNumber.");
-
-            var (ok, versionNumber) = await _studyPlanService.PublishStudyPlanDraftAsync(request.StudyPlanId!, request.DraftNumber, userId, request.ChangeNotes);
-            if (!ok) return BadRequest("Failed to publish draft.");
-            return Ok(new { versionNumber });
+            return Ok(new
+            {
+                studyPlanId = planId,
+                versionUpdated = createNewVersion
+            });
         }
 
         [HttpPost("MarkStudyPlanAsCompleted")]
@@ -250,7 +227,7 @@ namespace Sciencetopia.Controllers.StudyPlan
             }
 
             // Call the service method to update the privacy setting
-            var success = await _studyPlanService.SetStudyPlanPrivacyAsync(userId, request.StudyPlanId, request.Privacy);
+            var success = await _studyPlanService.SetStudyPlanPrivacyAsync(userId, request.PlanStableId, request.Privacy);
 
             if (!success)
             {

@@ -4,7 +4,6 @@ namespace Sciencetopia.DTOs
     {
         public string Permission { get; set; } = "view"; // view|comment|edit|admin
         public bool AutoEnroll { get; set; } = false;
-        public bool UseDraftFlow { get; set; } = true;
+        public int? VersionNumber { get; set; }
     }
 }
-

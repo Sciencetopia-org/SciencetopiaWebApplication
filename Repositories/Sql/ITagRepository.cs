@@ -15,8 +15,6 @@ public interface ITagRepository
     // Fully replace legacy name-based approach: now from TagRepresentativeNode table
     Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds);
     Task<Guid> CreateIfNotExistsAsync(string tagName);
-    Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy);
-    Task<bool> ApproveTagDraftIfPendingAsync(Guid tagId, string reviewerId);
 }
 
 public class TagRepository : ITagRepository
@@ -25,6 +23,8 @@ public class TagRepository : ITagRepository
     private readonly Sciencetopia.Services.L10n.IL10nService _l10n;
     private readonly Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> _l10nOptions;
     private readonly Sciencetopia.Middleware.ILanguageContext _langCtx;
+
+    private IQueryable<Tags> ActiveTags => _context.Tags.Where(t => t.IsCurrent && t.Status == "Current");
 
     public TagRepository(ApplicationDbContext context,
                          Sciencetopia.Services.L10n.IL10nService l10n,
@@ -39,25 +39,21 @@ public class TagRepository : ITagRepository
 
     public async Task<IEnumerable<Guid>> GetTagNodeIdsByTagTypeAsync(string tagType)
     {
-        return await (from tag in _context.Tags
-                      join tagTypeEntity in _context.TagTypes on tag.Id equals tagTypeEntity.TagId
-                      join typeOfTag in _context.TypesOfTags on tagTypeEntity.TypeId equals typeOfTag.Id
-                      where typeOfTag.Type == tagType && tag.Id.HasValue
-                      select tag.Id.Value)
-                 .ToListAsync();
+        return await (
+            from tagTypeRel in _context.TagTypes
+            join type in _context.TypesOfTags on tagTypeRel.TypeId equals type.Id
+            join tag in ActiveTags on tagTypeRel.TagStableId equals tag.StableId
+            where type.Type == tagType
+            select tag.StableId
+        )
+        .Distinct()
+        .ToListAsync();
     }
 
     public async Task<List<Tags>> GetAllTagsAsync()
     {
-        var list = await _context.Tags
-            .Select(tag => new Tags
-            {
-                Id = tag.Id,
-                Name = tag.Name,
-                Description = tag.Description,
-                CreatedDate = tag.CreatedDate.HasValue ? tag.CreatedDate.Value.UtcDateTime : default,
-                UpdatedDate = tag.UpdatedDate.HasValue ? tag.UpdatedDate.Value.UtcDateTime : default
-            })
+        var list = await ActiveTags
+            .AsNoTracking()
             .ToListAsync();
 
         if (_l10nOptions.Value.Enabled && list.Count > 0)
@@ -95,7 +91,7 @@ public class TagRepository : ITagRepository
         {
             var lang = _langCtx.EffectiveLang;
             var rows = await (
-                from t in _context.Tags
+                from t in ActiveTags
                 where t.Id.HasValue
                 join tls in _context.TagL10nSets on t.Id!.Value equals tls.TagId
                 join si in _context.L10nSetItems on tls.L10nSetId equals si.L10nSetId
@@ -111,7 +107,7 @@ public class TagRepository : ITagRepository
         }
         else
         {
-            var tags = await _context.Tags
+            var tags = await ActiveTags
                 .Where(t => t.Name != null && names.Contains(t.Name.ToLower()))
                 .Select(t => new TagDTO { Id = t.Id, Name = t.Name })
                 .ToListAsync();
@@ -131,7 +127,7 @@ public class TagRepository : ITagRepository
         {
             var lang = _langCtx.EffectiveLang;
             var rows = await (
-                from t in _context.Tags
+                from t in ActiveTags
                 where t.Id.HasValue
                 join tls in _context.TagL10nSets on t.Id!.Value equals tls.TagId
                 join si in _context.L10nSetItems on tls.L10nSetId equals si.L10nSetId
@@ -148,7 +144,7 @@ public class TagRepository : ITagRepository
         }
         else
         {
-            var tags = await _context.Tags
+            var tags = await ActiveTags
                 .Where(t => t.Name != null && EF.Functions.Like(t.Name.ToLower(), $"%{q}%"))
                 .Select(t => new TagDTO { Id = t.Id, Name = t.Name })
                 .ToListAsync();
@@ -168,7 +164,7 @@ public class TagRepository : ITagRepository
         {
             var lang = _langCtx.EffectiveLang;
             var names = await (
-                from t in _context.Tags
+                from t in ActiveTags
                 where t.Id.HasValue
                 join tls in _context.TagL10nSets on t.Id!.Value equals tls.TagId
                 join si in _context.L10nSetItems on tls.L10nSetId equals si.L10nSetId
@@ -185,7 +181,7 @@ public class TagRepository : ITagRepository
         }
         else
         {
-            var tagNames = await _context.Tags
+            var tagNames = await ActiveTags
                 .Where(t => t.Name != null && EF.Functions.Like(t.Name.ToLower(), $"%{q}%"))
                 .Select(t => t.Name!)
                 .ToListAsync();
@@ -207,36 +203,40 @@ public class TagRepository : ITagRepository
         var idSet = ids?.ToHashSet() ?? new HashSet<Guid>();
         if (idSet.Count == 0) return new Dictionary<Guid, (string, string, DateTimeOffset, DateTimeOffset)>();
 
-        var rows = await _context.Tags
-            .Where(tag => tag.Id.HasValue && idSet.Contains(tag.Id.Value))
+        var rows = await ActiveTags
+            .Where(tag => tag.Id.HasValue && (idSet.Contains(tag.Id.Value) || idSet.Contains(tag.StableId)))
             .Select(tag => new
             {
-                Id = tag.Id!.Value,
+                VersionId = tag.Id!.Value,
+                tag.StableId,
                 tag.Name,
                 tag.Description,
-                CreatedDate = tag.CreatedDate,
-                UpdatedDate = tag.UpdatedDate
+                tag.CreatedAt,
+                tag.PublishedAt,
+                tag.ApprovedAt
             })
             .ToListAsync();
 
         var dict = rows.ToDictionary(
-            x => x.Id,
+            x => idSet.Contains(x.StableId) ? x.StableId : x.VersionId,
             x => (
                 (x.Name ?? string.Empty),
                 (x.Description ?? string.Empty),
-                x.CreatedDate.HasValue ? x.CreatedDate.Value : default,
-                x.UpdatedDate.HasValue ? x.UpdatedDate.Value : default
+                x.CreatedAt ?? default,
+                x.PublishedAt ?? x.ApprovedAt ?? x.CreatedAt ?? default
             )
         );
 
         if (_l10nOptions.Value.Enabled && dict.Count > 0)
         {
             var lang = _langCtx.EffectiveLang;
-            var nameMap = await _l10n.GetLocalizedForTagManyAsync(idSet, "name", lang);
-            var descMap = await _l10n.GetLocalizedForTagManyAsync(idSet, "description", lang);
-            foreach (var id in idSet)
+            var stableIds = rows.Select(x => x.StableId).Distinct().ToList();
+            var nameMap = await _l10n.GetLocalizedForTagManyAsync(stableIds, "name", lang);
+            var descMap = await _l10n.GetLocalizedForTagManyAsync(stableIds, "description", lang);
+            foreach (var kv in dict.ToList())
             {
-                if (!dict.TryGetValue(id, out var tuple)) continue;
+                var id = kv.Key;
+                var tuple = kv.Value;
                 var name = tuple.Item1;
                 var desc = tuple.Item2;
                 if (nameMap.TryGetValue(id, out var n) && !string.IsNullOrWhiteSpace(n)) name = n;
@@ -253,7 +253,7 @@ public class TagRepository : ITagRepository
         if (idSet.Count == 0) return new Dictionary<Guid, string>();
 
         // Base tag names once
-        var baseRows = await _context.Tags
+        var baseRows = await ActiveTags
                               .Where(t => t.Id.HasValue && idSet.Contains(t.Id.Value))
                               .Select(t => new { Id = t.Id!.Value, Name = t.Name })
                               .ToListAsync();
@@ -279,10 +279,21 @@ public class TagRepository : ITagRepository
         var idSet = tagIds?.ToHashSet() ?? new HashSet<Guid>();
         if (idSet.Count == 0) return result;
 
-        // Step 1: Fetch TagId -> NodeId mapping only (avoid heavy join and tracking)
+        var tagMappings = await _context.Tags
+            .AsNoTracking()
+            .Where(t => t.Id.HasValue && (idSet.Contains(t.Id.Value) || idSet.Contains(t.StableId)))
+            .Select(t => new { VersionId = t.Id!.Value, t.StableId })
+            .ToListAsync();
+
+        if (tagMappings.Count == 0) return result;
+
+        var versionIdsForLookup = tagMappings.Select(m => m.VersionId).Distinct().ToList();
+        var stableByVersion = tagMappings.ToDictionary(m => m.VersionId, m => m.StableId);
+
+        // Step 1: Fetch TagVersionId -> NodeVersionId mapping only (avoid heavy join and tracking)
         var rawPairs = await _context.TagRepresentativeNodes
             .AsNoTracking()
-            .Where(tr => idSet.Contains(tr.TagId))
+            .Where(tr => versionIdsForLookup.Contains(tr.TagId))
             .Select(tr => new { tr.TagId, tr.NodeId })
             .ToListAsync();
 
@@ -293,51 +304,60 @@ public class TagRepository : ITagRepository
 
         if (tagToNode.Count == 0) return result;
 
-        var nodeIds = tagToNode.Values.Distinct().ToList();
+        var nodeVersionIds = tagToNode.Values.Distinct().ToList();
 
         // Step 2: Fetch base node metadata in a single, lean query
         var baseNodes = await _context.KnowledgeNodes
             .AsNoTracking()
-            .Where(n => n.Id.HasValue && nodeIds.Contains(n.Id.Value))
+            .Where(n => n.Id.HasValue && nodeVersionIds.Contains(n.Id.Value))
             .Select(n => new
             {
                 Id = n.Id!.Value,
+                n.StableId,
                 Name = n.Name ?? string.Empty,
                 Description = n.Description ?? string.Empty,
-                CreatedDate = n.CreatedDate ?? default,
-                UpdatedDate = n.UpdatedDate ?? default
+                CreatedAt = n.CreatedAt ?? default,
+                UpdatedAt = n.PublishedAt ?? n.ApprovedAt ?? n.CreatedAt ?? default
             })
             .ToListAsync();
 
-        var nodeMeta = baseNodes.ToDictionary(x => x.Id, x => (x.Name, x.Description, x.CreatedDate, x.UpdatedDate));
+        var nodeMeta = baseNodes.ToDictionary(
+            x => x.Id,
+            x => (x.StableId, x.Name, x.Description, x.CreatedAt, x.UpdatedAt));
 
         // Step 3: L10n overlay if enabled
         Dictionary<Guid, string> nodeNameMap = new();
         Dictionary<Guid, string> nodeDescMap = new();
-        if (_l10nOptions.Value.Enabled && nodeIds.Count > 0)
+        var stableNodeIds = nodeMeta.Values.Select(x => x.StableId).Distinct().ToList();
+        if (_l10nOptions.Value.Enabled && stableNodeIds.Count > 0)
         {
             var lang = _langCtx.EffectiveLang;
-            nodeNameMap = await _l10n.GetLocalizedManyAsync(nodeIds, "name", lang);
-            nodeDescMap = await _l10n.GetLocalizedManyAsync(nodeIds, "description", lang);
+            nodeNameMap = await _l10n.GetLocalizedManyAsync(stableNodeIds, "name", lang);
+            nodeDescMap = await _l10n.GetLocalizedManyAsync(stableNodeIds, "description", lang);
         }
 
         // Step 4: Build result dictionary
         foreach (var kv in tagToNode)
         {
-            var tagId = kv.Key;
-            var nodeId = kv.Value;
-            var name = nodeMeta.TryGetValue(nodeId, out var m) ? m.Item1 : string.Empty;
-            var desc = nodeMeta.TryGetValue(nodeId, out var m2) ? m2.Item2 : string.Empty;
-            var created = nodeMeta.TryGetValue(nodeId, out var m3) ? m3.Item3 : default;
-            var updated = nodeMeta.TryGetValue(nodeId, out var m4) ? m4.Item4 : default;
+            var tagVersionId = kv.Key;
+            var tagStableId = stableByVersion.TryGetValue(tagVersionId, out var mappedStable) ? mappedStable : tagVersionId;
+            var nodeVersionId = kv.Value;
+            var meta = nodeMeta.TryGetValue(nodeVersionId, out var info)
+                ? info
+                : (StableId: Guid.Empty, Name: string.Empty, Description: string.Empty, CreatedAt: default(DateTimeOffset), UpdatedAt: default(DateTimeOffset));
+            var stableNodeId = meta.StableId != Guid.Empty ? meta.StableId : nodeVersionId;
+            var name = meta.Name;
+            var desc = meta.Description;
+            var created = meta.CreatedAt;
+            var updated = meta.UpdatedAt;
 
             if (_l10nOptions.Value.Enabled)
             {
-                if (nodeNameMap.TryGetValue(nodeId, out var nl) && !string.IsNullOrWhiteSpace(nl)) name = nl;
-                if (nodeDescMap.TryGetValue(nodeId, out var dl) && !string.IsNullOrWhiteSpace(dl)) desc = dl;
+                if (nodeNameMap.TryGetValue(stableNodeId, out var nl) && !string.IsNullOrWhiteSpace(nl)) name = nl;
+                if (nodeDescMap.TryGetValue(stableNodeId, out var dl) && !string.IsNullOrWhiteSpace(dl)) desc = dl;
             }
 
-            result[tagId] = (nodeId, name, desc, created, updated);
+            result[tagStableId] = (stableNodeId, name, desc, created, updated);
         }
         return result;
     }
@@ -352,7 +372,7 @@ public class TagRepository : ITagRepository
         {
             var lang = _langCtx.EffectiveLang;
             var existing = await (
-                from t in _context.Tags
+                from t in ActiveTags
                 where t.Id.HasValue
                 join tls in _context.TagL10nSets on t.Id!.Value equals tls.TagId
                 join si in _context.L10nSetItems on tls.L10nSetId equals si.L10nSetId
@@ -365,14 +385,23 @@ public class TagRepository : ITagRepository
         }
 
         // Fallback to base table exact name
-        var tag = await _context.Tags.FirstOrDefaultAsync(t => t.Name != null && t.Name.ToLower() == lower);
+        var tag = await ActiveTags.FirstOrDefaultAsync(t => t.Name != null && t.Name.ToLower() == lower);
         if (tag != null && tag.Id.HasValue) return tag.Id.Value;
 
+        var now = DateTimeOffset.UtcNow;
         var newTag = new Tags
         {
+            Id = Guid.NewGuid(),
+            StableId = Guid.NewGuid(),
+            VersionNumber = 1,
+            Status = "Current",
+            IsCurrent = true,
             Name = tagName,
-            CreatedDate = DateTimeOffset.UtcNow,
-            UpdatedDate = DateTimeOffset.UtcNow
+            CreatedBy = "system",
+            CreatedAt = now,
+            PublishedAt = now,
+            ApprovedAt = now,
+            ApprovedBy = "system"
         };
         _context.Tags.Add(newTag);
         await _context.SaveChangesAsync();
@@ -385,68 +414,4 @@ public class TagRepository : ITagRepository
         return newTag.Id ?? throw new InvalidOperationException("The new tag ID is null.");
     }
 
-    public async Task<Guid> CreateTagDraftAsync(string name, string? description, string submittedBy)
-    {
-        var existingDraft = await _context.TagDrafts
-            .FirstOrDefaultAsync(td =>
-                td.Name == name &&
-                td.SubmittedBy == submittedBy &&
-                td.ReviewStatus == ReviewStatus.Pending);
-
-        if (existingDraft != null)
-        {
-            return existingDraft.TagId != Guid.Empty ? existingDraft.TagId : Guid.Empty;
-        }
-
-        var tagId = Guid.NewGuid();
-
-        var draft = new TagDraft
-        {
-            Id = Guid.NewGuid(),
-            TagId = tagId,
-            Name = name,
-            Description = description,
-            SubmittedBy = submittedBy,
-            SubmittedAt = DateTimeOffset.UtcNow,
-            ReviewStatus = ReviewStatus.Pending,
-            ReviewedBy = null,
-            ReviewedAt = null,
-            ReviewComment = null
-        };
-
-        _context.TagDrafts.Add(draft);
-        await _context.SaveChangesAsync();
-
-        return tagId;
-    }
-
-    public async Task<bool> ApproveTagDraftIfPendingAsync(Guid tagId, string reviewerId)
-    {
-        var draft = await _context.TagDrafts
-            .Where(d => d.TagId == tagId && d.ReviewStatus == ReviewStatus.Pending)
-            .OrderByDescending(d => d.SubmittedAt)
-            .FirstOrDefaultAsync();
-
-        if (draft == null)
-            return false;
-
-        var exists = await _context.Tags.AnyAsync(t => t.Id == tagId);
-        if (!exists)
-        {
-            _context.Tags.Add(new Tags
-            {
-                Id = tagId,
-                Name = draft.Name,
-                Description = draft.Description,
-                CreatedDate = draft.SubmittedAt
-            });
-        }
-
-        draft.ReviewStatus = ReviewStatus.Approved;
-        draft.ReviewedAt = DateTimeOffset.UtcNow;
-        draft.ReviewedBy = reviewerId;
-
-        await _context.SaveChangesAsync();
-        return true;
-    }
 }

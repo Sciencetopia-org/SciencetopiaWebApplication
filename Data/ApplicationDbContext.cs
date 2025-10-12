@@ -21,27 +21,22 @@ namespace Sciencetopia.Data
         public DbSet<DailySummary> DailySummaries { get; set; }
         // Add the KnowledgeNodes DbSet
         public DbSet<KnowledgeNode> KnowledgeNodes { get; set; }
-        public DbSet<KnowledgeNodeDraft> KnowledgeNodeDrafts { get; set; } // New KnowledgeNodeDraft DbSet
-        public DbSet<KnowledgeNodeVersion> KnowledgeNodeVersions { get; set; } // New KnowledgeNodeVersion DbSet
         public DbSet<TypesOfTags> TypesOfTags { get; set; }
         public DbSet<TagTypes> TagTypes { get; set; }
         // Add the Tags DbSet
         public DbSet<Tags> Tags { get; set; }
-        public DbSet<TagDraft> TagDrafts { get; set; } // New TagDraft DbSet
-        public DbSet<TagVersion> TagVersions { get; set; } // New TagVersion DbSet
         public DbSet<Favorite> Favorites { get; set; } // New Favorite DbSet
         public DbSet<StudyGroupEntity> StudyGroups { get; set; } // New StudyGroupEntity DbSet
         public DbSet<Resource> Resources { get; set; } // New Resource DbSet
         public DbSet<StudyPlanEntity> StudyPlans { get; set; }
         public DbSet<LessonEntity> Lessons { get; set; }
-        public DbSet<StudyPlanVersion> StudyPlanVersions => Set<StudyPlanVersion>();
-        public DbSet<StudyPlanDraft> StudyPlanDrafts => Set<StudyPlanDraft>();
-        public DbSet<LessonVersion> LessonVersions => Set<LessonVersion>();
-        public DbSet<LessonDraft> LessonDrafts => Set<LessonDraft>();
         public DbSet<StudyGroupStudyPlan> StudyGroupStudyPlans => Set<StudyGroupStudyPlan>();
         public DbSet<StudyPlanUserRole> StudyPlanUserRoles => Set<StudyPlanUserRole>();
         public DbSet<StudyGroupUserRole> StudyGroupUserRoles => Set<StudyGroupUserRole>();
         public DbSet<StudyPlanCohort> Cohorts => Set<StudyPlanCohort>();
+        public DbSet<StudyPlanLessonSnapshot> StudyPlanLessonSnapshots => Set<StudyPlanLessonSnapshot>();
+        public DbSet<StudyPlanTagAssignment> StudyPlanTagAssignments => Set<StudyPlanTagAssignment>();
+        public DbSet<LessonTagAssignment> LessonTagAssignments => Set<LessonTagAssignment>();
         // L10n domain
         public DbSet<Sciencetopia.Models.L10n.L10nSet> L10nSets => Set<Sciencetopia.Models.L10n.L10nSet>();
         public DbSet<Sciencetopia.Models.L10n.L10nItem> L10nItems => Set<Sciencetopia.Models.L10n.L10nItem>();
@@ -65,12 +60,15 @@ namespace Sciencetopia.Data
 
             builder.Entity<Tags>().ToTable("Tags", schema: "KnowledgeGraph");
             builder.Entity<TypesOfTags>().ToTable("TypesOfTags", schema: "KnowledgeGraph");
-            builder.Entity<TagTypes>().ToTable("TagTypes", schema: "KnowledgeGraph");
+            builder.Entity<TagTypes>(entity =>
+            {
+                entity.ToTable("TagTypes", schema: "KnowledgeGraph");
+                entity.HasKey(e => e.TagStableId);
+                entity.Property(e => e.TagStableId)
+                    .HasColumnName("TagStableId")
+                    .ValueGeneratedNever();
+            });
             builder.Entity<KnowledgeNode>().ToTable("KnowledgeNodes", schema: "KnowledgeGraph");
-            builder.Entity<KnowledgeNodeDraft>().ToTable("KnowledgeNodeDrafts", schema: "KnowledgeGraph");
-            builder.Entity<KnowledgeNodeVersion>().ToTable("KnowledgeNodeVersions", schema: "KnowledgeGraph");
-            builder.Entity<TagDraft>().ToTable("TagDrafts", schema: "KnowledgeGraph");
-            builder.Entity<TagVersion>().ToTable("TagVersions", schema: "KnowledgeGraph");
             builder.Entity<Resource>().ToTable("Resources", schema: "KnowledgeGraph");
 
             // Messages schema
@@ -98,6 +96,63 @@ namespace Sciencetopia.Data
                 eb.HasIndex(x => x.CreatorId);
                 eb.Property<string>("Privacy").HasMaxLength(16).HasDefaultValue("private");
                 eb.HasIndex("Privacy");
+
+                eb.Property(x => x.StableId).HasDefaultValueSql("NEWID()");
+                eb.Property(x => x.VersionNumber).HasDefaultValue(1);
+                eb.Property(x => x.IsCurrent).HasDefaultValue(false);
+                eb.Property(x => x.Status).HasMaxLength(32).IsRequired().HasDefaultValue("Draft");
+                eb.Property(x => x.CreatedBy).HasMaxLength(128);
+                eb.Property(x => x.ApprovedBy).HasMaxLength(128);
+                eb.Property(x => x.RowVersion).IsRowVersion();
+
+                eb.HasIndex(x => new { x.StableId, x.VersionNumber })
+                  .HasDatabaseName("IX_SP_Stable_Version");
+                eb.HasIndex(x => x.StableId)
+                  .HasFilter("[IsCurrent] = 1")
+                  .IsUnique()
+                  .HasDatabaseName("UX_SP_Stable_Current");
+            });
+
+            builder.Entity<LessonEntity>(eb =>
+            {
+                eb.Property(x => x.StableId).HasDefaultValueSql("NEWID()");
+                eb.Property(x => x.VersionNumber).HasDefaultValue(1);
+                eb.Property(x => x.IsCurrent).HasDefaultValue(false);
+                eb.Property(x => x.Status).HasMaxLength(32).IsRequired().HasDefaultValue("Draft");
+                eb.Property(x => x.CreatedBy).HasMaxLength(128);
+                eb.Property(x => x.ApprovedBy).HasMaxLength(128);
+                eb.Property(x => x.RowVersion).IsRowVersion();
+
+                eb.HasIndex(x => new { x.StableId, x.VersionNumber })
+                  .HasDatabaseName("IX_Lesson_Stable_Version");
+                eb.HasIndex(x => x.StableId)
+                  .HasFilter("[IsCurrent] = 1")
+                  .IsUnique()
+                  .HasDatabaseName("UX_Lesson_Stable_Current");
+            });
+
+            builder.Entity<StudyPlanLessonSnapshot>(eb =>
+            {
+                eb.ToTable("StudyPlanLessonSnapshots", schema: "StudyPlans");
+                eb.HasKey(x => new { x.StudyPlanStableId, x.StudyPlanVersionNumber, x.LessonStableId, x.LessonVersionNumber });
+                eb.Property(x => x.StepType).HasMaxLength(32).IsRequired();
+                eb.HasIndex(x => new { x.LessonStableId, x.LessonVersionNumber });
+            });
+
+            builder.Entity<StudyPlanTagAssignment>(eb =>
+            {
+                eb.ToTable("StudyPlanTagAssignments", schema: "StudyPlans");
+                eb.HasKey(x => new { x.StudyPlanStableId, x.StudyPlanVersionNumber, x.TagStableId });
+                eb.Property(x => x.AssignedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.TagStableId);
+            });
+
+            builder.Entity<LessonTagAssignment>(eb =>
+            {
+                eb.ToTable("LessonTagAssignments", schema: "StudyPlans");
+                eb.HasKey(x => new { x.LessonStableId, x.LessonVersionNumber, x.TagStableId });
+                eb.Property(x => x.AssignedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.TagStableId);
             });
 
             // builder.Ignore<KnowledgeNode>();
@@ -160,18 +215,6 @@ namespace Sciencetopia.Data
                     .OnDelete(DeleteBehavior.Cascade);
             });
 
-            builder.Entity<TagDraft>()
-                .HasOne<Tags>()
-                .WithMany()
-                .HasForeignKey(d => d.TagId)
-                .OnDelete(DeleteBehavior.Cascade);
-
-            builder.Entity<KnowledgeNodeDraft>()
-                .HasOne<KnowledgeNode>()
-                .WithMany()
-                .HasForeignKey(d => d.NodeId)
-                .OnDelete(DeleteBehavior.Cascade);
-
             // Translations removed; L10n domain replaces them
 
             // L10n Fluent mappings
@@ -229,9 +272,22 @@ namespace Sciencetopia.Data
                     .OnDelete(DeleteBehavior.Cascade);
             });
 
-            // KnowledgeNodes: DefaultL10nSetId FK with filtered unique index
+            // KnowledgeNodes: DefaultL10nSetId FK with filtered unique index + versioning metadata
             builder.Entity<KnowledgeNode>(eb =>
             {
+                eb.HasKey(x => x.Id);
+                eb.Property(x => x.Status).HasMaxLength(32).IsRequired().HasDefaultValue("Draft");
+                eb.Property(x => x.CreatedBy).HasMaxLength(128);
+                eb.Property(x => x.ApprovedBy).HasMaxLength(128);
+                eb.Property(x => x.RowVersion).IsRowVersion();
+
+                eb.HasIndex(x => new { x.StableId, x.VersionNumber })
+                  .HasDatabaseName("IX_KN_Stable_Version");
+                eb.HasIndex(x => x.StableId)
+                  .HasFilter("[IsCurrent] = 1")
+                  .IsUnique()
+                  .HasDatabaseName("UX_KN_Stable_Current");
+
                 eb.HasIndex(x => x.DefaultL10nSetId)
                   .HasDatabaseName("UX_KN_DefaultL10nSet")
                   .IsUnique()
@@ -259,9 +315,22 @@ namespace Sciencetopia.Data
                     .OnDelete(DeleteBehavior.Cascade);
             });
 
-            // Tags: DefaultL10nSetId
+            // Tags: DefaultL10nSetId + versioning metadata
             builder.Entity<Tags>(eb =>
             {
+                eb.HasKey(x => x.Id);
+                eb.Property(x => x.Status).HasMaxLength(32).IsRequired().HasDefaultValue("Draft");
+                eb.Property(x => x.CreatedBy).HasMaxLength(128);
+                eb.Property(x => x.ApprovedBy).HasMaxLength(128);
+                eb.Property(x => x.RowVersion).IsRowVersion();
+
+                eb.HasIndex(x => new { x.StableId, x.VersionNumber })
+                  .HasDatabaseName("IX_Tags_Stable_Version");
+                eb.HasIndex(x => x.StableId)
+                  .HasFilter("[IsCurrent] = 1")
+                  .IsUnique()
+                  .HasDatabaseName("UX_Tags_Stable_Current");
+
                 eb.HasIndex(x => x.DefaultL10nSetId)
                   .HasDatabaseName("UX_Tag_DefaultL10nSet")
                   .IsUnique()
@@ -271,95 +340,13 @@ namespace Sciencetopia.Data
                   .HasForeignKey(x => x.DefaultL10nSetId);
             });
 
-            // Versions & Drafts (StudyPlan/Lesson)
-            builder.Entity<StudyPlanVersion>(eb =>
-            {
-                eb.ToTable("StudyPlanVersions", schema: "StudyPlans");
-                eb.HasKey(x => x.Id);
-
-                eb.HasIndex(x => new { x.StudyPlanId, x.VersionNumber })
-                  .IsUnique();
-
-                eb.Property(x => x.CreatedDate)
-                  .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                eb.Property(x => x.RowVersion).IsRowVersion();
-
-                // 外键到 StudyPlanEntity
-                eb.HasOne<StudyPlanEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.StudyPlanId)
-                  .OnDelete(DeleteBehavior.Cascade);
-            });
-
-            builder.Entity<LessonVersion>(eb =>
-            {
-                eb.ToTable("LessonVersions", schema: "StudyPlans");
-                eb.HasKey(x => x.Id);
-
-                eb.HasIndex(x => new { x.LessonId, x.VersionNumber })
-                  .IsUnique();
-
-                eb.Property(x => x.CreatedDate)
-                  .HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.Property(x => x.RowVersion).IsRowVersion();
-
-                // 外键到 LessonEntity
-                eb.HasOne<LessonEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.LessonId)
-                  .OnDelete(DeleteBehavior.Cascade);
-            });
-
-            builder.Entity<StudyPlanDraft>(eb =>
-            {
-                eb.ToTable("StudyPlanDrafts", schema: "StudyPlans");
-                eb.HasKey(x => x.Id);
-                eb.HasIndex(x => new { x.StudyPlanId, x.DraftNumber }).IsUnique();
-
-                eb.Property(x => x.CreatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.Property(x => x.UpdatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.Property(x => x.RowVersion).IsRowVersion();
-
-                // 改为可空
-                eb.Property(x => x.DraftStatus)
-                  .HasConversion<string>()
-                  .HasMaxLength(16)
-                  .IsRequired(false);
-
-                eb.HasOne<StudyPlanEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.StudyPlanId)
-                  .OnDelete(DeleteBehavior.Cascade);
-            });
-
-            builder.Entity<LessonDraft>(eb =>
-            {
-                eb.ToTable("LessonDrafts", schema: "StudyPlans");
-                eb.HasKey(x => x.Id);
-                eb.HasIndex(x => new { x.LessonId, x.DraftNumber }).IsUnique();
-
-                eb.Property(x => x.CreatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.Property(x => x.UpdatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.Property(x => x.RowVersion).IsRowVersion();
-
-                eb.Property(x => x.DraftStatus)
-                  .HasConversion<string>()
-                  .HasMaxLength(16)
-                  .IsRequired(false); // 可空
-
-                eb.HasOne<LessonEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.LessonId)
-                  .OnDelete(DeleteBehavior.Cascade);
-            });
-
             // StudyGroupStudyPlans
             builder.Entity<StudyGroupStudyPlan>(eb =>
             {
                 eb.ToTable("StudyGroupStudyPlans", schema: "StudyGroups");
                 eb.HasKey(x => x.Id);
-                eb.HasIndex(x => new { x.StudyGroupId, x.StudyPlanId }).IsUnique();
+                eb.HasIndex(x => new { x.StudyGroupId, x.StudyPlanStableId }).IsUnique();
+                eb.HasIndex(x => x.StudyPlanStableId);
                 eb.Property(x => x.Permission).HasMaxLength(16).IsRequired();
                 eb.Property(x => x.CreatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
                 eb.Property(x => x.UpdatedDate).HasDefaultValueSql("SYSUTCDATETIME()");
@@ -368,27 +355,18 @@ namespace Sciencetopia.Data
                   .WithMany()
                   .HasForeignKey(x => x.StudyGroupId)
                   .OnDelete(DeleteBehavior.Cascade);
-                eb.HasOne<StudyPlanEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.StudyPlanId)
-                  .OnDelete(DeleteBehavior.Cascade);
             });
 
             // StudyPlanUserRoles
             builder.Entity<StudyPlanUserRole>(b =>
             {
                 b.ToTable("StudyPlanUserRoles", schema: "StudyPlans");
-                b.HasKey(x => new { x.PlanId, x.UserId });
+                b.HasKey(x => new { x.PlanStableId, x.UserId });
 
                 b.Property(x => x.Role).HasConversion<byte>();
                 b.Property(x => x.UserId)
                  .HasColumnType("nvarchar(450)")
                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
-
-                b.HasOne(x => x.Plan)
-                 .WithMany(p => p.UserRoles)
-                 .HasForeignKey(x => x.PlanId)
-                 .OnDelete(DeleteBehavior.Cascade);
 
                 b.HasOne(x => x.User)
                  .WithMany()
@@ -435,15 +413,11 @@ namespace Sciencetopia.Data
                   .HasColumnType("nvarchar(450)")
                   .UseCollation("SQL_Latin1_General_CP1_CI_AS");
 
-                b.HasIndex(x => x.StudyPlanId);
+                b.HasIndex(x => x.StudyPlanStableId);
+                b.HasIndex(x => new { x.StudyPlanStableId, x.PinnedVersionNumber });
                 b.HasIndex(x => x.StudyGroupId);
                 b.Property(x => x.EnrollMode).HasConversion<string>().HasMaxLength(16).HasDefaultValue(Sciencetopia.Models.Enums.CohortEnrollMode.OptIn);
                 b.Property(x => x.MembersCount).HasDefaultValue(0);
-
-                b.HasOne<StudyPlanEntity>(x => x.Plan)
-                 .WithMany()
-                 .HasForeignKey(x => x.StudyPlanId)
-                 .OnDelete(DeleteBehavior.Cascade);
 
                 b.HasOne<StudyGroupEntity>()
                   .WithMany()

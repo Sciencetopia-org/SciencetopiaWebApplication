@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore;
 using Neo4j.Driver;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
+using Sciencetopia.DTOs.KnowledgeGraphDTOs;
+using Sciencetopia.Services.KnowledgeGraph;
 
 public class KnowledgeGraphService
 {
@@ -12,10 +14,11 @@ public class KnowledgeGraphService
     private readonly IGraphRepository _graphRepository;
     private readonly IKnowledgeNodeRepository _knowledgeRepo;
     private readonly ITagRepository _tagRepo;
-    private readonly INodeApprovalRepository _nodeApprovalRepo;
     private readonly IResourceRepository _resourceRepo;
     private readonly Sciencetopia.Services.L10n.IL10nService _l10n;
     private readonly Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> _l10nOptions;
+    private readonly IKnowledgeGraphWorkflowService _workflow;
+    private readonly IDraftFreezeService _draftFreeze;
 
     public KnowledgeGraphService(
         IDriver driver,
@@ -23,20 +26,22 @@ public class KnowledgeGraphService
         IGraphRepository graphRepository,
         IKnowledgeNodeRepository knowledgeRepo,
         ITagRepository tagRepo,
-        INodeApprovalRepository nodeApprovalRepo,
         IResourceRepository resourceRepo,
         Sciencetopia.Services.L10n.IL10nService l10n,
-        Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> l10nOptions)
+        Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> l10nOptions,
+        IKnowledgeGraphWorkflowService workflow,
+        IDraftFreezeService draftFreeze)
     {
         _driver = driver;
         _context = context;
         _graphRepository = graphRepository;
         _knowledgeRepo = knowledgeRepo;
         _tagRepo = tagRepo;
-        _nodeApprovalRepo = nodeApprovalRepo;
         _resourceRepo = resourceRepo;
         _l10n = l10n;
         _l10nOptions = l10nOptions;
+        _workflow = workflow;
+        _draftFreeze = draftFreeze;
     }
 
 
@@ -522,7 +527,19 @@ public class KnowledgeGraphService
 
     public async Task<string> CreateNodeAsync(CreateNodeRequest request, string userId)
     {
+        _draftFreeze.EnsureDraftingEnabled();
         return await CreateNodeWithResourcesAsync(request, userId);
+    }
+
+    public async Task<string> CreateTagDraftAsync(string name, string? description, string userId)
+    {
+        _draftFreeze.EnsureDraftingEnabled();
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Tag name is required.", nameof(name));
+
+        var draft = await _workflow.CreateTagDraftAsync(name, description, userId);
+        await _graphRepository.CreatePendingTagNodeAsync(draft.StableId.ToString());
+        return draft.StableId.ToString();
     }
 
     // public async Task<bool> CreateRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType, string userId)
@@ -544,52 +561,36 @@ public class KnowledgeGraphService
     //     return await result.FetchAsync(); // True if the operation was successful
     // }
 
-    public async Task<bool> ApproveNodeAsync(string nodeName, string reviewerId)
+    public async Task<bool> ApproveNodeAsync(Guid versionId, string reviewerId)
     {
-        if (!Guid.TryParse(nodeName, out var nodeId))
-            throw new ArgumentException("Invalid nodeName format. Expected a valid Guid.", nameof(nodeName));
+        await _workflow.PublishNodeAsync(versionId, reviewerId);
 
-        // Step 1: 审核通过知识节点草稿 + 版本控制（只处理 SQL）
-        var nodeSuccess = await _nodeApprovalRepo.ApproveNodeAsync(nodeId, reviewerId);
-        if (!nodeSuccess)
-            return false;
+        var node = await _context.KnowledgeNodes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == versionId);
 
-        // Step 2: 查找该节点关联的标签（Neo4j）
-        var tagIds = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId);
-
-        // Step 3: 对所有 tagId，逐一处理 pending 标签草稿审核 + 主表写入 + 图状态更新
-        foreach (var tagId in tagIds)
+        if (node is { StableId: var stableIdGuid } && stableIdGuid != Guid.Empty)
         {
-            var approved = await _tagRepo.ApproveTagDraftIfPendingAsync(tagId, reviewerId);
-
-            if (approved)
-            {
-                // 显式更新 Neo4j 标签状态
-                await _graphRepository.SetTagStatusApprovedAsync(tagId.ToString());
-            }
+            var stableId = stableIdGuid.ToString();
+            await _graphRepository.ApproveNodeResourceRelationsAsync(stableId);
+            await _graphRepository.PromoteTagRelationsAsync(stableId);
         }
-
-        // Step 4: 审核节点与资源之间的关系
-        await _graphRepository.ApproveNodeResourceRelationsAsync(nodeId.ToString());
-
         return true;
     }
 
-    public async Task<bool> DisapproveNodeAsync(string nodeName)
+    public async Task<bool> DisapproveNodeAsync(Guid versionId, string reviewerId)
     {
-        if (!Guid.TryParse(nodeName, out var nodeId))
-            throw new ArgumentException("Invalid nodeName format. Expected a valid Guid.", nameof(nodeName));
+        await _workflow.RejectNodeAsync(versionId, reviewerId);
 
-        // Step 1: 拒绝节点草稿（仅 SQL）
-        var result = await _nodeApprovalRepo.DisapproveNodeAsync(nodeName);
+        var node = await _context.KnowledgeNodes
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == versionId);
 
-        // Step 2: 拒绝相关标签草稿 + Neo4j 标签状态改为 rejected
-        await DisapprovePendingTagsRelatedToNodeAsync(nodeId);
-
-        // Step 3: 解除与资源的关系（Neo4j）
-        await _graphRepository.DetachResourcesFromNodeAsync(nodeId.ToString());
-
-        return result;
+        if (node is { StableId: var stableIdGuid } && stableIdGuid != Guid.Empty)
+        {
+            await _graphRepository.MarkTagRelationsRejectedAsync(stableIdGuid.ToString());
+        }
+        return true;
     }
 
     public async Task DisapprovePendingTagsRelatedToNodeAsync(Guid nodeId)
@@ -598,25 +599,56 @@ public class KnowledgeGraphService
 
         foreach (var tagId in tagIds)
         {
-            var drafts = await _context.TagDrafts
-                .Where(d => d.TagId == tagId && d.ReviewStatus == ReviewStatus.Pending)
+            var pendingTagVersions = await _context.Tags
+                .Where(t => t.StableId == tagId && t.Status == "Draft")
                 .ToListAsync();
 
-            foreach (var draft in drafts)
+            if (pendingTagVersions.Count > 0)
             {
-                draft.ReviewStatus = ReviewStatus.Rejected;
-                draft.ReviewedAt = DateTimeOffset.UtcNow;
+                var now = DateTimeOffset.UtcNow;
+                foreach (var tagVersion in pendingTagVersions)
+                {
+                    tagVersion.Status = "Rejected";
+                    tagVersion.IsCurrent = false;
+                    tagVersion.RetiredAt = now;
+                    tagVersion.ApprovedAt = now;
+                }
+                await _graphRepository.SetTagStatusRejectedAsync(tagId.ToString());
             }
-
-            await _graphRepository.SetTagStatusRejectedAsync(tagId.ToString());
         }
 
         await _context.SaveChangesAsync();
     }
 
-    public async Task<bool> ResubmitNodeAsync(string nodeName)
+    public async Task<bool> ResubmitNodeAsync(Guid versionId, string userId)
     {
-        return await _nodeApprovalRepo.ResubmitNodeAsync(nodeName);
+        var nodeVersion = await _context.KnowledgeNodes
+            .FirstOrDefaultAsync(x => x.Id == versionId);
+
+        if (nodeVersion == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(nodeVersion.Status, "Rejected", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        nodeVersion.Status = "Draft";
+        nodeVersion.IsCurrent = false;
+        nodeVersion.CreatedAt = DateTimeOffset.UtcNow;
+        if (!string.IsNullOrWhiteSpace(userId))
+        {
+            nodeVersion.CreatedBy = userId;
+        }
+        nodeVersion.PublishedAt = null;
+        nodeVersion.ApprovedAt = null;
+        nodeVersion.ApprovedBy = null;
+        nodeVersion.RetiredAt = null;
+
+        await _context.SaveChangesAsync();
+        return true;
     }
 
     // public async Task<bool> ApproveRelationshipAsync(string sourceNodeName, string targetNodeName, string relationshipType)
@@ -671,26 +703,26 @@ public class KnowledgeGraphService
 
     public async Task<bool> AddResourceAsync(string nodeName, string link, string resourceName = "")
     {
-        return await AddResourceToNodeAsync(nodeName, resourceName, link);
+        _draftFreeze.EnsureDraftingEnabled();
+        return await AddResourceToNodeAsync(nodeName, link, resourceName);
     }
 
-    public async Task<List<KnowledgeNodeDraft>> GetPendingNodesAsync()
+    public Task<IReadOnlyList<PendingNodeSummary>> GetPendingNodesAsync()
+        => _workflow.GetPendingNodeDraftsAsync();
+
+    public async Task<IReadOnlyList<PendingNodeSummary>> GetPendingNodesByUserIdAsync(string userId)
     {
-        return await _nodeApprovalRepo.GetPendingNodesAsync();
+        var drafts = await _workflow.GetPendingNodeDraftsAsync();
+        return drafts.Where(x => string.Equals(x.SubmittedBy, userId, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
-    public async Task<List<KnowledgeNodeDraft>> GetPendingNodesByUserIdAsync(string userId)
-    {
-        return await _nodeApprovalRepo.GetPendingNodesByUserIdAsync(userId);
-    }
+    public Task<IReadOnlyList<PendingTagSummary>> GetPendingTagsAsync()
+        => _workflow.GetPendingTagDraftsAsync();
 
-    public async Task<List<TagDraft>> GetPendingTagsAsync()
+    public async Task<IReadOnlyList<PendingTagSummary>> GetPendingTagsByUserIdAsync(string userId)
     {
-        return await _nodeApprovalRepo.GetPendingTagsAsync();
-    }
-    public async Task<List<TagDraft>> GetPendingTagsByUserIdAsync(string userId)
-    {
-        return await _nodeApprovalRepo.GetPendingTagsByUserIdAsync(userId);
+        var drafts = await _workflow.GetPendingTagDraftsAsync();
+        return drafts.Where(x => string.Equals(x.SubmittedBy, userId, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
     public async Task<List<int>> CountContributedNodesAndLinks(string userId)
@@ -700,7 +732,11 @@ public class KnowledgeGraphService
 
     public async Task<List<int>> CountContributedNodesAndLinksAsync(string userId)
     {
-        var approvedNodes = await _nodeApprovalRepo.CountApprovedNodeDraftsAsync(userId);
+        var approvedNodes = await _context.KnowledgeNodes
+            .Where(x => x.CreatedBy == userId && x.Status == "Current")
+            .Select(x => x.StableId)
+            .Distinct()
+            .CountAsync();
         var approvedLinks = await _graphRepository.CountApprovedLinksByUserAsync(userId);
         return new List<int> { approvedNodes, approvedLinks };
     }
@@ -708,43 +744,39 @@ public class KnowledgeGraphService
     public async Task<string> CreateNodeWithResourcesAsync(CreateNodeRequest request, string userId)
     {
         // Step 1: 创建 SQL 草稿
-        var nodeId = await _nodeApprovalRepo.CreateDraftAsync(request, userId);
-
-        // Step 2: 创建 Neo4j 节点和资源关系
+        var draft = await _workflow.CreateNodeDraftAsync(request, userId);
         await _graphRepository.CreateNodeAndResourceInGraphAsync(
-            nodeId.ToString(),
+            draft.StableId.ToString(),
             request.Name,
             request.Description,
             request.Link,
             userId
         );
 
-        // Step 3: 标签处理（抽象模块化）
         await HandleTagRelationsAsync(
-            nodeId,
+            draft.StableId,
             request.TagIds,
             request.NewTagNames,
             userId
         );
 
-        return nodeId.ToString();
+        return draft.VersionId.ToString();
     }
 
     public async Task<bool> EditNodeAsync(EditNodeRequest request, string userId)
     {
+        _draftFreeze.EnsureDraftingEnabled();
         // Step 1: 创建 SQL 草稿（已模块化）
-        await _nodeApprovalRepo.CreateNodeEditDraftAsync(request, userId);
+        var draft = await _workflow.CreateNodeEditDraftAsync(request, userId);
 
-        // Step 2: 模块化标签绑定
-        // 标签逻辑调用已写的私有方法
         await HandleTagRelationsAsync(
-            request.NodeId,
+            draft.StableId,
             request.TagIds,
             request.TagNames,
             userId
         );
 
-        return await _context.SaveChangesAsync() > 0;
+        return true;
     }
 
     private async Task HandleTagRelationsAsync(
@@ -767,17 +799,20 @@ public class KnowledgeGraphService
         {
             foreach (var tagName in newTagNames.Distinct())
             {
-                var tagId = await _tagRepo.CreateTagDraftAsync(tagName, null, userId);
-                await _graphRepository.CreatePendingTagNodeAsync(tagId.ToString());
-                await _graphRepository.RelateTagToNodeAsync(tagId.ToString(), nodeId.ToString());
+                var tagDraft = await _workflow.CreateTagDraftAsync(tagName, null, userId);
+                await _graphRepository.CreatePendingTagNodeAsync(tagDraft.StableId.ToString());
+                await _graphRepository.RelateTagToNodeAsync(tagDraft.StableId.ToString(), nodeId.ToString());
             }
         }
     }
 
-    public async Task<bool> AddResourceToNodeAsync(string nodeName, string link, string resourceName)
+    public async Task<bool> AddResourceToNodeAsync(string nodeId, string link, string resourceName)
     {
+        if (!Guid.TryParse(nodeId, out _))
+            throw new ArgumentException("Invalid node identifier.", nameof(nodeId));
+
         var resourceId = await _resourceRepo.EnsureResourceExistsAsync(resourceName, link);
-        return await _graphRepository.LinkResourceToNodeAsync(nodeName, resourceId);
+        return await _graphRepository.LinkResourceToNodeAsync(nodeId, resourceId, null);
     }
 
     private async Task<Dictionary<Guid, string>> GetNodeTitlesAsync(IEnumerable<Guid> nodeIds, string language)
