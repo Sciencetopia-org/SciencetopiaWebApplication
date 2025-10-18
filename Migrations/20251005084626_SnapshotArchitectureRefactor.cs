@@ -42,30 +42,75 @@ namespace SciencetopiaWebApplication.Migrations
                 name: "StudyPlanVersions",
                 schema: "StudyPlans");
 
-            migrationBuilder.DropColumn(
-                name: "CurrentVersionId",
-                schema: "StudyPlans",
-                table: "StudyPlans");
+            // Guarded drop: StudyPlans.StudyPlans.CurrentVersionId
+            migrationBuilder.Sql(@"
+IF COL_LENGTH('[StudyPlans].[StudyPlans]', 'CurrentVersionId') IS NOT NULL
+BEGIN
+    DECLARE @dc1 sysname;
+    SELECT @dc1 = [d].[name]
+    FROM [sys].[default_constraints] [d]
+    INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
+    WHERE ([d].[parent_object_id] = OBJECT_ID(N'[StudyPlans].[StudyPlans]') AND [c].[name] = N'CurrentVersionId');
+    IF @dc1 IS NOT NULL EXEC(N'ALTER TABLE [StudyPlans].[StudyPlans] DROP CONSTRAINT [' + @dc1 + ']');
+    ALTER TABLE [StudyPlans].[StudyPlans] DROP COLUMN [CurrentVersionId];
+END
+");
 
-            migrationBuilder.DropColumn(
-                name: "UseDraftFlow",
-                schema: "StudyGroups",
-                table: "StudyGroupStudyPlans");
+            // Guarded drop: StudyGroups.StudyGroupStudyPlans.UseDraftFlow
+            migrationBuilder.Sql(@"
+IF COL_LENGTH('[StudyGroups].[StudyGroupStudyPlans]', 'UseDraftFlow') IS NOT NULL
+BEGIN
+    DECLARE @dc2 sysname;
+    SELECT @dc2 = [d].[name]
+    FROM [sys].[default_constraints] [d]
+    INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
+    WHERE ([d].[parent_object_id] = OBJECT_ID(N'[StudyGroups].[StudyGroupStudyPlans]') AND [c].[name] = N'UseDraftFlow');
+    IF @dc2 IS NOT NULL EXEC(N'ALTER TABLE [StudyGroups].[StudyGroupStudyPlans] DROP CONSTRAINT [' + @dc2 + ']');
+    ALTER TABLE [StudyGroups].[StudyGroupStudyPlans] DROP COLUMN [UseDraftFlow];
+END
+");
 
-            migrationBuilder.DropColumn(
-                name: "ActivePlanVersionId",
-                schema: "StudyGroups",
-                table: "StudyGroupStudyPlans");
+            // Guarded drop: only drop column if it exists (handles preexisting DB state)
+            migrationBuilder.Sql(@"
+IF COL_LENGTH('[StudyGroups].[StudyGroupStudyPlans]', 'ActivePlanVersionId') IS NOT NULL
+BEGIN
+    DECLARE @var2 sysname;
+    SELECT @var2 = [d].[name]
+    FROM [sys].[default_constraints] [d]
+    INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
+    WHERE ([d].[parent_object_id] = OBJECT_ID(N'[StudyGroups].[StudyGroupStudyPlans]') AND [c].[name] = N'ActivePlanVersionId');
+    IF @var2 IS NOT NULL EXEC(N'ALTER TABLE [StudyGroups].[StudyGroupStudyPlans] DROP CONSTRAINT [' + @var2 + ']');
+    ALTER TABLE [StudyGroups].[StudyGroupStudyPlans] DROP COLUMN [ActivePlanVersionId];
+END
+");
 
-            migrationBuilder.DropColumn(
-                name: "PinnedVersionId",
-                schema: "StudyPlans",
-                table: "Cohorts");
+            // Guarded drop: StudyPlans.Cohorts.PinnedVersionId
+            migrationBuilder.Sql(@"
+IF COL_LENGTH('[StudyPlans].[Cohorts]', 'PinnedVersionId') IS NOT NULL
+BEGIN
+    DECLARE @dc3 sysname;
+    SELECT @dc3 = [d].[name]
+    FROM [sys].[default_constraints] [d]
+    INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
+    WHERE ([d].[parent_object_id] = OBJECT_ID(N'[StudyPlans].[Cohorts]') AND [c].[name] = N'PinnedVersionId');
+    IF @dc3 IS NOT NULL EXEC(N'ALTER TABLE [StudyPlans].[Cohorts] DROP CONSTRAINT [' + @dc3 + ']');
+    ALTER TABLE [StudyPlans].[Cohorts] DROP COLUMN [PinnedVersionId];
+END
+");
 
-            migrationBuilder.DropColumn(
-                name: "ActivePlanVersionId",
-                schema: "StudyPlans",
-                table: "Cohorts");
+            // Guarded drop: StudyPlans.Cohorts.ActivePlanVersionId
+            migrationBuilder.Sql(@"
+IF COL_LENGTH('[StudyPlans].[Cohorts]', 'ActivePlanVersionId') IS NOT NULL
+BEGIN
+    DECLARE @dc4 sysname;
+    SELECT @dc4 = [d].[name]
+    FROM [sys].[default_constraints] [d]
+    INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
+    WHERE ([d].[parent_object_id] = OBJECT_ID(N'[StudyPlans].[Cohorts]') AND [c].[name] = N'ActivePlanVersionId');
+    IF @dc4 IS NOT NULL EXEC(N'ALTER TABLE [StudyPlans].[Cohorts] DROP CONSTRAINT [' + @dc4 + ']');
+    ALTER TABLE [StudyPlans].[Cohorts] DROP COLUMN [ActivePlanVersionId];
+END
+");
 
             migrationBuilder.RenameColumn(
                 name: "PlanId",

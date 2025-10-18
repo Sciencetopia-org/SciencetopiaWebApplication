@@ -16,10 +16,22 @@ public class DailySummaryHostedService : IHostedService
 
     private async void GenerateDailySummary(object? state)
     {
-        using (var scope = _serviceProvider.CreateScope())
+        try
         {
-            var summaryService = scope.ServiceProvider.GetRequiredService<DailySummaryService>();
-            await summaryService.GenerateDailySummary(DateTime.UtcNow);
+            using (var scope = _serviceProvider.CreateScope())
+            {
+                var summaryService = scope.ServiceProvider.GetRequiredService<DailySummaryService>();
+                await summaryService.GenerateDailySummary(DateTime.UtcNow);
+            }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                var logger = _serviceProvider.GetService<ILogger<DailySummaryHostedService>>();
+                logger?.LogWarning(ex, "DailySummaryHostedService skipped run due to exception (continuing to host).");
+            }
+            catch { /* ignore logging failures */ }
         }
     }
 

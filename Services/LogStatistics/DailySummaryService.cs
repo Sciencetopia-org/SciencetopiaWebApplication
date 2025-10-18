@@ -47,8 +47,16 @@ public class DailySummaryService
         var StudyGroupsCount = 0;
         if (_studyGroupService != null)
         {
-            var groups = await _studyGroupService.GetAllStudyGroups();
-            StudyGroupsCount = groups.Count;
+            try
+            {
+                var groups = await _studyGroupService.GetAllStudyGroups();
+                StudyGroupsCount = groups.Count;
+            }
+            catch (Exception ex)
+            {
+                // Neo4j may be offline locally; record 0 and continue.
+                // Swallow to avoid crashing the hosted service.
+            }
         }
 
         // // Retrieve Total Number of Active Study Groups

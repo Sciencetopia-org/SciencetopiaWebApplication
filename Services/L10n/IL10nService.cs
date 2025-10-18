@@ -86,8 +86,9 @@ namespace Sciencetopia.Services.L10n
             var key = CacheKey(nodeId, fieldKey, lang);
             if (_cache.TryGetValue(key, out string? cached)) return cached;
 
+            // Support both version-id and stable-id inputs
             var setId = await _db.KnowledgeNodes
-                .Where(n => n.Id == nodeId)
+                .Where(n => (n.Id.HasValue && n.Id.Value == nodeId) || n.StableId == nodeId)
                 .Select(n => n.DefaultL10nSetId)
                 .FirstOrDefaultAsync();
 
@@ -121,16 +122,26 @@ namespace Sciencetopia.Services.L10n
             var result = new Dictionary<Guid, string>();
             if (idSet.Count == 0) return result;
 
+            // Load nodes matching either version-id or stable-id from the inputs
             var nodes = await _db.KnowledgeNodes
-                .Where(n => n.Id.HasValue && idSet.Contains(n.Id.Value))
-                .Select(n => new { NodeId = n.Id!.Value, n.DefaultL10nSetId })
+                .Where(n => n.Id.HasValue)
+                .Where(n => idSet.Contains(n.Id!.Value) || idSet.Contains(n.StableId))
+                .Select(n => new { VersionId = n.Id!.Value, n.StableId, n.DefaultL10nSetId })
                 .ToListAsync();
 
-            var mapNodeToSet = nodes.Where(x => x.DefaultL10nSetId.HasValue)
-                                     .ToDictionary(x => x.NodeId, x => x.DefaultL10nSetId!.Value);
-            if (mapNodeToSet.Count == 0) return result;
+            // Build mapping from each requested id (version or stable) to the L10n set id
+            var mapRequestedIdToSet = new Dictionary<Guid, Guid>();
+            foreach (var n in nodes)
+            {
+                if (!n.DefaultL10nSetId.HasValue) continue;
+                var setId = n.DefaultL10nSetId.Value;
+                if (idSet.Contains(n.VersionId)) mapRequestedIdToSet[n.VersionId] = setId;
+                if (idSet.Contains(n.StableId)) mapRequestedIdToSet[n.StableId] = setId;
+            }
 
-            var setIds = mapNodeToSet.Values.Distinct().ToList();
+            if (mapRequestedIdToSet.Count == 0) return result;
+
+            var setIds = mapRequestedIdToSet.Values.Distinct().ToList();
             var items = await (from si in _db.L10nSetItems
                                join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
                                where setIds.Contains(si.L10nSetId)
@@ -147,10 +158,11 @@ namespace Sciencetopia.Services.L10n
                     g => g.OrderBy(x => x.LangCode == lang ? 0 : 1).ThenBy(x => x.SortOrder).First().Text ?? string.Empty
                 );
 
-            foreach (var (nodeId, setId) in mapNodeToSet)
+            // Return results keyed by the requested ids to align with callers
+            foreach (var (requestedId, setId) in mapRequestedIdToSet)
             {
                 if (bestBySet.TryGetValue(setId, out var text) && !string.IsNullOrWhiteSpace(text))
-                    result[nodeId] = text;
+                    result[requestedId] = text;
             }
 
             return result;

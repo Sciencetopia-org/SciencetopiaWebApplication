@@ -13,7 +13,7 @@ public interface ITagRepository
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
     Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids, string language = "zh");
     // Fully replace legacy name-based approach: now from TagRepresentativeNode table
-    Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds);
+    Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds, string language = "zh");
     Task<Guid> CreateIfNotExistsAsync(string tagName);
 }
 
@@ -273,7 +273,7 @@ public class TagRepository : ITagRepository
     }
 
 
-    public async Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds)
+    public async Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds, string language = "zh")
     {
         var result = new Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>();
         var idSet = tagIds?.ToHashSet() ?? new HashSet<Guid>();
@@ -331,7 +331,7 @@ public class TagRepository : ITagRepository
         var stableNodeIds = nodeMeta.Values.Select(x => x.StableId).Distinct().ToList();
         if (_l10nOptions.Value.Enabled && stableNodeIds.Count > 0)
         {
-            var lang = _langCtx.EffectiveLang;
+            var lang = string.IsNullOrWhiteSpace(language) ? _langCtx.EffectiveLang : language;
             nodeNameMap = await _l10n.GetLocalizedManyAsync(stableNodeIds, "name", lang);
             nodeDescMap = await _l10n.GetLocalizedManyAsync(stableNodeIds, "description", lang);
         }

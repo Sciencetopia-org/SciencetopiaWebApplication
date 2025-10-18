@@ -33,12 +33,23 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
 
     public async Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id, string language = "zh")
     {
-        var node = await _context.KnowledgeNodes
+        // Project only the columns we actually need to avoid schema drift (e.g., missing RetiredAt in older DBs)
+        var row = await _context.KnowledgeNodes
             .Where(n => n.IsCurrent && n.Status == "Current" &&
                         ((n.Id.HasValue && n.Id.Value == id) || n.StableId == id))
             .OrderByDescending(n => n.VersionNumber)
+            .Select(n => new {
+                n.Id,
+                n.StableId,
+                n.Name,
+                n.Description,
+                n.CreatedAt,
+                n.PublishedAt,
+                n.ApprovedAt,
+                n.DefaultL10nSetId
+            })
             .FirstOrDefaultAsync();
-        if (node == null) return null;
+        if (row == null) return null;
 
         // L10n-aware override if enabled
         var opts = _context.GetService<Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions>>();
@@ -48,18 +59,18 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
             var title = await l10n.GetLocalizedAsync(id, "name", language);
             var desc = await l10n.GetLocalizedAsync(id, "description", language);
             return (
-                (title ?? node.Name) ?? string.Empty,
-                (desc ?? node.Description) ?? string.Empty,
-                node.CreatedAt ?? default,
-                node.PublishedAt ?? node.ApprovedAt ?? node.CreatedAt ?? default
+                (title ?? row.Name) ?? string.Empty,
+                (desc ?? row.Description) ?? string.Empty,
+                row.CreatedAt ?? default,
+                row.PublishedAt ?? row.ApprovedAt ?? row.CreatedAt ?? default
             );
         }
 
         return (
-            node.Name ?? string.Empty,
-            node.Description ?? string.Empty,
-            node.CreatedAt ?? default,
-            node.PublishedAt ?? node.ApprovedAt ?? node.CreatedAt ?? default
+            row.Name ?? string.Empty,
+            row.Description ?? string.Empty,
+            row.CreatedAt ?? default,
+            row.PublishedAt ?? row.ApprovedAt ?? row.CreatedAt ?? default
         );
     }
 

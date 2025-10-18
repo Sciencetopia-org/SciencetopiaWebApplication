@@ -359,7 +359,7 @@ public class KnowledgeGraphService
     {
         // 标签与节点的本地化已在各仓储层处理，无需在此额外覆盖
         // 使用 SQL 显式表获取代表节点详情（TagId -> NodeId + meta）
-        var repDetails = await _tagRepo.GetRepresentativeNodesAsync(allTagIds);
+        var repDetails = await _tagRepo.GetRepresentativeNodesAsync(allTagIds, language);
         var repMap = repDetails.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.NodeId);
         var repNodeIds = repMap.Values.Distinct().ToList();
 
