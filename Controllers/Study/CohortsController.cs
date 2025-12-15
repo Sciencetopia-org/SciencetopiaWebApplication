@@ -60,7 +60,25 @@ public class CohortsController : ControllerBase
         return NoContent();
     }
 
-    // Removed: POST /cohorts/{cohortId}/enroll (deprecated)
+    // Back-compat: Enroll endpoints
+    [HttpPost("Cohorts/{cohortId:guid}/Enroll")]
+    public async Task<IActionResult> EnrollCompat(Guid cohortId, [FromBody] JoinCohortRequest body)
+    {
+        var userId = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        var (planId, cid) = await _svc.JoinCohortAsync(cohortId, userId, body?.ShareMetrics ?? true, HttpContext.RequestAborted);
+        await _hub.Clients.All.SendAsync("cohort_joined", new { planId, cohortId = cid, userId });
+        return Ok(new JoinCohortResponse { PlanId = planId, CohortId = cid });
+    }
+
+    [HttpDelete("Cohorts/{cohortId:guid}/Enroll")]
+    public async Task<IActionResult> UnenrollCompat(Guid cohortId)
+    {
+        var userId = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        await _svc.UnenrollAsync(cohortId, userId);
+        return Ok();
+    }
 
     [HttpDelete("Cohorts/{cohortId:guid}/Leave")]
     public async Task<IActionResult> Unenroll(Guid cohortId)

@@ -81,7 +81,7 @@ namespace Sciencetopia.Services;
         if (direct > best) best = direct;
 
         // c) Group visibility: user is member of groups with roles; plan linked to those groups
-        var hasGroupLink = await _db.StudyGroupUserRoles
+        var hasGroupLink = await _db.GroupMembers
             .Where(gr => gr.UserId == userId)
             .Join(_db.StudyGroupStudyPlans, gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => new { gr, gp })
             .AnyAsync(x => x.gp.StudyPlanStableId == stableId, ct);
@@ -160,8 +160,8 @@ namespace Sciencetopia.Services;
                 if (info.StudyGroupId.HasValue)
                 {
                     // Group-scoped cohort: group managers manage/invite
-                    var isManager = await _db.StudyGroupUserRoles.AsNoTracking()
-                        .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId && x.Role == Models.Enums.GroupRole.Manager, ct);
+                    var isManager = await _db.GroupMembers.AsNoTracking()
+                        .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId && x.Role >= Models.Enums.GroupRole.Admin, ct);
                     if (isManager)
                     {
                         cohortManage = true;

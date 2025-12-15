@@ -11,7 +11,7 @@ public class StudyPlanDetail
     public string? StableId { get; set; }
     public int VersionNumber { get; set; }
     public bool IsCurrent { get; set; }
-    public string Status { get; set; } = "Current";
+    public string Status { get; set; } = "Active";
     public DateTimeOffset? PublishedAt { get; set; }
     public string? Title { get; set; }
     public Introduction? Introduction { get; set; }

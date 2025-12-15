@@ -11,11 +11,13 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly StudyPlanService _svc;
         private readonly PermissionService _perm;
+        private readonly Sciencetopia.Services.Region.IRegionService _region;
 
-        public LessonsController(StudyPlanService svc, PermissionService perm)
+        public LessonsController(StudyPlanService svc, PermissionService perm, Sciencetopia.Services.Region.IRegionService region)
         {
             _svc = svc;
             _perm = perm;
+            _region = region;
         }
 
         // Lazy-load lesson details including resources + learned flags
@@ -28,8 +30,17 @@ namespace Sciencetopia.Controllers.StudyPlan
 
             var dto = await _svc.GetLessonDetailAsync(planId, lessonId, userId);
             if (dto == null) return NotFound();
+            // Filter resources by region: if Mainland China, hide blocked ones
+            try
+            {
+                var isCn = await _region.IsMainlandChinaAsync(HttpContext);
+                if (isCn && dto.Resources != null)
+                {
+                    dto.Resources = Sciencetopia.Utils.ChinaAccessFilter.FilterResourcesForChina(dto.Resources).ToList();
+                }
+            }
+            catch { /* ignore region failures */ }
             return Ok(dto);
         }
     }
 }
-

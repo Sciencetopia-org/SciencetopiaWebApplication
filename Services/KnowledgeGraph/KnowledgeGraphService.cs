@@ -461,7 +461,7 @@ public class KnowledgeGraphService
         };
     }
 
-    // 旧版完整实现已移除，统一使用代表节点表
+    // Helpers
 
     public async Task<IEnumerable<string>> GetTagIdsByTagNamesAsync(IEnumerable<string> inputTagNames)
     {
@@ -477,40 +477,29 @@ public class KnowledgeGraphService
 
     public async Task<IEnumerable<Guid>> GetNodeIdsByTagsAsync(IEnumerable<string> inputTagIds)
     {
+        // Use only self + immediate children tag ids per input tag, and intersect across inputs
+        HashSet<Guid>? intersection = null;
 
-        HashSet<Guid>? intersectionDescendantTagIds = null;
-
-        // **逐个查询每个标签的所有子标签 ID，并计算交集**
-        foreach (var tagId in inputTagIds)
+        foreach (var tagId in (inputTagIds ?? Enumerable.Empty<string>()))
         {
-            var descendantTagIds = await _graphRepository.GetAllDescendantTagIdsAsync(new List<string> { tagId });
-
-            if (intersectionDescendantTagIds == null)
-            {
-                // 初始化交集集合
-                intersectionDescendantTagIds = new HashSet<Guid>(descendantTagIds);
-            }
+            var scopeTagIds = await _graphRepository.GetSelfAndImmediateChildrenTagIdsAsync(new List<string> { tagId });
+            if (intersection == null)
+                intersection = new HashSet<Guid>(scopeTagIds);
             else
-            {
-                // 取交集
-                intersectionDescendantTagIds.IntersectWith(descendantTagIds);
-            }
+                intersection.IntersectWith(scopeTagIds);
 
-            // 若交集为空，提前返回（没有共同的子标签）
-            if (intersectionDescendantTagIds.Count == 0)
+            if (intersection.Count == 0)
                 return Enumerable.Empty<Guid>();
         }
 
-        // **确保交集非空再查询 `TAGGED_WITH` 关系**
-        if (intersectionDescendantTagIds != null && intersectionDescendantTagIds.Count > 0)
+        if (intersection != null && intersection.Count > 0)
         {
-            var nodeIds = await _graphRepository.GetAllNodesRelatedToTagsAsync(intersectionDescendantTagIds);
+            var nodeIds = await _graphRepository.GetAllNodesRelatedToTagsAsync(intersection);
             return nodeIds;
         }
 
         return Enumerable.Empty<Guid>();
     }
-
     // 统一使用带语言参数的节点详情方法
 
     public async Task<object> SearchNodeAsync(string query)
@@ -826,3 +815,5 @@ public class KnowledgeGraphService
         return result;
     }
 }
+
+

@@ -15,11 +15,13 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly StudyPlanService _studyPlanService;
         private readonly PermissionService _permissionService;
+        private readonly Sciencetopia.Services.Region.IRegionService _regionService;
 
-        public StudyPlanController(StudyPlanService studyPlanService, PermissionService permissionService)
+        public StudyPlanController(StudyPlanService studyPlanService, PermissionService permissionService, Sciencetopia.Services.Region.IRegionService regionService)
         {
             _studyPlanService = studyPlanService;
             _permissionService = permissionService;
+            _regionService = regionService;
         }
 
         [HttpPost("SaveStudyPlan")]
@@ -95,6 +97,31 @@ namespace Sciencetopia.Controllers.StudyPlan
                 {
                     return NotFound(new { message = "Study plan not found." });
                 }
+
+                // Region-based filtering: if Mainland China, hide blocked resources
+                try
+                {
+                    var isCn = await _regionService.IsMainlandChinaAsync(HttpContext);
+                    if (isCn && studyPlan.StudyPlan != null)
+                    {
+                        void FilterLessons(List<Lesson>? list)
+                        {
+                            if (list == null) return;
+                            foreach (var les in list)
+                            {
+                                if (les.Resources != null)
+                                {
+                                    les.Resources = Sciencetopia.Utils.ChinaAccessFilter.FilterResourcesForChina(les.Resources).ToList();
+                                }
+                            }
+                        }
+
+                        FilterLessons(studyPlan.StudyPlan.Prerequisite);
+                        FilterLessons(studyPlan.StudyPlan.MainCurriculum);
+                        FilterLessons(studyPlan.StudyPlan.AdvancedTopics);
+                    }
+                }
+                catch { /* ignore region failures */ }
 
                 return Ok(studyPlan);
             }

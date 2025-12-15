@@ -44,7 +44,7 @@ public class GroupCohortsController : ControllerBase
         var stableIds = cohorts.Select(c => c.StudyPlanStableId).Distinct().ToList();
         var planSummaries = await _db.StudyPlans.AsNoTracking()
             .Where(p => stableIds.Contains(p.StableId))
-            .Select(p => new { p.StableId, p.VersionNumber, p.IsCurrent, p.Title })
+            .Select(p => new { p.Id, p.StableId, p.VersionNumber, p.IsCurrent, p.Title })
             .ToListAsync();
 
         var currentVersionLookup = planSummaries
@@ -61,19 +61,40 @@ public class GroupCohortsController : ControllerBase
                 g => g.OrderByDescending(x => x.VersionNumber).First().Title
             );
 
-        var result = cohorts.Select(c => new
+        // Build (stableId, versionNumber) -> versionId lookup for quick resolve
+        var versionIdLookup = planSummaries
+            .GroupBy(p => p.StableId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.ToDictionary(x => x.VersionNumber, x => x.Id)
+            );
+
+        var result = cohorts.Select(c =>
         {
-            c.Id,
-            StudyPlanStableId = c.StudyPlanStableId,
-            PlanTitle = titleLookup.TryGetValue(c.StudyPlanStableId, out var title) ? title : null,
-            PlanCurrentVersionNumber = currentVersionLookup.TryGetValue(c.StudyPlanStableId, out var current) ? current : (int?)null,
-            c.Title,
-            c.Visibility,
-            c.EnrollMode,
-            c.PinnedVersionNumber,
-            c.MembersCount,
-            c.CreatedAt,
-            c.CreatedBy
+            var title = titleLookup.TryGetValue(c.StudyPlanStableId, out var t) ? t : null;
+            var currentNo = currentVersionLookup.TryGetValue(c.StudyPlanStableId, out var cur) ? cur : (int?)null;
+            var chosenNo = c.PinnedVersionNumber ?? currentNo;
+            Guid? versionId = null;
+            if (chosenNo.HasValue && versionIdLookup.TryGetValue(c.StudyPlanStableId, out var byNo) && byNo.TryGetValue(chosenNo.Value, out var vid))
+            {
+                versionId = vid;
+            }
+
+            return new
+            {
+                id = c.Id,
+                studyPlanId = versionId, // for FE routing
+                studyPlanStableId = c.StudyPlanStableId,
+                planTitle = title,
+                planCurrentVersionNumber = currentNo,
+                title = c.Title,
+                visibility = c.Visibility,
+                enrollMode = c.EnrollMode,
+                pinnedVersionNumber = c.PinnedVersionNumber,
+                memberCount = c.MembersCount,
+                createdAt = c.CreatedAt,
+                createdBy = c.CreatedBy
+            };
         });
 
         return Ok(result);

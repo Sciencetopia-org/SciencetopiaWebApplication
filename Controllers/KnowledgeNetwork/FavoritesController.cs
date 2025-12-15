@@ -35,7 +35,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (n {id: $nodeId})
+                MATCH (n:KnowledgeNode {stableId: $nodeId})
                 MERGE (u:User {id: $userId})
                 MERGE (u)-[:OWNS]->(f:Favorite {type: 'favorite'})
                 WITH f, n
@@ -81,7 +81,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (n {id: $nodeId})
+                MATCH (n:KnowledgeNode {stableId: $nodeId})
                 MERGE (u:User {id: $userId})
                 MERGE (u)-[:OWNS]->(f:Favorite {type: 'learned'})
                 WITH f, n
@@ -132,7 +132,7 @@ public class FavoritesController : ControllerBase
             }
 
             var query = @"
-                MATCH (n {id: $nodeId})
+                MATCH (n:KnowledgeNode {stableId: $nodeId})
                 OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
                 RETURN CASE WHEN f IS NULL THEN false ELSE true END AS favorited
             ";
@@ -166,7 +166,7 @@ public class FavoritesController : ControllerBase
             }
 
             var query = @"
-                MATCH (n {id: $nodeId})
+                MATCH (n:KnowledgeNode {stableId: $nodeId})
                 OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
                 RETURN CASE WHEN f IS NULL THEN false ELSE true END AS learned
             ";
@@ -191,18 +191,25 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
-                RETURN n
+                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n:KnowledgeNode)
+                OPTIONAL MATCH (n)<-[:TAGGED_WITH]-(l:TagLevel)
+                RETURN n, l.name AS tagLevel
             ";
 
             var result = await _session.RunAsync(query, new { userId });
             var data = await result.ToListAsync();
 
-            var response = data.Select(record => new
+            var response = data.Select(record =>
             {
-                identity = record["n"].As<INode>().Id,
-                labels = record["n"].As<INode>().Labels,
-                properties = record["n"].As<INode>().Properties
+                var node = record["n"].As<INode>();
+                var level = record["tagLevel"].As<string?>();
+                return new
+                {
+                    identity = node.Id,
+                    labels = node.Labels,
+                    properties = node.Properties,
+                    tagLevel = level
+                };
             }).ToList();
 
             return Ok(response);
@@ -255,7 +262,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n {id: $nodeId})
+                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
                 DELETE r
                 RETURN n
             ";
@@ -292,7 +299,7 @@ public class FavoritesController : ControllerBase
             var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n {id: $nodeId})
+                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
                 DELETE r
                 RETURN n
             ";

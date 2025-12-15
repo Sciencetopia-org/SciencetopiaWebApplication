@@ -1,0 +1,135 @@
+openapi: 3.0.3
+info:
+  title: StudyPlan Versioning API
+  version: 1.0.0
+paths:
+  /api/study-plans/{stableId}/versions:
+    post:
+      summary: Create draft version from current/base
+      parameters:
+        - in: path
+          name: stableId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: baseVersionId
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-plans/versions/{versionId}:
+    patch:
+      summary: Patch draft outline
+      parameters:
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                Prerequisite: { type: array, items: { type: string, format: uuid } }
+                MainCurriculum: { type: array, items: { type: string, format: uuid } }
+                AdvancedTopics: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+  /api/study-plans/versions/{versionId}:publish:
+    post:
+      summary: Publish draft to current
+      parameters:
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-plans/{stableId}:
+    get:
+      summary: Get canonical (current) version
+      parameters:
+        - in: path
+          name: stableId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-plans/{stableId}/versions/{versionId}:
+    get:
+      summary: Get specific version
+      parameters:
+        - in: path
+          name: stableId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-plans/{stableId}/versions/{from}/diff/{to}:
+    get:
+      summary: Diff two versions by lockfile
+      parameters:
+        - in: path
+          name: stableId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: from
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: to
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-groups/{id}/head-status:
+    get:
+      summary: Check if group has newer head version and diff summary
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-groups/{id}/rollforward:preview:
+    get:
+      summary: Preview diff to a target version
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: toVersionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-groups/{id}/study-plan:rollforward:
+    post:
+      summary: Rollforward pinned version (immediate)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }
+  /api/study-groups/{id}/study-plan:rollback:
+    post:
+      summary: Rollback to a previous version
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: OK }

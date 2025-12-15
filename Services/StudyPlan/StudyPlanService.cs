@@ -113,7 +113,7 @@ public class StudyPlanService
             Id = planVersionId,
             StableId = planStableId,
             VersionNumber = 1,
-            Status = "Current",
+            Status = "Active",
             IsCurrent = true,
             PublishedAt = utcOffsetNow,
             CreatedAt = utcOffsetNow,
@@ -122,6 +122,7 @@ public class StudyPlanService
             ApprovedBy = userId,
             Title = planDto.Title,
             Description = planDto.Introduction?.Description,
+            MetadataJson = BuildPlanMetadataJson(planDto),
             CreatorId = Guid.Parse(userId),
             CreatedDate = utcNow,
             UpdatedDate = utcNow
@@ -129,8 +130,23 @@ public class StudyPlanService
 
         await _sqlRepository.InsertStudyPlanAsync(planEntity);
 
-        var snapshots = await UpdateLessonsAsync(planStableId, planEntity.VersionNumber, planDto, createNewVersion: false, userId, utcOffsetNow);
+        var snapshots = await UpdateLessonsAsync(planStableId, planVersionId, planEntity.VersionNumber, planDto, createNewVersion: false, userId, utcOffsetNow);
         await _sqlRepository.ReplacePlanLessonSnapshotsAsync(planStableId, planEntity.VersionNumber, snapshots);
+
+        // Build and persist lockfile for published v1
+        var lockLessons = snapshots
+            .OrderBy(s => s.StepOrder)
+            .Select((s, i) => new Sciencetopia.DTOs.StudyPlanLockfileItem
+            {
+                LessonStableId = s.LessonStableId,
+                LessonVersionNumber = s.LessonVersionNumber,
+                StepType = s.StepType,
+                Index = i + 1
+            })
+            .ToList();
+        var lockfile = new Sciencetopia.DTOs.StudyPlanLockfile { Lessons = lockLessons };
+        planEntity.LockfileJson = JsonSerializer.Serialize(lockfile);
+        await _sqlRepository.UpdateStudyPlanAsync(planEntity);
 
         await UpsertStudyPlanGraphAsync(planStableId.ToString(), planDto, planEntity.VersionNumber);
 
@@ -159,7 +175,18 @@ public class StudyPlanService
             yield return (lesson, StudyPlanStepTypes.AdvancedTopic);
     }
 
-    private async Task<List<StudyPlanLessonSnapshot>> UpdateLessonsAsync(Guid planStableId, int planVersionNumber, StudyPlanDetail? studyPlan, bool createNewVersion, string userId, DateTimeOffset timestamp)
+    private string BuildPlanMetadataJson(StudyPlanDetail? studyPlan)
+    {
+        var counts = new
+        {
+            prerequisites = studyPlan?.Prerequisite?.Count ?? 0,
+            mainCurriculum = studyPlan?.MainCurriculum?.Count ?? 0,
+            advancedTopics = studyPlan?.AdvancedTopics?.Count ?? 0
+        };
+        return JsonSerializer.Serialize(counts);
+    }
+
+    private async Task<List<StudyPlanLessonSnapshot>> UpdateLessonsAsync(Guid planStableId, Guid planVersionId, int planVersionNumber, StudyPlanDetail? studyPlan, bool createNewVersion, string userId, DateTimeOffset timestamp)
     {
         var snapshots = new List<StudyPlanLessonSnapshot>();
         if (studyPlan == null)
@@ -173,6 +200,8 @@ public class StudyPlanService
         foreach (var (lesson, stepType) in orderedLessons)
         {
             order++;
+            var lessonKind = stepType;
+            var lessonMetadataJson = JsonSerializer.Serialize(new { stepType });
 
             Guid lessonStableId;
             int targetVersionNumber;
@@ -213,7 +242,7 @@ public class StudyPlanService
                     Id = targetVersionId,
                     StableId = lessonStableId,
                     VersionNumber = targetVersionNumber,
-                    Status = "Current",
+                    Status = "Active",
                     IsCurrent = true,
                     PublishedAt = timestamp,
                     ApprovedAt = timestamp,
@@ -222,6 +251,10 @@ public class StudyPlanService
                     CreatedBy = userId,
                     Title = lesson.Name,
                     Description = lesson.Description,
+                    StudyPlanId = planVersionId,
+                    OrderIndex = order,
+                    Kind = lessonKind,
+                    MetadataJson = lessonMetadataJson,
                     CreatedDate = DateTime.UtcNow,
                     UpdatedDate = DateTime.UtcNow
                 });
@@ -238,7 +271,7 @@ public class StudyPlanService
                         Id = targetVersionId,
                         StableId = lessonStableId,
                         VersionNumber = targetVersionNumber,
-                        Status = "Current",
+                        Status = "Active",
                         IsCurrent = true,
                         PublishedAt = timestamp,
                         ApprovedAt = timestamp,
@@ -247,6 +280,10 @@ public class StudyPlanService
                         CreatedBy = userId,
                         Title = lesson.Name,
                         Description = lesson.Description,
+                        StudyPlanId = planVersionId,
+                        OrderIndex = order,
+                        Kind = lessonKind,
+                        MetadataJson = lessonMetadataJson,
                         CreatedDate = DateTime.UtcNow,
                         UpdatedDate = DateTime.UtcNow
                     });
@@ -258,6 +295,10 @@ public class StudyPlanService
 
                     currentLessonEntity.Title = lesson.Name;
                     currentLessonEntity.Description = lesson.Description;
+                    currentLessonEntity.StudyPlanId ??= planVersionId;
+                    currentLessonEntity.OrderIndex = order;
+                    currentLessonEntity.Kind = lessonKind;
+                    currentLessonEntity.MetadataJson = lessonMetadataJson;
                     currentLessonEntity.UpdatedDate = DateTime.UtcNow;
                     currentLessonEntity.CreatedAt ??= timestamp;
                     currentLessonEntity.CreatedBy ??= userId;
@@ -453,7 +494,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
                 Id = Guid.NewGuid(),
                 StableId = stableId,
                 VersionNumber = nextVersion,
-                Status = "Current",
+                Status = "Active",
                 IsCurrent = true,
                 PublishedAt = offsetNow,
                 ApprovedAt = offsetNow,
@@ -462,6 +503,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
                 CreatedBy = existingPlan.CreatedBy ?? userId,
                 Title = updatedStudyPlan.StudyPlan.Title ?? existingPlan.Title,
                 Description = updatedStudyPlan.StudyPlan.Introduction?.Description ?? existingPlan.Description,
+                MetadataJson = BuildPlanMetadataJson(updatedStudyPlan.StudyPlan),
                 CreatorId = existingPlan.CreatorId,
                 CreatedDate = existingPlan.CreatedDate,
                 UpdatedDate = utcNow
@@ -474,6 +516,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             existingPlan.StableId = stableId;
             existingPlan.Title = updatedStudyPlan.StudyPlan.Title ?? existingPlan.Title;
             existingPlan.Description = updatedStudyPlan.StudyPlan.Introduction?.Description ?? existingPlan.Description;
+            existingPlan.MetadataJson = BuildPlanMetadataJson(updatedStudyPlan.StudyPlan);
             existingPlan.UpdatedDate = utcNow;
             existingPlan.CreatedAt ??= offsetNow;
             existingPlan.CreatedBy ??= userId;
@@ -481,8 +524,25 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             await _sqlRepository.UpdateStudyPlanAsync(targetVersion);
         }
 
-        var lessonSnapshots = await UpdateLessonsAsync(stableId, targetVersion.VersionNumber, updatedStudyPlan.StudyPlan, createNewVersion, userId, offsetNow);
+        var lessonSnapshots = await UpdateLessonsAsync(stableId, targetVersion.Id, targetVersion.VersionNumber, updatedStudyPlan.StudyPlan, createNewVersion, userId, offsetNow);
         await _sqlRepository.ReplacePlanLessonSnapshotsAsync(stableId, targetVersion.VersionNumber, lessonSnapshots);
+        // If version is published/current, rebuild lockfile
+        if (targetVersion.IsCurrent || string.Equals(targetVersion.Status, "Active", StringComparison.OrdinalIgnoreCase))
+        {
+            var lockLessons = lessonSnapshots
+                .OrderBy(s => s.StepOrder)
+                .Select((s, i) => new Sciencetopia.DTOs.StudyPlanLockfileItem
+                {
+                    LessonStableId = s.LessonStableId,
+                    LessonVersionNumber = s.LessonVersionNumber,
+                    StepType = s.StepType,
+                    Index = i + 1
+                })
+                .ToList();
+            var lockfile = new Sciencetopia.DTOs.StudyPlanLockfile { Lessons = lockLessons };
+            targetVersion.LockfileJson = JsonSerializer.Serialize(lockfile);
+            await _sqlRepository.UpdateStudyPlanAsync(targetVersion);
+        }
         await UpsertStudyPlanGraphAsync(stableId.ToString(), updatedStudyPlan.StudyPlan, targetVersion.VersionNumber);
 
         updatedStudyPlan.StudyPlan.Id = targetVersion.Id.ToString();
@@ -878,32 +938,104 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             AdvancedTopics = new List<Lesson>(),
             Tags = new List<TagDTO>()
         };
-
-        var snapshots = await _sqlRepository.GetPlanLessonSnapshotsAsync(stableId, entity.VersionNumber);
-        foreach (var snapshot in snapshots.OrderBy(s => s.StepOrder))
+        // Prepare lesson references (stableId + versionNo, and type) either from lockfile or snapshots
+        var desired = new List<(Guid LessonStableId, int VersionNumber, string StepType, int StepOrder)>();
+        var lockfile = TryParseLockfile(entity.LockfileJson);
+        if (lockfile?.Lessons?.Count > 0)
         {
-            var lessonEntity = await _sqlRepository.GetLessonByStableIdAsync(snapshot.LessonStableId, snapshot.LessonVersionNumber);
-            if (lessonEntity == null)
+            foreach (var (it, idx) in lockfile.Lessons.Select((x, i) => (x, i + 1)))
             {
-                continue;
+                desired.Add((it.LessonStableId, it.LessonVersionNumber, it.StepType ?? StudyPlanStepTypes.MainCurriculum, idx));
+            }
+        }
+        else
+        {
+            var snapshots = await _sqlRepository.GetPlanLessonSnapshotsAsync(stableId, entity.VersionNumber);
+            foreach (var s in snapshots.OrderBy(x => x.StepOrder))
+            {
+                desired.Add((s.LessonStableId, s.LessonVersionNumber, s.StepType, s.StepOrder));
+            }
+            if (desired.Count == 0)
+            {
+                // Fallback to graph ordering if no snapshots and no lockfile
+                try
+                {
+                    using var session = _neo4jDriver.AsyncSession();
+                    var records = await session.ExecuteReadAsync(async tx =>
+                    {
+                        var cypher = @"MATCH (p:StudyPlan {id:$pid})-[r:HAS_STEP]->(l:Lesson)
+                                       RETURN l.id AS lessonId, r.type AS type, r.order AS ord
+                                       ORDER BY ord ASC";
+                        var cursor = await tx.RunAsync(cypher, new { pid = stableId.ToString() });
+                        return await cursor.ToListAsync();
+                    });
+                    // When reading from graph we only have lesson version ids
+                    var lessonIds = new List<Guid>();
+                    var types = new List<string>();
+                    foreach (var rec in records)
+                    {
+                        var lidStr = rec["lessonId"].As<string?>();
+                        var type = rec["type"].As<string?>() ?? StudyPlanStepTypes.MainCurriculum;
+                        if (Guid.TryParse(lidStr, out var lid)) { lessonIds.Add(lid); types.Add(type); }
+                    }
+                    // Load lessons by version ids in a single SQL call
+                    var lessonEntities = await _sqlRepository.GetLessonsByIdsAsync(lessonIds.Select(x => x.ToString()).ToList());
+                    var byId = lessonEntities.ToDictionary(x => x.Id, x => x);
+                    for (int i = 0; i < lessonIds.Count; i++)
+                    {
+                        if (byId.TryGetValue(lessonIds[i], out var ent))
+                        {
+                            var st = ent.StableId == Guid.Empty ? ent.Id : ent.StableId;
+                            desired.Add((st, ent.VersionNumber, types[i], i + 1));
+                        }
+                    }
+                }
+                catch { /* ignore */ }
+            }
+        }
+
+        if (desired.Count > 0)
+        {
+            // Batch load all lessons for involved stableIds and select required versions
+            var stableSet = desired.Select(d => d.LessonStableId).Distinct().ToList();
+            var candidates = await _sqlRepository.GetLessonsByStableIdsAsync(stableSet);
+            var picked = new List<(LessonEntity Entity, string StepType, int StepOrder)>();
+            // Build lookup of (stableId, versionNo) -> lesson
+            var byStable = candidates.GroupBy(l => l.StableId).ToDictionary(g => g.Key, g => g.ToDictionary(x => x.VersionNumber, x => x));
+            foreach (var d in desired)
+            {
+                if (byStable.TryGetValue(d.LessonStableId, out var versions) && versions.TryGetValue(d.VersionNumber, out var ent))
+                {
+                    picked.Add((ent, d.StepType, d.StepOrder));
+                }
             }
 
-            var lessonDto = MapLessonEntityToDto(lessonEntity);
-            lessonDto.Resources = await LoadLessonResourcesAsync(lessonEntity.Id);
-            var lessonTagStableIds = await _sqlRepository.GetLessonTagStableIdsAsync(snapshot.LessonStableId, snapshot.LessonVersionNumber);
-            lessonDto.Tags = await BuildTagDtosAsync(lessonTagStableIds);
+            // Batch load resources from graph for all picked lesson version ids
+            var resourcesMap = await LoadLessonResourcesBatchAsync(picked.Select(p => p.Entity.Id));
 
-            switch (snapshot.StepType)
+            // Batch load tags assignments for all stable ids, then filter to version numbers, then resolve names once
+            var assignments = await _sqlRepository.GetLessonTagAssignmentsByStableIdsAsync(stableSet);
+            var neededPairs = picked.Select(p => (StableId: p.Entity.StableId == Guid.Empty ? p.Entity.Id : p.Entity.StableId, Version: p.Entity.VersionNumber)).ToList();
+            var neededPairSet = neededPairs.ToHashSet();
+            var tagByLesson = assignments
+                .Where(a => neededPairSet.Contains((a.LessonStableId, a.LessonVersionNumber)))
+                .GroupBy(a => (a.LessonStableId, a.LessonVersionNumber))
+                .ToDictionary(g => g.Key, g => g.Select(x => x.TagStableId).Distinct().ToList());
+
+            var allTagIds = tagByLesson.Values.SelectMany(x => x).Distinct().ToList();
+            var tagNameMap = await BuildTagNameMapAsync(allTagIds);
+
+            // Assemble DTOs in order
+            foreach (var item in picked.OrderBy(x => x.StepOrder))
             {
-                case StudyPlanStepTypes.Prerequisite:
-                    detail.Prerequisite.Add(lessonDto);
-                    break;
-                case StudyPlanStepTypes.AdvancedTopic:
-                    detail.AdvancedTopics.Add(lessonDto);
-                    break;
-                default:
-                    detail.MainCurriculum.Add(lessonDto);
-                    break;
+                var dto = MapLessonEntityToDto(item.Entity);
+                dto.Resources = resourcesMap.TryGetValue(item.Entity.Id, out var resList) ? resList : new List<ResourceDTO>();
+                var key = (item.Entity.StableId == Guid.Empty ? item.Entity.Id : item.Entity.StableId, item.Entity.VersionNumber);
+                if (tagByLesson.TryGetValue(key, out var lessonTagIds) && lessonTagIds.Count > 0)
+                {
+                    dto.Tags = lessonTagIds.Select(id => new TagDTO { Id = id, Name = tagNameMap.TryGetValue(id, out var nm) ? nm : null }).ToList();
+                }
+                AddLessonByType(detail, item.StepType, dto);
             }
         }
 
@@ -913,38 +1045,140 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         return detail;
     }
 
+    private async Task<Dictionary<Guid, List<ResourceDTO>>> LoadLessonResourcesBatchAsync(IEnumerable<Guid> lessonVersionIds)
+    {
+        var ids = lessonVersionIds?.Distinct().ToList() ?? new List<Guid>();
+        var result = new Dictionary<Guid, List<ResourceDTO>>();
+        if (ids.Count == 0) return result;
+
+        // 1) Read lesson->resource ids from graph in one pass
+        var linkRows = new List<(Guid LessonId, string ResourceId, string? OrdKey)>();
+        await using (var session = _neo4jDriver.AsyncSession())
+        {
+            var records = await session.ExecuteReadAsync(async tx =>
+            {
+                var cypher = @"MATCH (l:Lesson)-[:HAS_RESOURCE]->(r:Resource)
+                               WHERE l.id IN $lessonIds
+                               RETURN l.id AS lid, r.id AS rid, coalesce(r.order, r.name, r.title) AS ord";
+                var cursor = await tx.RunAsync(cypher, new { lessonIds = ids.Select(x => x.ToString()).ToList() });
+                return await cursor.ToListAsync();
+            });
+            foreach (var rec in records)
+            {
+                var lid = rec["lid"].As<string?>();
+                var rid = rec["rid"].As<string?>();
+                var ord = rec["ord"].As<string?>();
+                if (Guid.TryParse(lid, out var lg) && !string.IsNullOrWhiteSpace(rid))
+                {
+                    linkRows.Add((lg, rid!, ord));
+                }
+            }
+        }
+
+        if (linkRows.Count == 0)
+            return ids.ToDictionary(x => x, _ => new List<ResourceDTO>());
+
+        // 2) Load all involved resources from SQL once
+        var allResIds = linkRows.Select(x => x.ResourceId).Distinct().ToList();
+        var sqlResources = await _sqlRepository.GetResourcesByIdsAsync(allResIds);
+        var resMap = sqlResources.ToDictionary(r => r.Id.ToString(), r => r, StringComparer.OrdinalIgnoreCase);
+
+        // 3) Build per-lesson ordered DTO lists
+        foreach (var group in linkRows.GroupBy(x => x.LessonId))
+        {
+            var list = group
+                .OrderBy(g => g.OrdKey) // aligns with previous behavior
+                .Select(g => resMap.TryGetValue(g.ResourceId, out var rr)
+                    ? new ResourceDTO { Id = rr.Id.ToString(), Name = rr.Name, Link = rr.Link, Learned = false }
+                    : new ResourceDTO { Id = g.ResourceId, Name = g.ResourceId, Link = null, Learned = false })
+                .ToList();
+            result[group.Key] = list;
+        }
+        // Ensure all requested lesson ids have an entry
+        foreach (var id in ids)
+        {
+            result.TryAdd(id, new List<ResourceDTO>());
+        }
+        return result;
+    }
+
+    private async Task<Dictionary<Guid, string>> BuildTagNameMapAsync(IEnumerable<Guid> tagStableIds)
+    {
+        if (_tagRepo == null) return new Dictionary<Guid, string>();
+        var ids = tagStableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        if (ids.Count == 0) return new Dictionary<Guid, string>();
+        return await _tagRepo.GetTagNamesAsync(ids);
+    }
+
+    private static void AddLessonByType(StudyPlanDetail detail, string stepType, Lesson lessonDto)
+    {
+        switch (stepType)
+        {
+            case StudyPlanStepTypes.Prerequisite:
+                detail.Prerequisite.Add(lessonDto);
+                break;
+            case StudyPlanStepTypes.AdvancedTopic:
+                detail.AdvancedTopics.Add(lessonDto);
+                break;
+            default:
+                detail.MainCurriculum.Add(lessonDto);
+                break;
+        }
+    }
+
+    private static Sciencetopia.DTOs.StudyPlanLockfile? TryParseLockfile(string? json)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            return System.Text.Json.JsonSerializer.Deserialize<Sciencetopia.DTOs.StudyPlanLockfile>(json);
+        }
+        catch { return null; }
+    }
+
     private async Task<List<ResourceDTO>> LoadLessonResourcesAsync(Guid lessonVersionId)
     {
-        var resources = new List<ResourceDTO>();
-
-        await using var session = _neo4jDriver.AsyncSession();
-        var rows = await session.ExecuteReadAsync(async tx =>
+        // 1) Read resource ids from graph to preserve lesson-resource associations and ordering
+        List<string> resourceIds;
+        await using (var session = _neo4jDriver.AsyncSession())
         {
-            var cursor = await tx.RunAsync(@"
+            resourceIds = await session.ExecuteReadAsync(async tx =>
+            {
+                var cursor = await tx.RunAsync(@"
 MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)
-RETURN r.id AS id, r.name AS name, r.link AS link
-ORDER BY coalesce(r.order, r.name)", new { lessonId = lessonVersionId.ToString() });
+RETURN r.id AS id, coalesce(r.order, r.name, r.title) AS ord
+ORDER BY ord", new { lessonId = lessonVersionId.ToString() });
 
-            var result = new List<(string? Id, string? Name, string? Link)>();
-            await cursor.ForEachAsync(record =>
-            {
-                result.Add((record["id"].As<string?>(), record["name"].As<string?>(), record["link"].As<string?>()));
-            });
-            return result;
-        });
-
-        foreach (var (id, name, link) in rows)
-        {
-            resources.Add(new ResourceDTO
-            {
-                Id = id,
-                Name = name,
-                Link = link,
-                Learned = false
+                var ids = new List<string>();
+                await cursor.ForEachAsync(record =>
+                {
+                    var id = record["id"].As<string?>();
+                    if (!string.IsNullOrWhiteSpace(id)) ids.Add(id!);
+                });
+                return ids;
             });
         }
 
-        return resources;
+        if (resourceIds.Count == 0) return new List<ResourceDTO>();
+
+        // 2) Load name/link from SQL by ids (authoritative store)
+        var sqlResources = await _sqlRepository.GetResourcesByIdsAsync(resourceIds);
+        var map = sqlResources.ToDictionary(r => r.Id.ToString(), r => r, StringComparer.OrdinalIgnoreCase);
+
+        // 3) Build DTOs in graph order; if not found in SQL, include id-only entry
+        var list = new List<ResourceDTO>(resourceIds.Count);
+        foreach (var rid in resourceIds)
+        {
+            if (map.TryGetValue(rid, out var res))
+            {
+                list.Add(new ResourceDTO { Id = res.Id.ToString(), Name = res.Name, Link = res.Link, Learned = false });
+            }
+            else
+            {
+                list.Add(new ResourceDTO { Id = rid, Name = rid, Link = null, Learned = false });
+            }
+        }
+        return list;
     }
 
     private async Task<List<TagDTO>> BuildTagDtosAsync(IEnumerable<Guid> tagStableIds)

@@ -52,6 +52,8 @@ public interface IGraphRepository
     /// 获取所有与指定标签相关的知识节点
     /// </summary>
     Task<HashSet<Guid>> GetAllDescendantTagIdsAsync(IEnumerable<string> tagNames);
+    // Self + immediate children only (one hop). Inputs are tag stableIds as strings.
+    Task<HashSet<Guid>> GetSelfAndImmediateChildrenTagIdsAsync(IEnumerable<string> tagIds);
 
     /// <summary>
     /// 获取 Venn 图中标签与知识节点的分组
@@ -73,6 +75,11 @@ public interface IGraphRepository
     Task DetachResourcesFromNodeAsync(string nodeId);
     Task ApproveNodeResourceRelationsAsync(string nodeId);
     Task<Dictionary<Guid, int>> GetTagCountsForNodesAsync(IEnumerable<Guid> nodeIds);
+
+    // Graph view methods (status/time-window filtered edges)
+    Task<List<(Guid TagId, Guid NodeId)>> GetActiveGraphAsync(DateTimeOffset? asOf = null);
+    Task<List<(Guid TagId, Guid NodeId)>> GetProposalsAsync();
+    Task<List<(Guid TagId, Guid NodeId)>> GetAsOfAsync(DateTimeOffset asOf);
 }
 
 public class GraphRepository : IGraphRepository
@@ -389,9 +396,10 @@ public class GraphRepository : IGraphRepository
 
         if (!tagIds.Any()) return new HashSet<Guid>();
 
+        // Include the parent tag itself (length-0 path) so direct-tagged nodes are included
         var query = @"
-        MATCH (parent:Tag)-[:CONTAIN*]->(child:Tag)
-        WHERE parent.stableId IN $tagIds
+        UNWIND $tagIds AS pid
+        MATCH (parent:Tag {stableId: pid})-[:CONTAIN*0..]->(child:Tag)
         RETURN DISTINCT child.stableId AS tagId";
 
         var parameters = new { tagIds };
@@ -399,6 +407,28 @@ public class GraphRepository : IGraphRepository
         var result = await session.RunAsync(query, parameters);
         var records = await result.ToListAsync();
         return records.Select(record => Guid.Parse(record["tagId"].As<string>())).ToHashSet();
+    }
+
+    public async Task<HashSet<Guid>> GetSelfAndImmediateChildrenTagIdsAsync(IEnumerable<string> tagIds)
+    {
+        using var session = _driver.AsyncSession();
+
+        var ids = (tagIds ?? Enumerable.Empty<string>()).Distinct().ToList();
+        if (ids.Count == 0) return new HashSet<Guid>();
+
+        // Return both the parent tag itself and its immediate children
+        var query = @"
+        UNWIND $tagIds AS pid
+        MATCH (parent:Tag {stableId: pid})
+        RETURN DISTINCT parent.stableId AS tagId
+        UNION
+        UNWIND $tagIds AS pid
+        MATCH (parent:Tag {stableId: pid})-[:CONTAIN]->(child:Tag)
+        RETURN DISTINCT child.stableId AS tagId";
+
+        var result = await session.RunAsync(query, new { tagIds = ids });
+        var records = await result.ToListAsync();
+        return records.Select(r => Guid.Parse(r["tagId"].As<string>())).ToHashSet();
     }
 
     public async Task<List<TagNodeGroup>> GetVennTagNodeGroupsAsync()
@@ -755,4 +785,34 @@ RETURN t.stableId AS tagId, count(DISTINCT n) AS cnt";
         }
         return result;
     }
+
+    public async Task<List<(Guid TagId, Guid NodeId)>> GetActiveGraphAsync(DateTimeOffset? asOf = null)
+    {
+        var t = (asOf ?? DateTimeOffset.UtcNow).UtcDateTime;
+        using var session = _driver.AsyncSession();
+        var cypher = @"
+MATCH (t:Tag)-[r:TAGGED_WITH]->(k:KnowledgeNode)
+WHERE r.status='Current'
+  AND r.validFrom <= $asOf
+  AND (r.validTo IS NULL OR $asOf < r.validTo)
+RETURN t.stableId AS tagId, k.stableId AS nodeId";
+        var cursor = await session.RunAsync(cypher, new { asOf = t.ToString("o") });
+        var rows = await cursor.ToListAsync();
+        return rows.Select(r => (Guid.Parse(r["tagId"].As<string>()), Guid.Parse(r["nodeId"].As<string>()))).ToList();
+    }
+
+    public async Task<List<(Guid TagId, Guid NodeId)>> GetProposalsAsync()
+    {
+        using var session = _driver.AsyncSession();
+        var cypher = @"
+MATCH (t:Tag)-[r:TAGGED_WITH]->(k:KnowledgeNode)
+WHERE r.status='proposed'
+RETURN t.stableId AS tagId, k.stableId AS nodeId";
+        var cursor = await session.RunAsync(cypher);
+        var rows = await cursor.ToListAsync();
+        return rows.Select(r => (Guid.Parse(r["tagId"].As<string>()), Guid.Parse(r["nodeId"].As<string>()))).ToList();
+    }
+
+    public Task<List<(Guid TagId, Guid NodeId)>> GetAsOfAsync(DateTimeOffset asOf)
+        => GetActiveGraphAsync(asOf);
 }

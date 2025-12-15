@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Models.Enums;
+using GroupMemberDto = global::GroupMember;
 
     public class StudyGroupService
     {
@@ -89,27 +90,36 @@ using Sciencetopia.Models.Enums;
             if (exists) return false;
         }
 
-        // Step 1: Save metadata in SQL
+        // Step 1: Save metadata in SQL (Group ancestor + StudyGroup flavor)
+        var group = new GroupEntity
+        {
+            Kind = "StudyGroup",
+            CreatedByUserId = userId,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
         var entity = new StudyGroupEntity
         {
+            Id = group.Id,
             Name = studyGroupDTO.Name ?? string.Empty,
             Description = studyGroupDTO.Description,
             CreatedAt = DateTime.UtcNow,
             Status = "pending_approval"
         };
+        _context.Groups.Add(group);
         _context.StudyGroups.Add(entity);
         await _context.SaveChangesAsync();
 
         // Ensure SQL role consistency: creator becomes manager in SQL as well
-        var existingRole = await _context.StudyGroupUserRoles
+        var existingRole = await _context.GroupMembers
             .FirstOrDefaultAsync(r => r.GroupId == entity.Id && r.UserId == userId);
         if (existingRole == null)
         {
-            _context.StudyGroupUserRoles.Add(new StudyGroupUserRole
+            _context.GroupMembers.Add(new GroupMemberEntity
             {
                 GroupId = entity.Id,
                 UserId = userId,
-                Role = GroupRole.Manager
+                Role = GroupRole.Owner
             });
             await _context.SaveChangesAsync();
         }
@@ -334,7 +344,7 @@ using Sciencetopia.Models.Enums;
         }
     }
 
-    public async Task<List<GroupMember>> GetStudyGroupMembers(string groupId)
+    public async Task<List<GroupMemberDto>> GetStudyGroupMembers(string groupId)
     {
         using (var session = _neo4jDriver.AsyncSession())
         {
@@ -356,14 +366,14 @@ using Sciencetopia.Models.Enums;
                 });
             });
 
-            var members = new List<GroupMember>();
+            var members = new List<GroupMemberDto>();
 
             foreach (var record in result)
             {
                 var userName = await _userService.GetUserNameByIdAsync(record.UserId);
                 var avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(record.UserId);
 
-                var member = new GroupMember
+                var member = new GroupMemberDto
                 {
                     Id = record.UserId,
                     UserName = userName,
@@ -469,9 +479,11 @@ using Sciencetopia.Models.Enums;
         // Delete the study group from SQL database
         if (!Guid.TryParse(groupId, out var gid)) return;
         var studyGroup = await _context.StudyGroups.FindAsync(gid);
-        if (studyGroup != null)
+        var ancestorGroup = await _context.Groups.FindAsync(gid);
+        if (studyGroup != null) _context.StudyGroups.Remove(studyGroup);
+        if (ancestorGroup != null) _context.Groups.Remove(ancestorGroup);
+        if (studyGroup != null || ancestorGroup != null)
         {
-            _context.StudyGroups.Remove(studyGroup);
             await _context.SaveChangesAsync();
         }
 
@@ -663,10 +675,10 @@ using Sciencetopia.Models.Enums;
         // SQL role consistency: ensure a Member role record exists
         if (Guid.TryParse(groupId, out var gid))
         {
-            var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
             if (existing == null)
             {
-                _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = userId, Role = GroupRole.Member });
+                _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = userId, Role = GroupRole.Member });
                 await _context.SaveChangesAsync();
             }
         }
@@ -692,10 +704,10 @@ using Sciencetopia.Models.Enums;
         // Remove SQL role
         if (Guid.TryParse(groupId, out var gid))
         {
-            var role = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            var role = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
             if (role != null)
             {
-                _context.StudyGroupUserRoles.Remove(role);
+                _context.GroupMembers.Remove(role);
                 await _context.SaveChangesAsync();
             }
         }
@@ -827,10 +839,10 @@ using Sciencetopia.Models.Enums;
 
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing == null)
                 {
-                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
                     await _context.SaveChangesAsync();
                 }
             }
@@ -862,10 +874,10 @@ using Sciencetopia.Models.Enums;
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
                 // Ensure SQL role record
-                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing == null)
                 {
-                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
                     await _context.SaveChangesAsync();
                 }
             }
@@ -894,10 +906,10 @@ using Sciencetopia.Models.Enums;
             });
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing != null)
                 {
-                    _context.StudyGroupUserRoles.Remove(existing);
+                    _context.GroupMembers.Remove(existing);
                     await _context.SaveChangesAsync();
                 }
             }
@@ -927,14 +939,14 @@ using Sciencetopia.Models.Enums;
             });
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.StudyGroupUserRoles.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == newManagerId);
+                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == newManagerId);
                 if (existing == null)
                 {
-                    _context.StudyGroupUserRoles.Add(new StudyGroupUserRole { GroupId = gid, UserId = newManagerId, Role = GroupRole.Manager });
+                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = newManagerId, Role = GroupRole.Admin });
                 }
                 else
                 {
-                    existing.Role = GroupRole.Manager;
+                    existing.Role = GroupRole.Admin;
                 }
                 await _context.SaveChangesAsync();
             }
@@ -999,14 +1011,14 @@ using Sciencetopia.Models.Enums;
     public async Task<bool> IsUserManagerAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return await _context.StudyGroupUserRoles.AsNoTracking()
-            .AnyAsync(x => x.GroupId == gid && x.UserId == userId && x.Role == GroupRole.Manager);
+        return await _context.GroupMembers.AsNoTracking()
+            .AnyAsync(x => x.GroupId == gid && x.UserId == userId && x.Role >= GroupRole.Admin);
     }
 
     public async Task<bool> IsUserMemberAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return await _context.StudyGroupUserRoles.AsNoTracking()
+        return await _context.GroupMembers.AsNoTracking()
             .AnyAsync(x => x.GroupId == gid && x.UserId == userId);
     }
 

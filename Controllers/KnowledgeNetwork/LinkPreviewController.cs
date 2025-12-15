@@ -26,17 +26,19 @@ public class LinkPreviewController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> Get(string url, string? title = null)
     {
-        var extractedUrl = ExtractURL(url);
+        var extractedUrl = NormalizeUrl(url);
         if (extractedUrl == null)
         {
-            return BadRequest("No URL found in the text.");
+            // Be tolerant: return minimal preview so FE can still render a clickable link
+            return Ok(new { Title = title ?? url, Description = string.Empty, Image = string.Empty });
         }
 
         var client = _clientFactory.CreateClient();
         var response = await client.GetAsync(extractedUrl);
         if (!response.IsSuccessStatusCode)
         {
-            return NotFound("Failed to fetch the URL.");
+            // Return minimal preview instead of 4xx to keep UI functional
+            return Ok(new { Title = title ?? extractedUrl.ToString(), Description = string.Empty, Image = string.Empty });
         }
 
         // If the content is PDF and title was not provided, extract from PDF
@@ -114,11 +116,23 @@ public class LinkPreviewController : ControllerBase
         return Ok(preview);
     }
 
-    private Uri? ExtractURL(string text)
+    private Uri? NormalizeUrl(string text)
     {
-        var regex = new Regex(@"https?://\S+");
-        var match = regex.Match(text);
-        return match.Success ? new Uri(match.Value) : null;
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var s = text.Trim();
+        try { s = Uri.UnescapeDataString(s); } catch { /* ignore */ }
+
+        if (s.StartsWith("//")) s = "https:" + s;
+        if (!s.Contains("://"))
+        {
+            // If looks like a domain or path, default to https
+            if (Regex.IsMatch(s, @"^[\w.-]+(\.[\w.-]+)+(/.*)?$"))
+            {
+                s = "https://" + s;
+            }
+        }
+        if (Uri.TryCreate(s, UriKind.Absolute, out var uri)) return uri;
+        return null;
     }
 
     private string ExtractTitleFromPdfMetadata(Stream pdfStream)

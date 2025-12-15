@@ -29,11 +29,18 @@ public class StudyPlanEntity
 
     public string Description { get; set; } = string.Empty;
 
+    // Flexible metadata payload for plan-level settings/structure
+    public string? MetadataJson { get; set; }
+
     public Guid CreatorId { get; set; }  // 关联到用户ID（可以后续添加外键User）
 
     public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
 
     public DateTime UpdatedDate { get; set; } = DateTime.UtcNow;
+
+    // Frozen snapshot of lesson version bindings for published versions
+    // JSON structure: { lessons: [{ lessonStableId, lessonVersionNumber, stepType, index }] }
+    public string? LockfileJson { get; set; }
 
 }
 
@@ -61,6 +68,12 @@ public class LessonEntity
     public string Title { get; set; } = string.Empty;
 
     public string Description { get; set; } = string.Empty;
+
+    // Plan-scoped ordering + binding to comply with规范: Lessons live under a plan version
+    public Guid? StudyPlanId { get; set; }
+    public int OrderIndex { get; set; }
+    public string Kind { get; set; } = "Reading"; // Video / Reading / Exercise
+    public string? MetadataJson { get; set; }
 
     public DateTime CreatedDate { get; set; } = DateTime.UtcNow;
 

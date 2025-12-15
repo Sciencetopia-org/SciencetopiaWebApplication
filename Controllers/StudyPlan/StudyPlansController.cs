@@ -5,6 +5,7 @@ using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
 using Sciencetopia.Services;
+using Neo4j.Driver;
 using System.Security.Claims;
 
 namespace Sciencetopia.Controllers.StudyPlan
@@ -15,11 +16,13 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly ApplicationDbContext _db;
         private readonly PermissionService _perm;
+        private readonly Neo4j.Driver.IDriver _driver;
 
-        public StudyPlansController(ApplicationDbContext db, PermissionService perm)
+        public StudyPlansController(ApplicationDbContext db, PermissionService perm, Neo4j.Driver.IDriver driver)
         {
             _db = db;
             _perm = perm;
+            _driver = driver;
         }
 
         [HttpGet]
@@ -30,13 +33,59 @@ namespace Sciencetopia.Controllers.StudyPlan
 
             var ug = Guid.TryParse(userId, out var parsed) ? parsed : Guid.Empty;
 
-            // Single query: compute visibility in DB, avoid description, no tracking
+            // 1) Gather plan stableIds from Neo4j relations (created, member group shares, enrolled)
+            var planIdsFromGraph = new HashSet<Guid>();
+            await using (var session = _driver.AsyncSession())
+            {
+                // created
+                var createdCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:CREATED]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
+                while (await createdCur.FetchAsync())
+                {
+                    var idStr = createdCur.Current["id"].As<string>();
+                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
+                }
+
+                // group shares by membership
+                var shareCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:MEMBER_OF]->(:StudyGroup)-[:SHARES_PLAN]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
+                while (await shareCur.FetchAsync())
+                {
+                    var idStr = shareCur.Current["id"].As<string>();
+                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
+                }
+
+                // enrollments (handle both historical PlanVersion and current StudyPlan models)
+                var enrollPvCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:ENROLLED_IN]->(pv:PlanVersion) RETURN DISTINCT pv.studyPlanId AS id", new { uid = userId });
+                while (await enrollPvCur.FetchAsync())
+                {
+                    var idStr = enrollPvCur.Current["id"].As<string>();
+                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
+                }
+
+                var enrollPlanCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:ENROLLED_IN]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
+                while (await enrollPlanCur.FetchAsync())
+                {
+                    var idStr = enrollPlanCur.Current["id"].As<string>();
+                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
+                }
+            }
+
+            var stableSet = planIdsFromGraph.ToList();
+
+            Console.WriteLine($"[StudyPlansController.List] User {userId} has {stableSet.Count} plan stableIds from graph");
+
+            // 2) Combine with SQL-based visibility: owner (legacy CreatedBy/CreatorId), direct user roles, group links, public
             var baseQ = _db.StudyPlans.AsNoTracking().Where(p =>
-                p.CreatorId == ug
-                || _db.StudyPlanUserRoles.Any(r => r.PlanStableId == p.StableId && r.UserId == userId)
-                || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanStableId == p.StableId &&
-                       _db.StudyGroupUserRoles.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
-                || EF.Property<string>(p, "Privacy") == "public"
+                // Graph visibility by normalized stable id
+                stableSet.Contains(p.StableId == Guid.Empty ? p.Id : p.StableId)
+                // Also include creator matches for legacy rows
+                || ((ug != Guid.Empty && p.CreatorId == ug) || p.CreatedBy == userId)
+                // Direct user role on normalized stable id
+                || _db.StudyPlanUserRoles.Any(r => r.PlanStableId == (p.StableId == Guid.Empty ? p.Id : p.StableId) && r.UserId == userId)
+                // Group link (user has a role in the group that shares this plan)
+                || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanStableId == (p.StableId == Guid.Empty ? p.Id : p.StableId)
+                    && _db.GroupMembers.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
+                // public plans (case-insensitive)
+                || (EF.Property<string>(p, "Privacy") != null && (EF.Property<string>(p, "Privacy").ToLower() == "public"))
             );
 
             if (!string.IsNullOrWhiteSpace(q))
@@ -206,7 +255,7 @@ namespace Sciencetopia.Controllers.StudyPlan
                 var canJoin = !alreadyActive;
                 if (c.StudyGroupId.HasValue)
                 {
-                    var isMember = await _db.StudyGroupUserRoles.AsNoTracking().AnyAsync(gr => gr.GroupId == c.StudyGroupId && gr.UserId == userId);
+                    var isMember = await _db.GroupMembers.AsNoTracking().AnyAsync(gr => gr.GroupId == c.StudyGroupId && gr.UserId == userId);
                     if (!isMember) { canJoin = false; reason = reason ?? "notGroupMember"; }
                     groupScoped.Add(new { id = c.Id, title = c.Title, canJoin, reason });
                 }
@@ -227,6 +276,8 @@ namespace Sciencetopia.Controllers.StudyPlan
             var role = await _perm.GetEffectivePlanRoleAsync(userId, id);
             return Ok(new { role = role.ToString() });
         }
+
+        
 
         public class ShareUserRequest { public string? UserId { get; set; } public PlanRole Role { get; set; } }
 

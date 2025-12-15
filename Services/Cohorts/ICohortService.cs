@@ -101,8 +101,8 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
                 .FirstOrDefaultAsync(ct);
             if (groupId.HasValue)
             {
-                var isManager = await _db.StudyGroupUserRoles.AsNoTracking()
-                    .AnyAsync(x => x.GroupId == groupId.Value && x.UserId == userId && x.Role == Models.Enums.GroupRole.Manager, ct);
+                var isManager = await _db.GroupMembers.AsNoTracking()
+                    .AnyAsync(x => x.GroupId == groupId.Value && x.UserId == userId && x.Role >= Models.Enums.GroupRole.Admin, ct);
                 role = isManager ? "manager" : "member";
             }
         }
@@ -269,7 +269,7 @@ RETURN c.id AS cohortId;";
         if (!info.StudyGroupId.HasValue)
             throw new InvalidOperationException("cohort_not_group_scoped");
 
-        var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
+        var isMember = await _db.GroupMembers.AsNoTracking()
             .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId, ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
@@ -288,7 +288,7 @@ RETURN c.id AS cohortId;";
         if (stableId == Guid.Empty || target.StudyPlanStableId != stableId) throw new InvalidOperationException("cohort_plan_mismatch");
 
         if (!target.StudyGroupId.HasValue) throw new InvalidOperationException("cohort_not_group_scoped");
-        var isMember = await _db.StudyGroupUserRoles.AsNoTracking()
+        var isMember = await _db.GroupMembers.AsNoTracking()
             .AnyAsync(x => x.GroupId == target.StudyGroupId.Value && x.UserId == userId, ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 

@@ -97,19 +97,19 @@ public class TagRepository : ITagRepository
                 join si in _context.L10nSetItems on tls.L10nSetId equals si.L10nSetId
                 join i in _context.L10nItems on si.L10nItemId equals i.L10nItemId
                 where i.FieldKey == "name" && (i.LangCode == lang || i.LangCode == null)
-                select new { t.Id, Name = i.Content ?? i.Text }
+                select new { t.StableId, Name = i.Content ?? i.Text }
             ).ToListAsync();
 
             return rows
-                .Where(r => r.Id.HasValue && !string.IsNullOrWhiteSpace(r.Name) && names.Contains(r.Name!.ToLower()))
-                .Select(r => new TagDTO { Id = r.Id, Name = r.Name })
+                .Where(r => !string.IsNullOrWhiteSpace(r.Name) && names.Contains(r.Name!.ToLower()))
+                .Select(r => new TagDTO { Id = r.StableId, Name = r.Name })
                 .ToList();
         }
         else
         {
             var tags = await ActiveTags
                 .Where(t => t.Name != null && names.Contains(t.Name.ToLower()))
-                .Select(t => new TagDTO { Id = t.Id, Name = t.Name })
+                .Select(t => new TagDTO { Id = t.StableId, Name = t.Name })
                 .ToListAsync();
             return tags;
         }

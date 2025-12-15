@@ -20,6 +20,8 @@ public interface IStudyPlanRepository
     Task<StudyPlanEntity?> GetStudyPlanByIdAsync(string studyPlanId);
     Task<List<LessonEntity>> GetLessonsByIdsAsync(List<string> lessonIds);
     Task<List<Resource>> GetResourcesByIdsAsync(List<string> resourceIds);
+    Task<List<LessonEntity>> GetLessonsByStableIdsAsync(IEnumerable<Guid> stableIds);
+    Task<List<LessonTagAssignment>> GetLessonTagAssignmentsByStableIdsAsync(IEnumerable<Guid> stableIds);
     Task DeleteStudyPlanByIdAsync(string studyPlanId);
     Task<int> GetNextStudyPlanVersionNumberAsync(Guid stableId);
     Task<StudyPlanEntity?> GetPlanByStableIdAsync(Guid stableId, int? versionNumber = null);
@@ -57,15 +59,21 @@ public class StudyPlanRepository : IStudyPlanRepository
 
         if (string.IsNullOrWhiteSpace(studyPlan.Status))
         {
-            studyPlan.Status = "Current";
+            studyPlan.Status = "Draft";
         }
 
-        if (string.Equals(studyPlan.Status, "Current", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(studyPlan.Status, "Active", StringComparison.OrdinalIgnoreCase))
         {
-            if (!studyPlan.IsCurrent)
-            {
-                studyPlan.IsCurrent = true;
-            }
+            studyPlan.Status = "Active";
+        }
+
+        if (string.Equals(studyPlan.Status, "Active", StringComparison.OrdinalIgnoreCase))
+        {
+            studyPlan.IsCurrent = true;
+        }
+        else if (studyPlan.IsCurrent)
+        {
+            studyPlan.Status = "Active";
         }
 
         var utcNow = DateTimeOffset.UtcNow;
@@ -119,10 +127,15 @@ public class StudyPlanRepository : IStudyPlanRepository
 
         if (string.IsNullOrWhiteSpace(lesson.Status))
         {
-            lesson.Status = "Current";
+            lesson.Status = "Draft";
         }
 
-        lesson.IsCurrent = true;
+        if (string.Equals(lesson.Status, "Current", StringComparison.OrdinalIgnoreCase))
+        {
+            lesson.Status = "Active";
+        }
+
+        lesson.IsCurrent = string.Equals(lesson.Status, "Active", StringComparison.OrdinalIgnoreCase);
 
         var utcNow = DateTimeOffset.UtcNow;
         lesson.CreatedAt ??= utcNow;
@@ -198,6 +211,7 @@ public class StudyPlanRepository : IStudyPlanRepository
             return null;
 
         return await _dbContext.StudyPlans
+            .AsNoTracking()
             .Where(sp => sp.Id == studyPlanGuid)
             .FirstOrDefaultAsync();
     }
@@ -231,6 +245,28 @@ public class StudyPlanRepository : IStudyPlanRepository
 
         return await _dbContext.Resources
             .Where(r => guidIds.Contains(r.Id))
+            .ToListAsync();
+    }
+
+    public async Task<List<LessonEntity>> GetLessonsByStableIdsAsync(IEnumerable<Guid> stableIds)
+    {
+        var set = stableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        if (set.Count == 0) return new List<LessonEntity>();
+
+        return await _dbContext.Lessons
+            .AsNoTracking()
+            .Where(l => set.Contains(l.StableId))
+            .ToListAsync();
+    }
+
+    public async Task<List<LessonTagAssignment>> GetLessonTagAssignmentsByStableIdsAsync(IEnumerable<Guid> stableIds)
+    {
+        var set = stableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        if (set.Count == 0) return new List<LessonTagAssignment>();
+
+        return await _dbContext.LessonTagAssignments
+            .AsNoTracking()
+            .Where(t => set.Contains(t.LessonStableId))
             .ToListAsync();
     }
 
@@ -294,7 +330,7 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task<StudyPlanEntity?> GetPlanByStableIdAsync(Guid stableId, int? versionNumber = null)
     {
-        var query = _dbContext.StudyPlans.Where(sp => sp.StableId == stableId);
+        var query = _dbContext.StudyPlans.AsNoTracking().Where(sp => sp.StableId == stableId);
         if (versionNumber.HasValue)
         {
             query = query.Where(sp => sp.VersionNumber == versionNumber.Value);
@@ -320,7 +356,7 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task<LessonEntity?> GetLessonByStableIdAsync(Guid stableId, int? versionNumber = null)
     {
-        var query = _dbContext.Lessons.Where(l => l.StableId == stableId);
+        var query = _dbContext.Lessons.AsNoTracking().Where(l => l.StableId == stableId);
         if (versionNumber.HasValue)
         {
             query = query.Where(l => l.VersionNumber == versionNumber.Value);
@@ -337,7 +373,7 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task<LessonEntity?> GetLessonByIdAsync(Guid id)
     {
-        return await _dbContext.Lessons.FirstOrDefaultAsync(l => l.Id == id);
+        return await _dbContext.Lessons.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id);
     }
 
     public async Task ReplacePlanLessonSnapshotsAsync(Guid planStableId, int planVersionNumber, IEnumerable<StudyPlanLessonSnapshot> snapshots)

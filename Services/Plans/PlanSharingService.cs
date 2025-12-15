@@ -91,6 +91,7 @@ namespace Sciencetopia.Services
                     StudyGroupId = sgId,
                     StudyPlanStableId = stableId,
                     PinnedVersionNumber = targetVersion.VersionNumber,
+                    PlanVersionId = targetVersion.Id,
                     Permission = permission,
                     AutoEnroll = autoEnroll,
                     CreatedBy = createdBy,
@@ -104,6 +105,7 @@ namespace Sciencetopia.Services
                 existing.Permission = permission;
                 existing.AutoEnroll = autoEnroll;
                 existing.PinnedVersionNumber = targetVersion.VersionNumber;
+                existing.PlanVersionId = targetVersion.Id;
                 existing.UpdatedDate = DateTime.UtcNow;
             }
 

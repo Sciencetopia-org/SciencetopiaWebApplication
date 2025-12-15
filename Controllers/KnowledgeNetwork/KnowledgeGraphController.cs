@@ -62,23 +62,38 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             [FromQuery] string zoomLevel = "Field",
             [FromQuery] string lang = "zh")
         {
-            string userId = User?.Identity?.IsAuthenticated == true
-                ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
-                : string.Empty;
-
-            // Define the valid zoom levels (lowest -> highest)
-            var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject", "Discipline" };
-            // Validate the zoom level
-            if (!validZoomLevels.Contains(zoomLevel))
+            try
             {
-                return BadRequest($"Invalid zoom level. Valid options are: {string.Join(", ", validZoomLevels)}");
+                string userId = User?.Identity?.IsAuthenticated == true
+                    ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
+                    : string.Empty;
+
+                // Define the valid zoom levels (lowest -> highest)
+                var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject", "Discipline" };
+                // Validate the zoom level
+                if (!validZoomLevels.Contains(zoomLevel))
+                {
+                    return BadRequest($"Invalid zoom level. Valid options are: {string.Join(", ", validZoomLevels)}");
+                }
+
+                // Find the zoom levels greater than or equal to the requested zoom level
+                var zoomLevels = validZoomLevels.SkipWhile(z => z != zoomLevel).ToList();
+
+                var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId, lang);
+                return Ok(result);
             }
-
-            // Find the zoom levels greater than or equal to the requested zoom level
-            var zoomLevels = validZoomLevels.SkipWhile(z => z != zoomLevel).ToList();
-
-            var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId, lang);
-            return Ok(result);
+            catch (Neo4j.Driver.ServiceUnavailableException)
+            {
+                return StatusCode(503, new { message = "Graph database is temporarily unavailable. Please try again later." });
+            }
+            catch (Neo4j.Driver.ConnectionReadTimeoutException)
+            {
+                return StatusCode(504, new { message = "Graph database request timed out. Please try again." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = ex.Message });
+            }
         }
 
         [HttpPost("LazyLoad")]

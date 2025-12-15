@@ -53,6 +53,7 @@ builder.Services.AddScoped<IKnowledgeNodeRepository, KnowledgeNodeRepository>();
 builder.Services.AddScoped<ITagRepository, TagRepository>();
 builder.Services.AddScoped<ITagResolutionService, TagResolutionService>();
 builder.Services.AddScoped<IResourceRepository, ResourceRepository>();
+builder.Services.AddSingleton<Sciencetopia.Services.Region.IRegionService, Sciencetopia.Services.Region.RegionService>();
 builder.Services.AddSingleton<IDraftFreezeService, DraftFreezeService>();
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
 builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
@@ -63,6 +64,8 @@ builder.Services.AddScoped<Sciencetopia.Services.PermissionService>();
 builder.Services.AddScoped<Sciencetopia.Services.Cohorts.ICohortService, Sciencetopia.Services.Cohorts.CohortService>();
 builder.Services.AddScoped<IVersioningService, VersioningService>();
 builder.Services.AddScoped<IKnowledgeGraphWorkflowService, KnowledgeGraphWorkflowService>();
+builder.Services.AddScoped<IGraphSyncService, GraphSyncService>();
+builder.Services.AddScoped<StudyPlanVersioningService>();
 // L10n services
 builder.Services.Configure<Sciencetopia.Services.L10n.L10nOptions>(builder.Configuration.GetSection("L10n"));
 builder.Services.AddScoped<Sciencetopia.Services.L10n.IL10nService, Sciencetopia.Services.L10n.L10nService>();
@@ -133,10 +136,11 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection"),
         sqlServerOptions => sqlServerOptions.EnableRetryOnFailure(
-            maxRetryCount: 50,               // Maximum number of retries
-            maxRetryDelay: TimeSpan.FromSeconds(30), // Maximum delay between retries
-            errorNumbersToAdd: null         // SQL error numbers to consider for retry
-    ))
+            maxRetryCount: 50,
+            maxRetryDelay: TimeSpan.FromSeconds(30),
+            errorNumbersToAdd: new int[] { 40925, 40613, 40197, 40501, 10928, 10929, 10054, 233, 64, 20 }
+        )
+    )
 );
 
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>()
@@ -192,9 +196,23 @@ builder.Services.AddCors(options =>
 // Add authentication and authorization
 builder.Services.ConfigureApplicationCookie(options =>
 {
+    // These MVC paths are not used by our API controllers; avoid redirects.
     options.LoginPath = "/Account/Login";
     options.LogoutPath = "/Account/Logout";
     options.AccessDeniedPath = "/Account/AccessDenied";
+
+    // For API requests, return proper status codes instead of redirecting
+    // to non-existent MVC pages which caused 404 responses.
+    options.Events.OnRedirectToLogin = ctx =>
+    {
+        ctx.Response.StatusCode = 401;
+        return Task.CompletedTask;
+    };
+    options.Events.OnRedirectToAccessDenied = ctx =>
+    {
+        ctx.Response.StatusCode = 403;
+        return Task.CompletedTask;
+    };
 });
 
 // Add authorization service with role policy
@@ -279,12 +297,20 @@ else
 }
 
 // Ensure you create roles before running the application
-using var scope = app.Services.CreateScope();
-var services = scope.ServiceProvider;
-var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
-if (!await roleManager.RoleExistsAsync("administrator"))
+try
 {
-    await roleManager.CreateAsync(new IdentityRole("administrator"));
+    using var scope = app.Services.CreateScope();
+    var services = scope.ServiceProvider;
+    var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
+    if (!await roleManager.RoleExistsAsync("administrator"))
+    {
+        await roleManager.CreateAsync(new IdentityRole("administrator"));
+    }
+}
+catch (Exception ex)
+{
+    var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+    logger.LogError(ex, "Failed to seed initial roles. Continuing startup. Verify database connectivity and state.");
 }
 
 app.UseMiddleware<UserActivityMiddleware>();
