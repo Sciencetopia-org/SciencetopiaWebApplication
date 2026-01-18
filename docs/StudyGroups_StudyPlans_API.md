@@ -110,7 +110,7 @@ Cohorts（通用）
 - GET `api/StudyPlans/{planId}/Cohorts`
   - 功能：按计划列出 Cohort 列表
   - 权限：需对该计划可读
-  - 响应：`CohortViewDto[]`，元素：`{ id, studyPlanId, title, visibility, startAt, endAt, createdBy, createdAt }`
+  - 响应：`CohortViewDto[]`，元素：`{ id, studyPlanStableId, title, visibility, startAt, endAt, createdBy, createdAt }`
 
 - PUT `api/Cohorts/{cohortId}`
   - 功能：更新 Cohort 元信息
@@ -156,7 +156,7 @@ Cohorts（通用）
 Cohort 信息与统计
 - GET `api/Cohorts/{cohortId}`
   - 功能：获取 Cohort 元信息
-  - 响应：`{ id, studyPlanId, studyGroupId, enrollMode, pinnedVersionId, pinnedVersionNumber, membersCount, createdAt, createdBy, title, visibility }`
+  - 响应：`{ id, studyPlanId, studyPlanStableId, studyGroupId, enrollMode, pinnedVersionNumber, membersCount, createdAt, createdBy, title, visibility }`
 
 - GET `api/Cohorts/{cohortId}/Stats/Summary`
   - 功能：获取 Cohort 汇总统计

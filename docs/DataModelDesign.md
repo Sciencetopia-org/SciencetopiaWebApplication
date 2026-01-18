@@ -8,40 +8,52 @@
 
 ## 2. Groups 体系
 ### 2.1 祖先表
-`StudyGroups.Groups` (`GroupEntity`)
-- `Id` (PK, GUID)
-- `Kind` (`StudyGroup`|`CohortGroup`|`OrgGroup`…)
+`Groups.Groups` (`GroupEntity`)
+- `GroupId` (PK, GUID)
+- `Type` (`StudyGroup`|`Cohort`|`PersonalGroup`|`OrgGroup`…)
 - `CreatedByUserId`, `CreatedAt`, `UpdatedAt`, `RowVersion`
 
 ### 2.2 StudyGroup
 `StudyGroups.StudyGroups` (`StudyGroupEntity`)
-- `Id` (PK, FK -> Groups.Id)
+- `GroupId` (PK, FK -> Groups.GroupId)
 - `NameL10nSetId`, `DescriptionL10nSetId`（可空）
 - `Name`, `Description`, `ImageUrl`, `Status`
 - `Visibility` (Public/Private/Unlisted，默认 Private)
 - `JoinPolicy` (Open/Request/InviteOnly，默认 Request)
 - `SettingsJson`
 
-### 2.3 CohortGroup
-`StudyGroups.CohortGroups` (`CohortGroupEntity`)
-- `Id` (PK, FK -> Groups.Id)
-- `ParentGroupId` (FK -> Groups.Id)
-- `StudyPlanStableId`, `StudyPlanVersionId`（可空）
+### 2.3 Cohort
+`StudyGroups.Cohorts` (`CohortEntity`)
+- `GroupId` (PK, FK -> Groups.GroupId)
+- `StudyGroupId` (FK -> StudyGroups.GroupId，可空)
+- `CurrentOfferingId` (FK -> StudyGroups.CohortOfferings.Id)
+- `EnrollmentPolicy` (OptIn/Auto)
+- `Status` (Active/Archived)
 - `NameL10nSetId`（可空）
-- `StartAt`, `EndAt`
 - `SettingsJson`
 
-### 2.4 Group 成员关系
-`StudyGroups.GroupMembers` (`GroupMemberEntity`)
+### 2.4 CohortOffering
+`StudyGroups.CohortOfferings`
 - `Id` (PK)
-- `GroupId` (FK -> StudyGroups.Id)
+- `CohortGroupId` (FK -> StudyGroups.Cohorts.GroupId)
+- `StudyGroupStudyPlanId` (FK -> StudyGroups.StudyGroupStudyPlans.Id)
+- `StudyPlanVersionId` (FK -> StudyPlans.Id)
+- `Status` (Active/Archived)
+- `StartAt`, `EndAt`
+- `CreatedAt`, `CreatedBy`
+- 索引：`(CohortGroupId)`、`(StudyGroupStudyPlanId)`、`(CohortGroupId, Status)`
+
+### 2.5 Group 成员关系
+`Groups.UserGroups` (`UserGroupEntity`)
+- 复合主键 `(UserId, GroupId)`
 - `UserId` (string, nvarchar(450))
+- `GroupId` (FK -> Groups.GroupId)
 - `Role` (`GroupRole` 枚举：Member/Learner/TA/Admin/Owner；Manager 为 Admin 兼容别名)
 - `Status` (Active/Pending/Banned…)
 - `JoinedAt`, `LeftAt`
-- 唯一索引 `(GroupId, UserId)`
+- 索引 `(GroupId)`、`(UserId)`、`(GroupId, Status)`
 
-### 2.5 Group ↔ StudyPlan 关系
+### 2.6 Group ↔ StudyPlan 关系
 `StudyGroups.StudyGroupStudyPlans`
 - `Id` (PK)
 - `StudyGroupId` (FK)
@@ -56,7 +68,7 @@
 - `CreatedBy`, `CreatedDate`, `UpdatedDate`
 - 唯一索引 `(StudyGroupId, StudyPlanStableId)`
 
-### 2.6 版本切换审计
+### 2.7 版本切换审计
 `StudyGroups.GroupPlanSwitches`
 - `Id`, `StudyGroupId`, `PlanStableId`
 - `FromVersionId/Number`, `ToVersionId/Number`
@@ -104,23 +116,19 @@
 - 用于锁文件与重建顺序的 SQL Source of Truth。
 
 ### 3.4 标签与资源
-- Plan 标签：`StudyPlans.StudyPlanTagAssignments` (`StudyPlanStableId`, `StudyPlanVersionNumber`, `TagStableId`, `AssignedAt`)
-- Lesson 标签：`StudyPlans.LessonTagAssignments` (`LessonStableId`, `LessonVersionNumber`, `TagStableId`, `AssignedAt`)
+- Lesson 标签：Neo4j 关系 `(:Tag)-[:TAGGED_WITH]->(:Lesson)`（SQL 不再存映射表）。
 - 资源：`KnowledgeGraph.Resources`，Lesson 资源关联仍由 Neo4j 维护关联，SQL 存储资源内容。
 
 ## 4. Enrollment（用户学习绑定）
-`StudyPlans.UserStudyPlanEnrollments`
-- `Id` (PK)
-- `UserId`
-- `GroupId`
-- `StudyPlanStableId`
-- `CohortGroupId`（可空）
-- `PlanVersionId`
-- `Role` (Learner/TA/Instructor)
+`StudyPlans.StudyPlanEnrollments`
+- `EnrollmentId` (PK)
+- `UserId` (FK -> Users.AspNetUsers)
+- `ScopeType` (`Cohort` | `Personal`)
+- `ScopeId`（`Cohort` -> `StudyGroups.Cohorts.GroupId`；`Personal` -> `Groups.GroupId`）
+- `PlanVersionId` (FK -> StudyPlans.Id)
 - `Status` (Active/Completed/Dropped)
-- `ProgressJson`
-- `CreatedAt`, `UpdatedAt`
-- 索引：`(UserId, StudyPlanStableId)`、`GroupId`、`CohortGroupId`
+- `EnrolledAt`, `UpdatedAt`
+- 索引：`(UserId)`、`(ScopeType, ScopeId)`、`(PlanVersionId)`
 
 ## 5. 权限模型（SQL 为主）
 - Group 角色：`GroupRole` 枚举（Member/Learner/TA/Admin/Owner），Manager 兼容为 Admin。
@@ -135,16 +143,16 @@
 - Group 与成员：`(User)-[:MEMBER_OF {role,status}]->(StudyGroup)`。
 - Group ↔ Plan：`(:StudyGroup)-[:SHARES_PLAN]->(:StudyPlan)`（旧存在）；需要保持与 SQL `StudyGroupStudyPlans` 同步。
 - Plan ↔ Lesson：`(StudyPlan)-[:HAS_STEP {type,order}]->(Lesson)`；Lesson ↔ Resource/KnowledgeNode 关联在图里维护。
-- Cohort：`(Cohort)-[:FOR_PLAN]->(StudyPlan)`，成员 `(:User)-[:IN_COHORT]->(:Cohort)`。
+- Cohort：`(Cohort)-[:FOR_PLAN]->(StudyPlan)`，`(Cohort)-[:OF_VERSION]->(PlanVersion)` 来自 `CohortOfferings.CurrentOfferingId`，成员 `(:User)-[:IN_COHORT]->(:Cohort)`。
 - 推荐使用 Outbox/后台 Worker 做双写同步（规范提议）。
 
 ## 8. 仍需补充/迁移的工作
-- 运行 EF Migration：创建新表/列（Groups/CohortGroups/GroupMembers/UserStudyPlanEnrollments，Lessons 的 StudyPlanId/Kind/MetadataJson，StudyGroupStudyPlans 的 RelationType/SettingsJson/ActivePlanVersionId 等）并回填数据、状态标准化（Current→Active）。
+- 运行 EF Migration：创建/合并 `Groups`、`StudyGroups`、`Cohorts`、`UserGroups`、`StudyPlanEnrollments` 并回填数据。
 - Neo4j 角色标签需与新枚举对齐（manager→admin/owner）。
-- Enrollment 流程落地：在业务流程中写入 `UserStudyPlanEnrollments`，并保持与图同步。
+- Enrollment 流程落地：在业务流程中写入 `StudyPlanEnrollments`，并保持与图同步。
 - L10n 映射：为 StudyGroup/Plan/Lesson 等需要多语言的字段登记 `L10nEntityMappings`。
 
 ## 9. 目录索引
-- 主要实体代码：`Models/Groups/*.cs`, `Models/StudyGroup/StudyGroupEntity.cs`, `Models/StudyPlan/StudyPlan.cs`, `Models/StudyPlan/UserStudyPlanEnrollment.cs`, `Models/Groups/StudyGroupStudyPlan.cs`
+- 主要实体代码：`Models/Groups/*.cs`, `Models/StudyGroup/StudyGroupEntity.cs`, `Models/StudyPlan/StudyPlan.cs`, `Models/StudyPlan/StudyPlanEnrollment.cs`, `Models/Groups/StudyGroupStudyPlan.cs`
 - 数据上下文：`Data/ApplicationDbContext.cs`
 - 服务与仓储：`Services/StudyGroup/StudyGroupService.cs`, `Services/StudyPlan/StudyPlanService.cs`, `Services/Plans/PermissionService.cs`, `Services/Cohorts/ICohortService.cs`, `Repositories/Sql/IStudyPlanRepository.cs`

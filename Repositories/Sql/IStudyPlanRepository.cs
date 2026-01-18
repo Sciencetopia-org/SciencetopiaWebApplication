@@ -21,7 +21,6 @@ public interface IStudyPlanRepository
     Task<List<LessonEntity>> GetLessonsByIdsAsync(List<string> lessonIds);
     Task<List<Resource>> GetResourcesByIdsAsync(List<string> resourceIds);
     Task<List<LessonEntity>> GetLessonsByStableIdsAsync(IEnumerable<Guid> stableIds);
-    Task<List<LessonTagAssignment>> GetLessonTagAssignmentsByStableIdsAsync(IEnumerable<Guid> stableIds);
     Task DeleteStudyPlanByIdAsync(string studyPlanId);
     Task<int> GetNextStudyPlanVersionNumberAsync(Guid stableId);
     Task<StudyPlanEntity?> GetPlanByStableIdAsync(Guid stableId, int? versionNumber = null);
@@ -32,8 +31,6 @@ public interface IStudyPlanRepository
     Task<List<Sciencetopia.Models.StudyPlanLessonSnapshot>> GetPlanLessonSnapshotsAsync(Guid planStableId, int planVersionNumber);
     Task<List<Guid>> GetPlanTagStableIdsAsync(Guid planStableId, int planVersionNumber);
     Task ReplacePlanTagAssignmentsAsync(Guid planStableId, int planVersionNumber, IEnumerable<Guid> tagStableIds);
-    Task<List<Guid>> GetLessonTagStableIdsAsync(Guid lessonStableId, int lessonVersionNumber);
-    Task ReplaceLessonTagAssignmentsAsync(Guid lessonStableId, int lessonVersionNumber, IEnumerable<Guid> tagStableIds);
 }
 
 public class StudyPlanRepository : IStudyPlanRepository
@@ -259,17 +256,6 @@ public class StudyPlanRepository : IStudyPlanRepository
             .ToListAsync();
     }
 
-    public async Task<List<LessonTagAssignment>> GetLessonTagAssignmentsByStableIdsAsync(IEnumerable<Guid> stableIds)
-    {
-        var set = stableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
-        if (set.Count == 0) return new List<LessonTagAssignment>();
-
-        return await _dbContext.LessonTagAssignments
-            .AsNoTracking()
-            .Where(t => set.Contains(t.LessonStableId))
-            .ToListAsync();
-    }
-
     public async Task DeleteStudyPlanByIdAsync(string studyPlanId)
     {
         var id = Guid.Parse(studyPlanId);
@@ -288,31 +274,6 @@ public class StudyPlanRepository : IStudyPlanRepository
             var snapshots = _dbContext.StudyPlanLessonSnapshots
                 .Where(s => s.StudyPlanStableId == stableId && s.StudyPlanVersionNumber == versionNumber);
             _dbContext.StudyPlanLessonSnapshots.RemoveRange(snapshots);
-
-            var planTags = _dbContext.StudyPlanTagAssignments.Where(t => t.StudyPlanStableId == stableId && t.StudyPlanVersionNumber == versionNumber);
-            _dbContext.StudyPlanTagAssignments.RemoveRange(planTags);
-
-            if (snapshotPairs.Count > 0)
-            {
-                var lessonStableSet = snapshotPairs.Select(p => p.LessonStableId).Distinct().ToHashSet();
-                var lessonAssignments = await _dbContext.LessonTagAssignments
-                    .Where(t => lessonStableSet.Contains(t.LessonStableId))
-                    .ToListAsync();
-
-                if (lessonAssignments.Count > 0)
-                {
-                    var pairSet = snapshotPairs
-                        .Select(p => (p.LessonStableId, p.LessonVersionNumber))
-                        .ToHashSet();
-                    var targets = lessonAssignments
-                        .Where(t => pairSet.Contains((t.LessonStableId, t.LessonVersionNumber)))
-                        .ToList();
-                    if (targets.Count > 0)
-                    {
-                        _dbContext.LessonTagAssignments.RemoveRange(targets);
-                    }
-                }
-            }
 
             _dbContext.StudyPlans.Remove(studyPlan);
             await _dbContext.SaveChangesAsync();
@@ -402,68 +363,13 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task<List<Guid>> GetPlanTagStableIdsAsync(Guid planStableId, int planVersionNumber)
     {
-        return await _dbContext.StudyPlanTagAssignments
-            .AsNoTracking()
-            .Where(t => t.StudyPlanStableId == planStableId && t.StudyPlanVersionNumber == planVersionNumber)
-            .Select(t => t.TagStableId)
-            .Distinct()
-            .ToListAsync();
+        await Task.CompletedTask;
+        return new List<Guid>();
     }
 
     public async Task ReplacePlanTagAssignmentsAsync(Guid planStableId, int planVersionNumber, IEnumerable<Guid> tagStableIds)
     {
-        var normalized = tagStableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
-
-        var existing = _dbContext.StudyPlanTagAssignments
-            .Where(t => t.StudyPlanStableId == planStableId && t.StudyPlanVersionNumber == planVersionNumber);
-        _dbContext.StudyPlanTagAssignments.RemoveRange(existing);
-        await _dbContext.SaveChangesAsync();
-
-        if (normalized.Count > 0)
-        {
-            var assignments = normalized.Select(id => new StudyPlanTagAssignment
-            {
-                StudyPlanStableId = planStableId,
-                StudyPlanVersionNumber = planVersionNumber,
-                TagStableId = id,
-                AssignedAt = DateTime.UtcNow
-            });
-            await _dbContext.StudyPlanTagAssignments.AddRangeAsync(assignments);
-            await _dbContext.SaveChangesAsync();
-        }
-    }
-
-    public async Task<List<Guid>> GetLessonTagStableIdsAsync(Guid lessonStableId, int lessonVersionNumber)
-    {
-        return await _dbContext.LessonTagAssignments
-            .AsNoTracking()
-            .Where(t => t.LessonStableId == lessonStableId && t.LessonVersionNumber == lessonVersionNumber)
-            .Select(t => t.TagStableId)
-            .Distinct()
-            .ToListAsync();
-    }
-
-    public async Task ReplaceLessonTagAssignmentsAsync(Guid lessonStableId, int lessonVersionNumber, IEnumerable<Guid> tagStableIds)
-    {
-        var normalized = tagStableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
-
-        var existing = _dbContext.LessonTagAssignments
-            .Where(t => t.LessonStableId == lessonStableId && t.LessonVersionNumber == lessonVersionNumber);
-        _dbContext.LessonTagAssignments.RemoveRange(existing);
-        await _dbContext.SaveChangesAsync();
-
-        if (normalized.Count > 0)
-        {
-            var assignments = normalized.Select(id => new LessonTagAssignment
-            {
-                LessonStableId = lessonStableId,
-                LessonVersionNumber = lessonVersionNumber,
-                TagStableId = id,
-                AssignedAt = DateTime.UtcNow
-            });
-            await _dbContext.LessonTagAssignments.AddRangeAsync(assignments);
-            await _dbContext.SaveChangesAsync();
-        }
+        await Task.CompletedTask;
     }
 
 }

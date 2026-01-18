@@ -39,8 +39,5 @@ namespace Sciencetopia.Models
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
         public GroupEntity? Group { get; set; }
-
-        // RBAC user roles -> GroupMembers table
-        public ICollection<GroupMemberEntity> UserRoles { get; set; } = new List<GroupMemberEntity>();
     }
 }

@@ -186,6 +186,19 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("bit")
                         .HasDefaultValue(false);
 
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Reading");
+
+                    b.Property<string>("MetadataJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("OrderIndex")
+                        .HasColumnType("int");
+
                     b.Property<DateTimeOffset?>("PublishedAt")
                         .HasColumnType("datetimeoffset");
 
@@ -210,6 +223,9 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("nvarchar(32)")
                         .HasDefaultValue("Draft");
 
+                    b.Property<Guid?>("StudyPlanId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(255)
@@ -230,8 +246,14 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasDatabaseName("UX_Lesson_Stable_Current")
                         .HasFilter("[IsCurrent] = 1");
 
+                    b.HasIndex("StudyPlanId");
+
                     b.HasIndex("StableId", "VersionNumber")
                         .HasDatabaseName("IX_Lesson_Stable_Version");
+
+                    b.HasIndex("StudyPlanId", "StableId")
+                        .IsUnique()
+                        .HasFilter("[StudyPlanId] IS NOT NULL");
 
                     b.ToTable("Lessons", "StudyPlans");
                 });
@@ -538,6 +560,123 @@ namespace SciencetopiaWebApplication.Migrations
                     b.ToTable("AspNetUsers", "Users");
                 });
 
+            modelBuilder.Entity("Sciencetopia.Models.CohortEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier")
+                        .HasColumnName("GroupId");
+
+                b.Property<DateTime>("CreatedAt")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("datetime2")
+                    .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                b.Property<string>("CreatedBy")
+                    .HasMaxLength(450)
+                    .HasColumnType("nvarchar(450)")
+                    .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                b.Property<Guid?>("CurrentOfferingId")
+                    .HasColumnType("uniqueidentifier");
+
+                b.Property<string>("EnrollmentPolicy")
+                    .IsRequired()
+                    .ValueGeneratedOnAdd()
+                    .HasMaxLength(16)
+                    .HasColumnType("nvarchar(16)")
+                    .HasDefaultValue("OptIn")
+                    .HasColumnName("EnrollmentPolicy");
+
+                b.Property<Guid?>("NameL10nSetId")
+                    .HasColumnType("uniqueidentifier");
+
+                b.Property<string>("SettingsJson")
+                    .HasColumnType("nvarchar(max)");
+
+                b.Property<string>("Status")
+                    .IsRequired()
+                    .ValueGeneratedOnAdd()
+                    .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("Active");
+
+                    b.Property<Guid?>("StudyGroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Title")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Visibility")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasDefaultValue("private");
+
+                b.HasKey("Id");
+
+                    b.HasIndex("CurrentOfferingId")
+                        .IsUnique()
+                        .HasFilter("[CurrentOfferingId] IS NOT NULL");
+
+                b.HasIndex("StudyGroupId");
+
+                b.ToTable("Cohorts", "StudyGroups");
+            });
+
+            modelBuilder.Entity("Sciencetopia.Models.CohortOffering", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("CohortGroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)")
+                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                    b.Property<DateTime?>("EndAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("StartAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetime2")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasDefaultValue("Active");
+
+                    b.Property<Guid>("StudyGroupStudyPlanId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StudyPlanVersionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CohortGroupId");
+
+                    b.HasIndex("StudyGroupStudyPlanId");
+
+                    b.HasIndex("StudyPlanVersionId");
+
+                    b.HasIndex("CohortGroupId", "Status");
+
+                    b.ToTable("CohortOfferings", "StudyGroups");
+                });
+
             modelBuilder.Entity("Sciencetopia.Models.Favorite", b =>
                 {
                     b.Property<Guid>("Id")
@@ -567,6 +706,97 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("Favorites", "KnowledgeGraph");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.GroupEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasColumnName("GroupId");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("CreatedByUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)")
+                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasColumnName("Type");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Kind");
+
+                    b.ToTable("Groups", "Groups");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.GroupPlanSwitch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Actor")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)")
+                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset>("EffectiveAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<DateTimeOffset?>("ExecutedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid?>("FromVersionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("FromVersionNumber")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("PlanStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<Guid>("StudyGroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ToVersionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("ToVersionNumber")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StudyGroupId", "PlanStableId", "EffectiveAt")
+                        .HasDatabaseName("IX_GroupPlanSwitches_GroupPlan_Effective");
+
+                    b.ToTable("GroupPlanSwitches", "StudyGroups");
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.L10n.L10nItem", b =>
@@ -748,33 +978,9 @@ namespace SciencetopiaWebApplication.Migrations
                     b.ToTable("TagL10nSets", "L10n");
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.LessonTagAssignment", b =>
-                {
-                    b.Property<Guid>("LessonStableId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("LessonVersionNumber")
-                        .HasColumnType("int");
-
-                    b.Property<Guid>("TagStableId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("AssignedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetime2")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("LessonStableId", "LessonVersionNumber", "TagStableId");
-
-                    b.HasIndex("TagStableId");
-
-                    b.ToTable("LessonTagAssignments", "StudyPlans");
-                });
-
             modelBuilder.Entity("Sciencetopia.Models.StudyGroupEntity", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<DateTime>("CreatedAt")
@@ -783,18 +989,43 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<Guid?>("DescriptionL10nSetId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("ImageUrl")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("JoinPolicy")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("Request");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<Guid?>("NameL10nSetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SettingsJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("Status")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("Visibility")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("Private");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("Visibility");
 
                     b.ToTable("StudyGroups", "StudyGroups");
                 });
@@ -825,10 +1056,21 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasColumnType("int");
 
                     b.Property<Guid?>("PlanVersionId")
-                        .HasColumnType("uniqueidentifier");
+                        .HasColumnType("uniqueidentifier")
+                        .HasColumnName("ActivePlanVersionId");
+
+                    b.Property<string>("RelationType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("Adopt");
 
                     b.Property<bool>("ResolveToHead")
                         .HasColumnType("bit");
+
+                    b.Property<string>("SettingsJson")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<Guid>("StudyGroupId")
                         .HasColumnType("uniqueidentifier");
@@ -851,90 +1093,61 @@ namespace SciencetopiaWebApplication.Migrations
                     b.ToTable("StudyGroupStudyPlans", "StudyGroups", t =>
                         {
                             t.HasCheckConstraint("CK_SGSP_Permission", "Permission IN ('view','comment','edit','admin')");
+
+                            t.HasCheckConstraint("CK_SGSP_RelationType", "RelationType IN ('Offer','Adopt','Default')");
                         });
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupUserRole", b =>
+            modelBuilder.Entity("Sciencetopia.Models.StudyPlanEnrollment", b =>
                 {
-                    b.Property<Guid>("GroupId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("UserId")
-                        .HasColumnType("nvarchar(450)")
-                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
-
-                    b.Property<byte>("Role")
-                        .HasColumnType("tinyint");
-
-                    b.HasKey("GroupId", "UserId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("StudyGroupUserRoles", "StudyGroups");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyPlanCohort", b =>
-                {
-                    b.Property<Guid>("Id")
+                    b.Property<Guid>("EnrollmentId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<DateTime>("CreatedAt")
+                    b.Property<DateTimeOffset>("EnrolledAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("datetime2")
+                        .HasColumnType("datetimeoffset")
                         .HasDefaultValueSql("SYSUTCDATETIME()");
 
-                    b.Property<string>("CreatedBy")
-                        .HasMaxLength(450)
-                        .HasColumnType("nvarchar(450)")
-                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                    b.Property<Guid>("PlanVersionId")
+                        .HasColumnType("uniqueidentifier");
 
-                    b.Property<DateTime?>("EndAt")
-                        .HasColumnType("datetime2");
+                    b.Property<Guid>("ScopeId")
+                        .HasColumnType("uniqueidentifier");
 
-                    b.Property<string>("EnrollMode")
+                    b.Property<string>("ScopeType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("Status")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(16)
                         .HasColumnType("nvarchar(16)")
-                        .HasDefaultValue("OptIn");
+                        .HasDefaultValue("Active");
 
-                    b.Property<int>("MembersCount")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int")
-                        .HasDefaultValue(0);
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("datetimeoffset");
 
-                    b.Property<int?>("PinnedVersionNumber")
-                        .HasColumnType("int");
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)")
+                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
 
-                    b.Property<DateTime?>("StartAt")
-                        .HasColumnType("datetime2");
+                    b.HasKey("EnrollmentId");
 
-                    b.Property<Guid?>("StudyGroupId")
-                        .HasColumnType("uniqueidentifier");
+                    b.HasIndex("PlanVersionId");
 
-                    b.Property<Guid>("StudyPlanStableId")
-                        .HasColumnType("uniqueidentifier");
+                    b.HasIndex("UserId");
 
-                    b.Property<string>("Title")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
+                    b.HasIndex("ScopeType", "ScopeId");
 
-                    b.Property<string>("Visibility")
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(20)
-                        .HasColumnType("nvarchar(20)")
-                        .HasDefaultValue("private");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("StudyGroupId");
-
-                    b.HasIndex("StudyPlanStableId");
-
-                    b.HasIndex("StudyPlanStableId", "PinnedVersionNumber");
-
-                    b.ToTable("Cohorts", "StudyPlans");
+                    b.ToTable("StudyPlanEnrollments", "StudyPlans", t =>
+                        {
+                            t.HasCheckConstraint("CK_StudyPlanEnrollments_ScopeType", "ScopeType IN ('Cohort','Personal')");
+                        });
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanLessonSnapshot", b =>
@@ -964,29 +1177,6 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("LessonStableId", "LessonVersionNumber");
 
                     b.ToTable("StudyPlanLessonSnapshots", "StudyPlans");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyPlanTagAssignment", b =>
-                {
-                    b.Property<Guid>("StudyPlanStableId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("StudyPlanVersionNumber")
-                        .HasColumnType("int");
-
-                    b.Property<Guid>("TagStableId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("AssignedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("datetime2")
-                        .HasDefaultValueSql("SYSUTCDATETIME()");
-
-                    b.HasKey("StudyPlanStableId", "StudyPlanVersionNumber", "TagStableId");
-
-                    b.HasIndex("TagStableId");
-
-                    b.ToTable("StudyPlanTagAssignments", "StudyPlans");
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanUserRole", b =>
@@ -1021,6 +1211,45 @@ namespace SciencetopiaWebApplication.Migrations
                     b.HasIndex("NodeId");
 
                     b.ToTable("TagRepresentativeNode", "KnowledgeGraph");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.UserGroupEntity", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)")
+                        .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("JoinedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<DateTimeOffset?>("LeftAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<byte>("Role")
+                        .HasColumnType("tinyint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("Active");
+
+                    b.HasKey("UserId", "GroupId");
+
+                    b.HasIndex("GroupId");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("GroupId", "Status");
+
+                    b.ToTable("UserGroups", "Groups");
                 });
 
             modelBuilder.Entity("StudyPlanEntity", b =>
@@ -1059,6 +1288,9 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasDefaultValue(false);
 
                     b.Property<string>("LockfileJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("MetadataJson")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("Privacy")
@@ -1349,6 +1581,54 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("Sciencetopia.Models.CohortEntity", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.GroupEntity", "Group")
+                        .WithOne()
+                        .HasForeignKey("Sciencetopia.Models.CohortEntity", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.CohortOffering", "CurrentOffering")
+                        .WithMany()
+                        .HasForeignKey("CurrentOfferingId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Sciencetopia.Models.StudyGroupEntity", null)
+                        .WithMany()
+                        .HasForeignKey("StudyGroupId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Group");
+
+                    b.Navigation("CurrentOffering");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.CohortOffering", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.CohortEntity", "Cohort")
+                        .WithMany()
+                        .HasForeignKey("CohortGroupId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.StudyGroupStudyPlan", "StudyGroupStudyPlan")
+                        .WithMany()
+                        .HasForeignKey("StudyGroupStudyPlanId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("StudyPlanEntity", null)
+                        .WithMany()
+                        .HasForeignKey("StudyPlanVersionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Cohort");
+
+                    b.Navigation("StudyGroupStudyPlan");
+                });
+
             modelBuilder.Entity("Sciencetopia.Models.Favorite", b =>
                 {
                     b.HasOne("Sciencetopia.Models.ApplicationUser", "User")
@@ -1405,6 +1685,17 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Sciencetopia.Models.StudyGroupEntity", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.GroupEntity", "Group")
+                        .WithOne()
+                        .HasForeignKey("Sciencetopia.Models.StudyGroupEntity", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Group");
+                });
+
             modelBuilder.Entity("Sciencetopia.Models.StudyGroupStudyPlan", b =>
                 {
                     b.HasOne("Sciencetopia.Models.StudyGroupEntity", null)
@@ -1414,31 +1705,19 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupUserRole", b =>
+            modelBuilder.Entity("Sciencetopia.Models.StudyPlanEnrollment", b =>
                 {
-                    b.HasOne("Sciencetopia.Models.StudyGroupEntity", "Group")
-                        .WithMany("UserRoles")
-                        .HasForeignKey("GroupId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                    b.HasOne("StudyPlanEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PlanVersionId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("Sciencetopia.Models.ApplicationUser", "User")
+                    b.HasOne("Sciencetopia.Models.ApplicationUser", null)
                         .WithMany()
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("Group");
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyPlanCohort", b =>
-                {
-                    b.HasOne("Sciencetopia.Models.StudyGroupEntity", null)
-                        .WithMany()
-                        .HasForeignKey("StudyGroupId")
-                        .OnDelete(DeleteBehavior.SetNull);
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyPlanUserRole", b =>
@@ -1467,6 +1746,25 @@ namespace SciencetopiaWebApplication.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Sciencetopia.Models.UserGroupEntity", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.GroupEntity", "Group")
+                        .WithMany()
+                        .HasForeignKey("GroupId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.ApplicationUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Group");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("Tags", b =>
                 {
                     b.HasOne("Sciencetopia.Models.L10n.L10nSet", null)
@@ -1485,11 +1783,6 @@ namespace SciencetopiaWebApplication.Migrations
             modelBuilder.Entity("Conversation", b =>
                 {
                     b.Navigation("Messages");
-                });
-
-            modelBuilder.Entity("Sciencetopia.Models.StudyGroupEntity", b =>
-                {
-                    b.Navigation("UserRoles");
                 });
 #pragma warning restore 612, 618
         }

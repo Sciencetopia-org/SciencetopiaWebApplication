@@ -83,7 +83,7 @@ namespace Sciencetopia.Controllers.StudyPlan
                 || _db.StudyPlanUserRoles.Any(r => r.PlanStableId == (p.StableId == Guid.Empty ? p.Id : p.StableId) && r.UserId == userId)
                 // Group link (user has a role in the group that shares this plan)
                 || _db.StudyGroupStudyPlans.Any(gp => gp.StudyPlanStableId == (p.StableId == Guid.Empty ? p.Id : p.StableId)
-                    && _db.GroupMembers.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
+                    && _db.UserGroups.Any(gr => gr.GroupId == gp.StudyGroupId && gr.UserId == userId))
                 // public plans (case-insensitive)
                 || (EF.Property<string>(p, "Privacy") != null && (EF.Property<string>(p, "Privacy").ToLower() == "public"))
             );
@@ -232,8 +232,23 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (stableId == Guid.Empty) return NotFound();
 
             var cohorts = await _db.Cohorts.AsNoTracking()
-                .Where(c => c.StudyPlanStableId == stableId)
-                .Select(c => new { c.Id, c.Title, c.StudyGroupId, c.Visibility })
+                .Join(_db.CohortOfferings.AsNoTracking(),
+                    c => c.CurrentOfferingId,
+                    o => o.Id,
+                    (c, o) => new { Cohort = c, Offering = o })
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    co => co.Offering.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (co, sgsp) => new
+                    {
+                        co.Cohort.Id,
+                        co.Cohort.Title,
+                        co.Cohort.StudyGroupId,
+                        co.Cohort.Visibility,
+                        sgsp.StudyPlanStableId
+                    })
+                .Where(x => x.StudyPlanStableId == stableId)
+                .Select(x => new { x.Id, x.Title, x.StudyGroupId, x.Visibility })
                 .ToListAsync();
 
             bool alreadyActive = false;
@@ -253,9 +268,9 @@ namespace Sciencetopia.Controllers.StudyPlan
             {
                 var reason = alreadyActive ? "alreadyInPlan" : null;
                 var canJoin = !alreadyActive;
-                if (c.StudyGroupId.HasValue)
+                if (c.StudyGroupId.HasValue && c.StudyGroupId.Value != Guid.Empty)
                 {
-                    var isMember = await _db.GroupMembers.AsNoTracking().AnyAsync(gr => gr.GroupId == c.StudyGroupId && gr.UserId == userId);
+                    var isMember = await _db.UserGroups.AsNoTracking().AnyAsync(gr => gr.GroupId == c.StudyGroupId.Value && gr.UserId == userId);
                     if (!isMember) { canJoin = false; reason = reason ?? "notGroupMember"; }
                     groupScoped.Add(new { id = c.Id, title = c.Title, canJoin, reason });
                 }

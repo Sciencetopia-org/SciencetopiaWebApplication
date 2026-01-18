@@ -28,19 +28,17 @@ namespace Sciencetopia.Data
         public DbSet<Favorite> Favorites { get; set; } // New Favorite DbSet
         public DbSet<GroupEntity> Groups => Set<GroupEntity>(); // Groups ancestor
         public DbSet<StudyGroupEntity> StudyGroups { get; set; } // New StudyGroupEntity DbSet
-        public DbSet<CohortGroupEntity> CohortGroups => Set<CohortGroupEntity>();
+        public DbSet<CohortEntity> Cohorts => Set<CohortEntity>();
+        public DbSet<CohortOffering> CohortOfferings => Set<CohortOffering>();
         public DbSet<Resource> Resources { get; set; } // New Resource DbSet
         public DbSet<StudyPlanEntity> StudyPlans { get; set; }
         public DbSet<LessonEntity> Lessons { get; set; }
         public DbSet<StudyGroupStudyPlan> StudyGroupStudyPlans => Set<StudyGroupStudyPlan>();
         public DbSet<StudyPlanUserRole> StudyPlanUserRoles => Set<StudyPlanUserRole>();
-        public DbSet<GroupMemberEntity> GroupMembers => Set<GroupMemberEntity>();
-        public DbSet<StudyPlanCohort> Cohorts => Set<StudyPlanCohort>();
+        public DbSet<UserGroupEntity> UserGroups => Set<UserGroupEntity>();
         public DbSet<StudyPlanLessonSnapshot> StudyPlanLessonSnapshots => Set<StudyPlanLessonSnapshot>();
-        public DbSet<StudyPlanTagAssignment> StudyPlanTagAssignments => Set<StudyPlanTagAssignment>();
-        public DbSet<LessonTagAssignment> LessonTagAssignments => Set<LessonTagAssignment>();
         public DbSet<GroupPlanSwitch> GroupPlanSwitches => Set<GroupPlanSwitch>();
-        public DbSet<UserStudyPlanEnrollment> UserStudyPlanEnrollments => Set<UserStudyPlanEnrollment>();
+        public DbSet<StudyPlanEnrollment> StudyPlanEnrollments => Set<StudyPlanEnrollment>();
         // L10n domain
         public DbSet<Sciencetopia.Models.L10n.L10nSet> L10nSets => Set<Sciencetopia.Models.L10n.L10nSet>();
         public DbSet<Sciencetopia.Models.L10n.L10nItem> L10nItems => Set<Sciencetopia.Models.L10n.L10nItem>();
@@ -98,9 +96,10 @@ namespace Sciencetopia.Data
             // Group-first ancestor + StudyGroup flavor
             builder.Entity<GroupEntity>(eb =>
             {
-                eb.ToTable("Groups", schema: "StudyGroups");
+                eb.ToTable("Groups", schema: "Groups");
                 eb.HasKey(x => x.Id);
-                eb.Property(x => x.Kind).HasMaxLength(32).IsRequired();
+                eb.Property(x => x.Id).HasColumnName("GroupId");
+                eb.Property(x => x.Kind).HasColumnName("Type").HasMaxLength(32).IsRequired();
                 eb.Property(x => x.CreatedByUserId)
                   .HasMaxLength(450)
                   .HasColumnType("nvarchar(450)")
@@ -118,28 +117,77 @@ namespace Sciencetopia.Data
                 eb.Property(x => x.JoinPolicy).HasMaxLength(16).HasDefaultValue("Request");
                 eb.Property(x => x.SettingsJson).HasColumnType("nvarchar(max)");
                 eb.Property(x => x.Name).HasMaxLength(100);
-                eb.HasOne<GroupEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.Id)
+                eb.HasOne(x => x.Group)
+                  .WithOne()
+                  .HasForeignKey<StudyGroupEntity>(x => x.Id)
                   .OnDelete(DeleteBehavior.Cascade);
                 eb.HasIndex(x => x.Visibility);
             });
 
-            builder.Entity<CohortGroupEntity>(eb =>
+            builder.Entity<CohortEntity>(eb =>
             {
-                eb.ToTable("CohortGroups", schema: "StudyGroups");
+                eb.ToTable("Cohorts", schema: "StudyGroups");
                 eb.HasKey(x => x.Id);
+                eb.Property(x => x.Id).HasColumnName("GroupId");
+                eb.Property(x => x.Title).HasMaxLength(200);
+                eb.Property(x => x.Visibility).HasMaxLength(20).HasDefaultValue("private");
+                eb.Property(x => x.Status).HasMaxLength(16).HasDefaultValue("Active");
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.Property(x => x.CreatedBy)
+                  .HasMaxLength(450)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                eb.Property(x => x.EnrollmentPolicy)
+                  .HasConversion<string>()
+                  .HasMaxLength(16)
+                  .HasColumnName("EnrollmentPolicy")
+                  .HasDefaultValue(Sciencetopia.Models.Enums.CohortEnrollMode.OptIn);
                 eb.Property(x => x.SettingsJson).HasColumnType("nvarchar(max)");
-                eb.HasIndex(x => x.ParentGroupId);
-                eb.HasIndex(x => x.StudyPlanStableId);
-                eb.HasOne<GroupEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.Id)
+                eb.HasIndex(x => x.StudyGroupId);
+                eb.HasIndex(x => x.CurrentOfferingId)
+                  .IsUnique()
+                  .HasFilter("[CurrentOfferingId] IS NOT NULL");
+                eb.HasOne(x => x.Group)
+                  .WithOne()
+                  .HasForeignKey<CohortEntity>(x => x.Id)
                   .OnDelete(DeleteBehavior.Cascade);
-                eb.HasOne<GroupEntity>()
+                eb.HasOne<StudyGroupEntity>()
                   .WithMany()
-                  .HasForeignKey(x => x.ParentGroupId)
+                  .HasForeignKey(x => x.StudyGroupId)
+                  .OnDelete(DeleteBehavior.Restrict);
+                eb.HasOne(x => x.CurrentOffering)
+                  .WithMany()
+                  .HasForeignKey(x => x.CurrentOfferingId)
+                  .OnDelete(DeleteBehavior.Restrict);
+            });
+
+            builder.Entity<CohortOffering>(eb =>
+            {
+                eb.ToTable("CohortOfferings", schema: "StudyGroups");
+                eb.HasKey(x => x.Id);
+                eb.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("Active");
+                eb.Property(x => x.StartAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.Property(x => x.CreatedBy)
+                  .HasMaxLength(450)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                eb.HasIndex(x => x.CohortGroupId);
+                eb.HasIndex(x => x.StudyGroupStudyPlanId);
+                eb.HasIndex(x => new { x.CohortGroupId, x.Status });
+                eb.HasIndex(x => x.StudyPlanVersionId);
+                eb.HasOne(x => x.Cohort)
+                  .WithMany()
+                  .HasForeignKey(x => x.CohortGroupId)
                   .OnDelete(DeleteBehavior.Cascade);
+                eb.HasOne(x => x.StudyGroupStudyPlan)
+                  .WithMany()
+                  .HasForeignKey(x => x.StudyGroupStudyPlanId)
+                  .OnDelete(DeleteBehavior.Restrict);
+                eb.HasOne<StudyPlanEntity>()
+                  .WithMany()
+                  .HasForeignKey(x => x.StudyPlanVersionId)
+                  .OnDelete(DeleteBehavior.Restrict);
             });
             builder.Entity<StudyPlanEntity>(eb =>
             {
@@ -194,33 +242,28 @@ namespace Sciencetopia.Data
                 eb.HasIndex(x => new { x.LessonStableId, x.LessonVersionNumber });
             });
 
-            builder.Entity<StudyPlanTagAssignment>(eb =>
+            builder.Entity<StudyPlanEnrollment>(eb =>
             {
-                eb.ToTable("StudyPlanTagAssignments", schema: "StudyPlans");
-                eb.HasKey(x => new { x.StudyPlanStableId, x.StudyPlanVersionNumber, x.TagStableId });
-                eb.Property(x => x.AssignedAt).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.HasIndex(x => x.TagStableId);
-            });
-
-            builder.Entity<LessonTagAssignment>(eb =>
-            {
-                eb.ToTable("LessonTagAssignments", schema: "StudyPlans");
-                eb.HasKey(x => new { x.LessonStableId, x.LessonVersionNumber, x.TagStableId });
-                eb.Property(x => x.AssignedAt).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.HasIndex(x => x.TagStableId);
-            });
-
-            builder.Entity<UserStudyPlanEnrollment>(eb =>
-            {
-                eb.ToTable("UserStudyPlanEnrollments", schema: "StudyPlans");
-                eb.HasKey(x => x.Id);
-                eb.Property(x => x.Role).HasMaxLength(16).HasDefaultValue("Learner");
+                eb.ToTable("StudyPlanEnrollments", schema: "StudyPlans");
+                eb.HasKey(x => x.EnrollmentId);
+                eb.Property(x => x.ScopeType).HasMaxLength(16).IsRequired();
                 eb.Property(x => x.Status).HasMaxLength(16).HasDefaultValue("Active");
-                eb.Property(x => x.ProgressJson).HasColumnType("nvarchar(max)");
-                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
-                eb.HasIndex(x => new { x.UserId, x.StudyPlanStableId });
-                eb.HasIndex(x => x.GroupId);
-                eb.HasIndex(x => x.CohortGroupId);
+                eb.Property(x => x.UserId)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                eb.Property(x => x.EnrolledAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.UserId);
+                eb.HasIndex(x => new { x.ScopeType, x.ScopeId });
+                eb.HasIndex(x => x.PlanVersionId);
+                eb.HasCheckConstraint("CK_StudyPlanEnrollments_ScopeType", "ScopeType IN ('Cohort','Personal')");
+                eb.HasOne<StudyPlanEntity>()
+                  .WithMany()
+                  .HasForeignKey(x => x.PlanVersionId)
+                  .OnDelete(DeleteBehavior.Restrict);
+                eb.HasOne<ApplicationUser>()
+                  .WithMany()
+                  .HasForeignKey(x => x.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
             });
 
             // builder.Ignore<KnowledgeNode>();
@@ -448,12 +491,11 @@ namespace Sciencetopia.Data
                 b.HasIndex(x => x.UserId);
             });
 
-            // GroupMembers (Group-first membership表)
-            builder.Entity<GroupMemberEntity>(b =>
+            // UserGroups (unified membership table)
+            builder.Entity<UserGroupEntity>(b =>
             {
-                b.ToTable("GroupMembers", schema: "StudyGroups");
-                b.HasKey(x => x.Id);
-                b.HasIndex(x => new { x.GroupId, x.UserId }).IsUnique();
+                b.ToTable("UserGroups", schema: "Groups");
+                b.HasKey(x => new { x.UserId, x.GroupId });
                 b.Property(x => x.Role).HasConversion<byte>();
                 b.Property(x => x.Status).HasMaxLength(16).HasDefaultValue("Active");
                 b.Property(x => x.UserId)
@@ -461,43 +503,21 @@ namespace Sciencetopia.Data
                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
                 b.Property(x => x.JoinedAt).HasDefaultValueSql("SYSUTCDATETIME()");
 
-                b.HasOne<StudyGroupEntity>()
-                 .WithMany(g => g.UserRoles)
+                b.HasOne(x => x.Group)
+                 .WithMany()
                  .HasForeignKey(x => x.GroupId)
                  .OnDelete(DeleteBehavior.Cascade);
 
-                b.HasOne<ApplicationUser>()
+                b.HasOne(x => x.User)
                  .WithMany()
                  .HasForeignKey(x => x.UserId)
                  .OnDelete(DeleteBehavior.Cascade);
 
+                b.HasIndex(x => x.GroupId);
                 b.HasIndex(x => x.UserId);
+                b.HasIndex(x => new { x.GroupId, x.Status });
             });
 
-            // Cohorts (StudyPlanCohort)
-            builder.Entity<StudyPlanCohort>(b =>
-            {
-                b.ToTable("Cohorts", schema: "StudyPlans");
-                b.HasKey(x => x.Id);
-                b.Property(x => x.Title).HasMaxLength(200);
-                b.Property(x => x.Visibility).HasMaxLength(20).HasDefaultValue("private");
-                b.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
-                b.Property(x => x.CreatedBy)
-                  .HasMaxLength(450)
-                  .HasColumnType("nvarchar(450)")
-                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
-
-                b.HasIndex(x => x.StudyPlanStableId);
-                b.HasIndex(x => new { x.StudyPlanStableId, x.PinnedVersionNumber });
-                b.HasIndex(x => x.StudyGroupId);
-                b.Property(x => x.EnrollMode).HasConversion<string>().HasMaxLength(16).HasDefaultValue(Sciencetopia.Models.Enums.CohortEnrollMode.OptIn);
-                b.Property(x => x.MembersCount).HasDefaultValue(0);
-
-                b.HasOne<StudyGroupEntity>()
-                  .WithMany()
-                  .HasForeignKey(x => x.StudyGroupId)
-                  .OnDelete(DeleteBehavior.SetNull);
-            });
 
             // 映射 TagRepresentativeNode 到 KnowledgeGraph 架构下的表
             builder.Entity<TagRepresentativeNode>()

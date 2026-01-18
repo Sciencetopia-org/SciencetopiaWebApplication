@@ -76,9 +76,8 @@ public class StudyPlanService
                 continue;
             }
 
-            var lessonStableId = lessonEntity.StableId == Guid.Empty ? lessonEntity.Id : lessonEntity.StableId;
             var tagIds = await ResolveTagNamesToStableIdsAsync(names, userId);
-            await _sqlRepository.ReplaceLessonTagAssignmentsAsync(lessonStableId, lessonEntity.VersionNumber, tagIds);
+            await ReplaceLessonTagsInGraphAsync(lessonEntity.Id, tagIds);
         }
     }
 
@@ -797,8 +796,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             return new List<TagDTO>();
         }
 
-        var stableId = lesson.StableId == Guid.Empty ? lesson.Id : lesson.StableId;
-        var tagStableIds = await _sqlRepository.GetLessonTagStableIdsAsync(stableId, lesson.VersionNumber);
+        var tagStableIds = await GetLessonTagStableIdsFromGraphAsync(lesson.Id);
         return await BuildTagDtosAsync(tagStableIds);
     }
 
@@ -815,7 +813,6 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             return false;
         }
 
-        var stableId = lesson.StableId == Guid.Empty ? lesson.Id : lesson.StableId;
         var finalStableIds = new HashSet<Guid>();
 
         if (tagIds != null)
@@ -830,7 +827,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             foreach (var id in created) finalStableIds.Add(id);
         }
 
-        await _sqlRepository.ReplaceLessonTagAssignmentsAsync(stableId, lesson.VersionNumber, finalStableIds);
+        await ReplaceLessonTagsInGraphAsync(lesson.Id, finalStableIds);
         return true;
     }
 
@@ -893,8 +890,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         var dto = MapLessonEntityToDto(lessonEntity);
         dto.Resources = await LoadLessonResourcesAsync(lessonEntity.Id);
 
-        var lessonStable = lessonEntity.StableId == Guid.Empty ? lessonEntity.Id : lessonEntity.StableId;
-        var lessonTags = await _sqlRepository.GetLessonTagStableIdsAsync(lessonStable, lessonEntity.VersionNumber);
+        var lessonTags = await GetLessonTagStableIdsFromGraphAsync(lessonEntity.Id);
         dto.Tags = await BuildTagDtosAsync(lessonTags);
 
         return dto;
@@ -1013,16 +1009,9 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             // Batch load resources from graph for all picked lesson version ids
             var resourcesMap = await LoadLessonResourcesBatchAsync(picked.Select(p => p.Entity.Id));
 
-            // Batch load tags assignments for all stable ids, then filter to version numbers, then resolve names once
-            var assignments = await _sqlRepository.GetLessonTagAssignmentsByStableIdsAsync(stableSet);
-            var neededPairs = picked.Select(p => (StableId: p.Entity.StableId == Guid.Empty ? p.Entity.Id : p.Entity.StableId, Version: p.Entity.VersionNumber)).ToList();
-            var neededPairSet = neededPairs.ToHashSet();
-            var tagByLesson = assignments
-                .Where(a => neededPairSet.Contains((a.LessonStableId, a.LessonVersionNumber)))
-                .GroupBy(a => (a.LessonStableId, a.LessonVersionNumber))
-                .ToDictionary(g => g.Key, g => g.Select(x => x.TagStableId).Distinct().ToList());
-
-            var allTagIds = tagByLesson.Values.SelectMany(x => x).Distinct().ToList();
+            // Batch load tags from graph for all lesson version ids, then resolve names once
+            var tagByLessonId = await GetLessonTagStableIdsByLessonIdsAsync(picked.Select(p => p.Entity.Id));
+            var allTagIds = tagByLessonId.Values.SelectMany(x => x).Distinct().ToList();
             var tagNameMap = await BuildTagNameMapAsync(allTagIds);
 
             // Assemble DTOs in order
@@ -1030,8 +1019,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             {
                 var dto = MapLessonEntityToDto(item.Entity);
                 dto.Resources = resourcesMap.TryGetValue(item.Entity.Id, out var resList) ? resList : new List<ResourceDTO>();
-                var key = (item.Entity.StableId == Guid.Empty ? item.Entity.Id : item.Entity.StableId, item.Entity.VersionNumber);
-                if (tagByLesson.TryGetValue(key, out var lessonTagIds) && lessonTagIds.Count > 0)
+                if (tagByLessonId.TryGetValue(item.Entity.Id, out var lessonTagIds) && lessonTagIds.Count > 0)
                 {
                     dto.Tags = lessonTagIds.Select(id => new TagDTO { Id = id, Name = tagNameMap.TryGetValue(id, out var nm) ? nm : null }).ToList();
                 }
@@ -1099,6 +1087,81 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         {
             result.TryAdd(id, new List<ResourceDTO>());
         }
+        return result;
+    }
+
+    private async Task ReplaceLessonTagsInGraphAsync(Guid lessonVersionId, IEnumerable<Guid> tagStableIds)
+    {
+        var ids = tagStableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        await using var session = _neo4jDriver.AsyncSession();
+        await session.ExecuteWriteAsync(async tx =>
+        {
+            await tx.RunAsync(@"
+MERGE (l:Lesson {id:$lessonId})
+OPTIONAL MATCH (t:Tag)-[r:TAGGED_WITH]->(l)
+DELETE r", new { lessonId = lessonVersionId.ToString() });
+
+            if (ids.Count == 0)
+            {
+                return;
+            }
+
+            await tx.RunAsync(@"
+MATCH (l:Lesson {id:$lessonId})
+UNWIND $tagIds AS tid
+MERGE (t:Tag {stableId: tid})
+MERGE (t)-[:TAGGED_WITH]->(l)", new { lessonId = lessonVersionId.ToString(), tagIds = ids.Select(x => x.ToString()).ToList() });
+        });
+    }
+
+    private async Task<List<Guid>> GetLessonTagStableIdsFromGraphAsync(Guid lessonVersionId)
+    {
+        var map = await GetLessonTagStableIdsByLessonIdsAsync(new[] { lessonVersionId });
+        return map.TryGetValue(lessonVersionId, out var ids) ? ids : new List<Guid>();
+    }
+
+    private async Task<Dictionary<Guid, List<Guid>>> GetLessonTagStableIdsByLessonIdsAsync(IEnumerable<Guid> lessonVersionIds)
+    {
+        var ids = lessonVersionIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        var result = ids.ToDictionary(id => id, _ => new List<Guid>());
+        if (ids.Count == 0)
+        {
+            return result;
+        }
+
+        await using var session = _neo4jDriver.AsyncSession();
+        var records = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+UNWIND $lessonIds AS lid
+OPTIONAL MATCH (l:Lesson {id: lid})
+OPTIONAL MATCH (t:Tag)-[:TAGGED_WITH]->(l)
+RETURN lid AS lessonId, collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds";
+            var cursor = await tx.RunAsync(cypher, new { lessonIds = ids.Select(x => x.ToString()).ToList() });
+            return await cursor.ToListAsync();
+        });
+
+        foreach (var rec in records)
+        {
+            var lessonIdStr = rec["lessonId"].As<string?>();
+            if (!Guid.TryParse(lessonIdStr, out var lessonId))
+            {
+                continue;
+            }
+
+            var tagList = new List<Guid>();
+            foreach (var raw in rec["tagIds"].As<List<object>>())
+            {
+                var s = raw?.ToString();
+                if (Guid.TryParse(s, out var gid))
+                {
+                    tagList.Add(gid);
+                }
+            }
+
+            result[lessonId] = tagList.Distinct().ToList();
+        }
+
         return result;
     }
 

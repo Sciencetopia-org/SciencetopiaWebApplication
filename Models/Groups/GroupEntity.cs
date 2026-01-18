@@ -11,7 +11,7 @@ public class GroupEntity
     [Key]
     public Guid Id { get; set; } = Guid.NewGuid();
 
-    // StudyGroup | CohortGroup | OrgGroup | ...
+    // StudyGroup | Cohort | PersonalGroup | OrgGroup | ...
     [Required]
     [MaxLength(32)]
     public string Kind { get; set; } = "StudyGroup";

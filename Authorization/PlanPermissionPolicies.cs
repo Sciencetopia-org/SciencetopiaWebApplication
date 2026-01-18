@@ -74,8 +74,15 @@ public class PlanPermissionHandler : AuthorizationHandler<PlanPermissionRequirem
         if (planId == default && cohortId.HasValue)
         {
             planId = await _db.Cohorts.AsNoTracking()
-                .Where(c => c.Id == cohortId.Value)
-                .Select(c => c.StudyPlanStableId)
+                .Where(c => c.Id == cohortId.Value && c.CurrentOfferingId != null)
+                .Join(_db.CohortOfferings.AsNoTracking(),
+                    c => c.CurrentOfferingId,
+                    o => o.Id,
+                    (c, o) => o)
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    o => o.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (o, sgsp) => sgsp.StudyPlanStableId)
                 .FirstOrDefaultAsync();
         }
 

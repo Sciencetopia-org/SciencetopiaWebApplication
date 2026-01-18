@@ -111,11 +111,11 @@ using GroupMemberDto = global::GroupMember;
         await _context.SaveChangesAsync();
 
         // Ensure SQL role consistency: creator becomes manager in SQL as well
-        var existingRole = await _context.GroupMembers
+        var existingRole = await _context.UserGroups
             .FirstOrDefaultAsync(r => r.GroupId == entity.Id && r.UserId == userId);
         if (existingRole == null)
         {
-            _context.GroupMembers.Add(new GroupMemberEntity
+            _context.UserGroups.Add(new UserGroupEntity
             {
                 GroupId = entity.Id,
                 UserId = userId,
@@ -675,10 +675,10 @@ using GroupMemberDto = global::GroupMember;
         // SQL role consistency: ensure a Member role record exists
         if (Guid.TryParse(groupId, out var gid))
         {
-            var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            var existing = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
             if (existing == null)
             {
-                _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = userId, Role = GroupRole.Member });
+                _context.UserGroups.Add(new UserGroupEntity { GroupId = gid, UserId = userId, Role = GroupRole.Member });
                 await _context.SaveChangesAsync();
             }
         }
@@ -704,10 +704,10 @@ using GroupMemberDto = global::GroupMember;
         // Remove SQL role
         if (Guid.TryParse(groupId, out var gid))
         {
-            var role = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
+            var role = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == userId);
             if (role != null)
             {
-                _context.GroupMembers.Remove(role);
+                _context.UserGroups.Remove(role);
                 await _context.SaveChangesAsync();
             }
         }
@@ -839,10 +839,10 @@ using GroupMemberDto = global::GroupMember;
 
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing == null)
                 {
-                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    _context.UserGroups.Add(new UserGroupEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
                     await _context.SaveChangesAsync();
                 }
             }
@@ -874,10 +874,10 @@ using GroupMemberDto = global::GroupMember;
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
                 // Ensure SQL role record
-                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing == null)
                 {
-                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
+                    _context.UserGroups.Add(new UserGroupEntity { GroupId = gid, UserId = memberId, Role = GroupRole.Member });
                     await _context.SaveChangesAsync();
                 }
             }
@@ -906,10 +906,10 @@ using GroupMemberDto = global::GroupMember;
             });
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
+                var existing = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == memberId);
                 if (existing != null)
                 {
-                    _context.GroupMembers.Remove(existing);
+                    _context.UserGroups.Remove(existing);
                     await _context.SaveChangesAsync();
                 }
             }
@@ -939,10 +939,10 @@ using GroupMemberDto = global::GroupMember;
             });
             if (result && Guid.TryParse(studyGroupId, out var gid))
             {
-                var existing = await _context.GroupMembers.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == newManagerId);
+                var existing = await _context.UserGroups.FirstOrDefaultAsync(r => r.GroupId == gid && r.UserId == newManagerId);
                 if (existing == null)
                 {
-                    _context.GroupMembers.Add(new GroupMemberEntity { GroupId = gid, UserId = newManagerId, Role = GroupRole.Admin });
+                    _context.UserGroups.Add(new UserGroupEntity { GroupId = gid, UserId = newManagerId, Role = GroupRole.Admin });
                 }
                 else
                 {
@@ -1011,14 +1011,14 @@ using GroupMemberDto = global::GroupMember;
     public async Task<bool> IsUserManagerAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return await _context.GroupMembers.AsNoTracking()
+        return await _context.UserGroups.AsNoTracking()
             .AnyAsync(x => x.GroupId == gid && x.UserId == userId && x.Role >= GroupRole.Admin);
     }
 
     public async Task<bool> IsUserMemberAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return await _context.GroupMembers.AsNoTracking()
+        return await _context.UserGroups.AsNoTracking()
             .AnyAsync(x => x.GroupId == gid && x.UserId == userId);
     }
 

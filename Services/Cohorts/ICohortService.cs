@@ -64,6 +64,60 @@ public interface ICohortService
         return exists ? identifier : Guid.Empty;
     }
 
+    private async Task<CohortOffering?> GetCurrentOfferingAsync(Guid cohortId, CancellationToken ct = default)
+    {
+        var cohort = await _db.Cohorts.AsNoTracking()
+            .Where(c => c.Id == cohortId)
+            .Select(c => new { c.Id, c.CurrentOfferingId })
+            .FirstOrDefaultAsync(ct);
+        if (cohort == null)
+        {
+            return null;
+        }
+
+        CohortOffering? offering = null;
+        if (cohort.CurrentOfferingId.HasValue)
+        {
+            offering = await _db.CohortOfferings.AsNoTracking()
+                .FirstOrDefaultAsync(o => o.Id == cohort.CurrentOfferingId.Value, ct);
+        }
+
+        if (offering == null)
+        {
+            offering = await _db.CohortOfferings.AsNoTracking()
+                .Where(o => o.CohortGroupId == cohort.Id && o.Status == "Active")
+                .OrderByDescending(o => o.StartAt)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        return offering;
+    }
+
+    private async Task<(Guid planStableId, Guid planVersionId, Guid? studyGroupId)> GetCohortPlanInfoAsync(Guid cohortId, CancellationToken ct = default)
+    {
+        var cohort = await _db.Cohorts.AsNoTracking()
+            .Where(c => c.Id == cohortId)
+            .Select(c => new { c.StudyGroupId })
+            .FirstOrDefaultAsync(ct);
+        if (cohort == null)
+        {
+            return (Guid.Empty, Guid.Empty, null);
+        }
+
+        var offering = await GetCurrentOfferingAsync(cohortId, ct);
+        if (offering == null)
+        {
+            return (Guid.Empty, Guid.Empty, cohort.StudyGroupId);
+        }
+
+        var stableId = await _db.StudyGroupStudyPlans.AsNoTracking()
+            .Where(x => x.Id == offering.StudyGroupStudyPlanId)
+            .Select(x => x.StudyPlanStableId)
+            .FirstOrDefaultAsync(ct);
+
+        return (stableId, offering.StudyPlanVersionId, cohort.StudyGroupId);
+    }
+
     public async Task<Sciencetopia.DTOs.EnrollmentMeDto> GetEnrollmentForUserAsync(Guid planId, string userId, CancellationToken ct = default)
     {
         var dto = new Sciencetopia.DTOs.EnrollmentMeDto();
@@ -99,9 +153,9 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
                 .Where(x => x.Id == activeId.Value)
                 .Select(x => x.StudyGroupId)
                 .FirstOrDefaultAsync(ct);
-            if (groupId.HasValue)
+            if (groupId.HasValue && groupId.Value != Guid.Empty)
             {
-                var isManager = await _db.GroupMembers.AsNoTracking()
+                var isManager = await _db.UserGroups.AsNoTracking()
                     .AnyAsync(x => x.GroupId == groupId.Value && x.UserId == userId && x.Role >= Models.Enums.GroupRole.Admin, ct);
                 role = isManager ? "manager" : "member";
             }
@@ -129,12 +183,35 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
 
         if (dto.Title != null) entity.Title = dto.Title;
         if (dto.Visibility != null) entity.Visibility = dto.Visibility;
-        entity.StartAt = dto.StartAt;
-        entity.EndAt = dto.EndAt;
+        CohortOffering? offering = null;
+        if (entity.CurrentOfferingId.HasValue)
+        {
+            offering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.Id == entity.CurrentOfferingId.Value);
+        }
+        if (offering == null)
+        {
+            offering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.CohortGroupId == entity.Id && o.Status == "Active");
+        }
+        if (offering != null)
+        {
+            if (dto.StartAt.HasValue)
+            {
+                offering.StartAt = dto.StartAt.Value;
+            }
+            offering.EndAt = dto.EndAt;
+        }
 
         await _db.SaveChangesAsync();
         await UpsertCohortNodeAsync(entity);
-        return ToDto(entity);
+        Guid stableId = Guid.Empty;
+        if (offering != null)
+        {
+            stableId = await _db.StudyGroupStudyPlans.AsNoTracking()
+                .Where(x => x.Id == offering.StudyGroupStudyPlanId)
+                .Select(x => x.StudyPlanStableId)
+                .FirstOrDefaultAsync();
+        }
+        return ToDto(entity, stableId, offering);
     }
 
     public async Task<List<CohortViewDto>> ListByPlanAsync(Guid planId)
@@ -143,10 +220,24 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
         if (stableId == Guid.Empty) return new List<CohortViewDto>();
 
         var list = await _db.Cohorts.AsNoTracking()
+            .Join(_db.CohortOfferings.AsNoTracking(),
+                c => c.CurrentOfferingId,
+                o => o.Id,
+                (c, o) => new { Cohort = c, Offering = o })
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                co => co.Offering.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (co, sgsp) => new
+                {
+                    co.Cohort,
+                    co.Offering,
+                    sgsp.StudyPlanStableId
+                })
             .Where(x => x.StudyPlanStableId == stableId)
-            .OrderBy(x => x.StartAt ?? x.CreatedAt)
+            .OrderBy(x => x.Offering.StartAt)
             .ToListAsync();
-        return list.Select(ToDto).ToList();
+
+        return list.Select(x => ToDto(x.Cohort, x.StudyPlanStableId, x.Offering)).ToList();
     }
 
     public async Task DeleteAsync(Guid cohortId, CancellationToken ct = default)
@@ -156,6 +247,11 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
         if (entity != null)
         {
             _db.Cohorts.Remove(entity);
+            var group = await _db.Groups.FindAsync(new object?[] { entity.Id }, ct);
+            if (group != null)
+            {
+                _db.Groups.Remove(group);
+            }
             await _db.SaveChangesAsync(ct);
         }
 
@@ -169,9 +265,33 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
     }
 
     public async Task<Guid?> GetPlanIdAsync(Guid cohortId)
-        => await _db.Cohorts.Where(x => x.Id == cohortId)
-                            .Select(x => (Guid?)x.StudyPlanStableId)
-                            .FirstOrDefaultAsync();
+    {
+        var planId = await _db.Cohorts.AsNoTracking()
+            .Where(x => x.Id == cohortId && x.CurrentOfferingId != null)
+            .Join(_db.CohortOfferings.AsNoTracking(),
+                c => c.CurrentOfferingId,
+                o => o.Id,
+                (c, o) => o)
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                o => o.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (o, sgsp) => (Guid?)sgsp.StudyPlanStableId)
+            .FirstOrDefaultAsync();
+
+        if (planId.HasValue && planId.Value != Guid.Empty)
+        {
+            return planId;
+        }
+
+        return await _db.CohortOfferings.AsNoTracking()
+            .Where(o => o.CohortGroupId == cohortId && o.Status == "Active")
+            .OrderByDescending(o => o.StartAt)
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                o => o.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (o, sgsp) => (Guid?)sgsp.StudyPlanStableId)
+            .FirstOrDefaultAsync();
+    }
 
     // Removed EnrollAsync (deprecated)
 
@@ -188,6 +308,23 @@ DELETE r
 ";
             await tx.RunAsync(cypher, new { userId, cohortId = cohortId.ToString() });
         });
+
+        var membership = await _db.UserGroups
+            .FirstOrDefaultAsync(x => x.GroupId == cohortId && x.UserId == userId);
+        if (membership != null)
+        {
+            _db.UserGroups.Remove(membership);
+            await _db.SaveChangesAsync();
+        }
+
+        var enrollment = await _db.StudyPlanEnrollments
+            .FirstOrDefaultAsync(x => x.UserId == userId && x.ScopeType == "Cohort" && x.ScopeId == cohortId);
+        if (enrollment != null)
+        {
+            enrollment.Status = "Inactive";
+            enrollment.UpdatedAt = DateTimeOffset.UtcNow;
+            await _db.SaveChangesAsync();
+        }
     }
 
     public async Task AutoEnrollGroupAsync(Guid cohortId, Guid groupId, bool enabled = true)
@@ -232,64 +369,114 @@ RETURN count(DISTINCT u) AS processed";
             var rec = await cursor.SingleAsync();
             return rec["processed"].As<int>();
         });
+
+        var planInfo = await GetCohortPlanInfoAsync(cohortId, ct);
+        var planVersionId = planInfo.planVersionId;
+        if (planVersionId != Guid.Empty)
+        {
+            var userIds = await _db.UserGroups.AsNoTracking()
+                .Where(x => x.GroupId == groupId && x.Status == "Active")
+                .Select(x => x.UserId)
+                .ToListAsync(ct);
+
+            if (userIds.Count > 0)
+            {
+                var existing = await _db.StudyPlanEnrollments
+                    .Where(x => x.ScopeType == "Cohort" && x.ScopeId == cohortId && userIds.Contains(x.UserId))
+                    .ToListAsync(ct);
+                var existingMap = existing.ToDictionary(x => x.UserId, StringComparer.OrdinalIgnoreCase);
+
+                var now = DateTimeOffset.UtcNow;
+                foreach (var userId in userIds)
+                {
+                    if (existingMap.TryGetValue(userId, out var enrollment))
+                    {
+                        enrollment.PlanVersionId = planVersionId;
+                        if (!string.Equals(enrollment.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+                        {
+                            enrollment.Status = "Active";
+                        }
+                        enrollment.UpdatedAt = now;
+                    }
+                    else
+                    {
+                        _db.StudyPlanEnrollments.Add(new StudyPlanEnrollment
+                        {
+                            UserId = userId,
+                            ScopeType = "Cohort",
+                            ScopeId = cohortId,
+                            PlanVersionId = planVersionId,
+                            Status = "Active",
+                            EnrolledAt = now
+                        });
+                    }
+                }
+
+                await _db.SaveChangesAsync(ct);
+            }
+        }
         return count;
     }
 
     public async Task<(Guid planId, Guid cohortId)> JoinCohortAsync(Guid cohortId, string userId, bool shareMetrics = true, CancellationToken ct = default)
     {
         // Validate cohort and group-scope access consistently with Enroll
-        var planId = await EnsureCohortScopeAccessAsync(cohortId, userId, ct);
+        var (planId, planVersionId) = await EnsureCohortScopeAccessAsync(cohortId, userId, ct);
+
+        await EnsureCohortMembershipAsync(userId, cohortId, ct);
 
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})
 MATCH (c:Cohort {id:$cohortId})
-MERGE (u)-[:IN_COHORT]->(c)
-WITH u, c
 MATCH (c)-[:OF_VERSION]->(pv:PlanVersion)
-MERGE (u)-[:ENROLLED_IN]->(pv)
+MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)
 RETURN c.id AS cohortId;";
             await tx.RunAsync(cypher, new { userId, cohortId = cohortId.ToString() });
         });
 
+        await UpsertStudyPlanEnrollmentAsync(userId, cohortId, planVersionId, ct);
+
         return (planId, cohortId);
     }
 
-    private async Task<Guid> EnsureCohortScopeAccessAsync(Guid cohortId, string userId, CancellationToken ct)
+    private async Task<(Guid planStableId, Guid planVersionId)> EnsureCohortScopeAccessAsync(Guid cohortId, string userId, CancellationToken ct)
     {
-        var info = await _db.Cohorts.AsNoTracking()
-            .Where(x => x.Id == cohortId)
-            .Select(x => new { x.StudyPlanStableId, x.StudyGroupId })
-            .FirstOrDefaultAsync(ct);
-        if (info == null) throw new KeyNotFoundException("cohort_not_found");
+        var info = await GetCohortPlanInfoAsync(cohortId, ct);
+        if (info.planVersionId == Guid.Empty) throw new KeyNotFoundException("cohort_not_found");
 
         // Strong coupling: cohort must be group-scoped and user must be a member
-        if (!info.StudyGroupId.HasValue)
+        if (!info.studyGroupId.HasValue || info.studyGroupId.Value == Guid.Empty)
             throw new InvalidOperationException("cohort_not_group_scoped");
 
-        var isMember = await _db.GroupMembers.AsNoTracking()
-            .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId, ct);
+        var isMember = await _db.UserGroups.AsNoTracking()
+            .AnyAsync(x => x.GroupId == info.studyGroupId.Value && x.UserId == userId, ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
-        return info.StudyPlanStableId;
+        var stableId = info.planStableId != Guid.Empty
+            ? info.planStableId
+            : await ResolvePlanStableIdAsync(info.planVersionId, ct);
+        if (stableId == Guid.Empty) throw new InvalidOperationException("cohort_plan_missing");
+        return (stableId, info.planVersionId);
     }
 
     public async Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, bool shareMetrics = true, string? migrationStrategy = null, CancellationToken ct = default)
     {
         // Validate target cohort belongs to plan
-        var target = await _db.Cohorts.AsNoTracking()
-            .Where(x => x.Id == toCohortId)
-            .Select(x => new { x.StudyPlanStableId, x.StudyGroupId })
-            .FirstOrDefaultAsync(ct);
-        if (target == null) throw new KeyNotFoundException("cohort_not_found");
+        var target = await GetCohortPlanInfoAsync(toCohortId, ct);
+        if (target.planVersionId == Guid.Empty) throw new KeyNotFoundException("cohort_not_found");
         var stableId = await ResolvePlanStableIdAsync(planId, ct);
-        if (stableId == Guid.Empty || target.StudyPlanStableId != stableId) throw new InvalidOperationException("cohort_plan_mismatch");
+        var targetStableId = target.planStableId != Guid.Empty
+            ? target.planStableId
+            : await ResolvePlanStableIdAsync(target.planVersionId, ct);
+        if (stableId == Guid.Empty || targetStableId == Guid.Empty || targetStableId != stableId)
+            throw new InvalidOperationException("cohort_plan_mismatch");
 
-        if (!target.StudyGroupId.HasValue) throw new InvalidOperationException("cohort_not_group_scoped");
-        var isMember = await _db.GroupMembers.AsNoTracking()
-            .AnyAsync(x => x.GroupId == target.StudyGroupId.Value && x.UserId == userId, ct);
+        if (!target.studyGroupId.HasValue || target.studyGroupId.Value == Guid.Empty)
+            throw new InvalidOperationException("cohort_not_group_scoped");
+        var isMember = await _db.UserGroups.AsNoTracking()
+            .AnyAsync(x => x.GroupId == target.studyGroupId.Value && x.UserId == userId, ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
         Guid? fromId = null;
@@ -309,11 +496,37 @@ RETURN '' AS fromCohortId, to.id AS toCohortId;";
         if (!string.IsNullOrEmpty(fromStr))
             fromId = Guid.Parse(fromStr);
 
+        await UpsertStudyPlanEnrollmentAsync(userId, toCohortId, target.planVersionId, ct);
+
         return (stableId, fromId, toCohortId);
     }
 
-    private async Task UpsertCohortNodeAsync(StudyPlanCohort c)
+    private async Task UpsertCohortNodeAsync(CohortEntity c)
     {
+        var offering = await GetCurrentOfferingAsync(c.Id);
+        if (offering == null)
+        {
+            return;
+        }
+
+        var planStableId = await _db.StudyGroupStudyPlans.AsNoTracking()
+            .Where(x => x.Id == offering.StudyGroupStudyPlanId)
+            .Select(x => x.StudyPlanStableId)
+            .FirstOrDefaultAsync();
+        if (planStableId == Guid.Empty)
+        {
+            return;
+        }
+
+        var versionNumber = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.Id == offering.StudyPlanVersionId)
+            .Select(p => p.VersionNumber)
+            .FirstOrDefaultAsync();
+        if (versionNumber <= 0)
+        {
+            return;
+        }
+
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
@@ -322,15 +535,22 @@ MATCH (p:StudyPlan {id:$planId})
 MERGE (c:Cohort {id:$id})
 SET c.title=$title, c.visibility=$visibility, c.startAt=$startAt, c.endAt=$endAt
 MERGE (c)-[:FOR_PLAN]->(p)
+WITH c
+OPTIONAL MATCH (c)-[r:OF_VERSION]->(:PlanVersion)
+DELETE r
+WITH c
+MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
+MERGE (c)-[:OF_VERSION]->(v)
 ";
             await tx.RunAsync(cypher, new
             {
-                id = c.Id,
-                planId = c.StudyPlanStableId,
+                id = c.Id.ToString(),
+                planId = planStableId.ToString(),
                 title = c.Title,
                 visibility = c.Visibility,
-                startAt = c.StartAt,
-                endAt = c.EndAt
+                startAt = offering.StartAt,
+                endAt = offering.EndAt,
+                versionNumber
             });
         });
     }
@@ -345,8 +565,57 @@ MERGE (c)-[:FOR_PLAN]->(p)
         });
     }
 
+    private async Task UpsertStudyPlanEnrollmentAsync(string userId, Guid cohortId, Guid planVersionId, CancellationToken ct)
+    {
+        var existing = await _db.StudyPlanEnrollments
+            .FirstOrDefaultAsync(x => x.UserId == userId && x.ScopeType == "Cohort" && x.ScopeId == cohortId, ct);
+        if (existing == null)
+        {
+            _db.StudyPlanEnrollments.Add(new StudyPlanEnrollment
+            {
+                UserId = userId,
+                ScopeType = "Cohort",
+                ScopeId = cohortId,
+                PlanVersionId = planVersionId,
+                Status = "Active",
+                EnrolledAt = DateTimeOffset.UtcNow
+            });
+        }
+        else
+        {
+            existing.PlanVersionId = planVersionId;
+            if (!string.Equals(existing.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+            {
+                existing.Status = "Active";
+            }
+            existing.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        await _db.SaveChangesAsync(ct);
+    }
+
     public async Task EnsureCohortMembershipAsync(string userId, Guid cohortId, CancellationToken ct = default)
     {
+        var existing = await _db.UserGroups
+            .FirstOrDefaultAsync(x => x.GroupId == cohortId && x.UserId == userId, ct);
+        if (existing == null)
+        {
+            _db.UserGroups.Add(new UserGroupEntity
+            {
+                GroupId = cohortId,
+                UserId = userId,
+                Role = Models.Enums.GroupRole.Member,
+                Status = "Active"
+            });
+            await _db.SaveChangesAsync(ct);
+        }
+        else if (!string.Equals(existing.Status, "Active", StringComparison.OrdinalIgnoreCase))
+        {
+            existing.Status = "Active";
+            existing.LeftAt = null;
+            await _db.SaveChangesAsync(ct);
+        }
+
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
@@ -373,6 +642,10 @@ RETURN any(x IN nums WHERE x <> pv.versionNumber) AS mismatch, pv.id AS pvId";
         var mismatch = result["mismatch"].As<bool>();
         var pvIdStr = result["pvId"].As<string>();
         Guid.TryParse(pvIdStr, out var pvId);
+        if (pvId != Guid.Empty)
+        {
+            await UpsertStudyPlanEnrollmentAsync(userId, cohortId, pvId, ct);
+        }
         return (mismatch, pvId);
     }
 
@@ -455,6 +728,6 @@ MERGE (u)-[:ENROLLED_IN]->(pv)";
         return versionNumber;
     }
 
-    private static CohortViewDto ToDto(StudyPlanCohort c)
-        => new CohortViewDto(c.Id, c.StudyPlanStableId, c.Title, c.Visibility, c.StartAt, c.EndAt, c.CreatedBy, c.CreatedAt);
+    private static CohortViewDto ToDto(CohortEntity c, Guid planStableId, CohortOffering? offering)
+        => new CohortViewDto(c.Id, planStableId, c.Title, c.Visibility, offering?.StartAt, offering?.EndAt, c.CreatedBy, c.CreatedAt);
 }
