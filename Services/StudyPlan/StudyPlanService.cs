@@ -731,10 +731,11 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         // Best-effort Neo4j cleanup
         try
         {
+            var stableId = target.StableId == Guid.Empty ? target.Id : target.StableId;
             await using var session = _neo4jDriver.AsyncSession();
             await session.ExecuteWriteAsync(async tx =>
             {
-                await tx.RunAsync(@"MATCH (p:StudyPlan {id:$id}) DETACH DELETE p", new { id = target.Id.ToString() });
+                await tx.RunAsync(@"MATCH (p:StudyPlan {id:$id}) DETACH DELETE p", new { id = stableId.ToString() });
             });
         }
         catch (Exception ex)

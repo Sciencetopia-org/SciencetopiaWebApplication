@@ -25,6 +25,17 @@ public class GroupCohortsController : ControllerBase
         _groups = groups;
     }
 
+    private async Task<Dictionary<Guid, int>> GetCohortMemberCountsAsync(List<Guid> cohortIds)
+    {
+        if (cohortIds == null || cohortIds.Count == 0) return new Dictionary<Guid, int>();
+
+        return await _db.UserGroups.AsNoTracking()
+            .Where(ug => cohortIds.Contains(ug.GroupId) && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .GroupBy(ug => ug.GroupId)
+            .Select(g => new { GroupId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.GroupId, x => x.Count);
+    }
+
     public class CreateGroupCohortRequest
     {
         public string? Title { get; set; }
@@ -95,11 +106,7 @@ public class GroupCohortsController : ControllerBase
             });
 
         var cohortIds = cohorts.Select(c => c.Cohort.Id).ToList();
-        var memberCounts = await _db.UserGroups.AsNoTracking()
-            .Where(ug => cohortIds.Contains(ug.GroupId))
-            .GroupBy(ug => ug.GroupId)
-            .Select(g => new { GroupId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.GroupId, x => x.Count);
+        var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
 
         var result = cohorts.Select(c =>
         {
@@ -121,6 +128,69 @@ public class GroupCohortsController : ControllerBase
                 visibility = c.Cohort.Visibility,
                 enrollMode = c.Cohort.EnrollmentPolicy,
                 pinnedVersionNumber = pinnedNo,
+                memberCount,
+                createdAt = c.Cohort.CreatedAt,
+                createdBy = c.Cohort.CreatedBy
+            };
+        });
+
+        return Ok(result);
+    }
+
+    [HttpGet("Plans/{planStableId:guid}/Cohorts")]
+    public async Task<IActionResult> ListByPlan(Guid groupId, Guid planStableId)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+
+        var canRead = await _groups.IsUserMemberAsync(groupId.ToString(), userId);
+        if (!canRead) return Forbid();
+
+        var cohorts = await _db.Cohorts.AsNoTracking()
+            .Where(c => c.StudyGroupId == groupId)
+            .Join(_db.CohortOfferings.AsNoTracking(),
+                c => c.CurrentOfferingId,
+                o => o.Id,
+                (c, o) => new { Cohort = c, Offering = o })
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                co => co.Offering.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (co, sgsp) => new
+                {
+                    co.Cohort,
+                    co.Offering,
+                    sgsp.StudyPlanStableId
+                })
+            .Where(x => x.StudyPlanStableId == planStableId)
+            .OrderByDescending(x => x.Cohort.CreatedAt)
+            .ToListAsync();
+
+        var planVersionIds = cohorts.Select(c => c.Offering.StudyPlanVersionId).Distinct().ToList();
+        var versions = await _db.StudyPlans.AsNoTracking()
+            .Where(p => planVersionIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.Title, p.VersionNumber })
+            .ToListAsync();
+        var versionMap = versions.ToDictionary(x => x.Id, x => x);
+
+        var cohortIds = cohorts.Select(c => c.Cohort.Id).ToList();
+        var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
+
+        var result = cohorts.Select(c =>
+        {
+            versionMap.TryGetValue(c.Offering.StudyPlanVersionId, out var versionInfo);
+            var memberCount = memberCounts.TryGetValue(c.Cohort.Id, out var cnt) ? cnt : 0;
+
+            return new
+            {
+                id = c.Cohort.Id,
+                studyGroupId = c.Cohort.StudyGroupId,
+                studyPlanStableId = c.StudyPlanStableId,
+                studyPlanId = c.Offering.StudyPlanVersionId,
+                planTitle = versionInfo?.Title,
+                title = c.Cohort.Title,
+                visibility = c.Cohort.Visibility,
+                enrollMode = c.Cohort.EnrollmentPolicy.ToString(),
+                pinnedVersionNumber = versionInfo?.VersionNumber,
                 memberCount,
                 createdAt = c.Cohort.CreatedAt,
                 createdBy = c.Cohort.CreatedBy

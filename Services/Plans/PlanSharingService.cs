@@ -212,7 +212,7 @@ RETURN collect({groupId: sg.id, permission: r.permission, role: m.role}) AS sour
                     maxLevel = Math.Max(maxLevel, lvl);
                     canView = true;
                     if (lvl >= 2) canComment = true;
-                    if ((role == "moderator" || role == "manager" || role == "owner") && (lvl >= 3)) canEdit = true;
+                    if ((role == "moderator" || role == "manager" || role == "admin" || role == "owner") && (lvl >= 3)) canEdit = true;
                     if (lvl >= 4) isAdmin = true;
                 }
             }

@@ -1,6 +1,15 @@
 // Migration to simplified enrollment model
 // Idempotent: safe to rerun
 
+// 0) Normalize StudyGroup membership role values to canonical set
+MATCH (:User)-[r:MEMBER_OF]->(:StudyGroup)
+SET r.role = CASE toLower(coalesce(r.role, 'member'))
+  WHEN 'owner' THEN 'owner'
+  WHEN 'admin' THEN 'admin'
+  WHEN 'manager' THEN 'admin'
+  ELSE 'member'
+END;
+
 // 1) Ensure Cohort has OF_VERSION to PlanVersion (from existing PINNED_TO or study plan linkage)
 MATCH (c:Cohort)
 OPTIONAL MATCH (c)-[:OF_VERSION]->(:PlanVersion)
@@ -36,9 +45,21 @@ MATCH (u:User)-[r:PARTICIPATES_IN]->(c:Cohort)
 MERGE (u)-[:IN_COHORT]->(c)
 DELETE r;
 
+// Deduplicate IN_COHORT per (user, plan)
+MATCH (u:User)-[r:IN_COHORT]->(c:Cohort)-[:FOR_PLAN]->(p:StudyPlan)
+WITH u, p, collect(r) AS rels
+WHERE size(rels) > 1
+FOREACH (rel IN rels[1..] | DELETE rel);
+
 // 3) For each (user, cohort), ensure ENROLLED_IN to cohort's OF_VERSION
 MATCH (u:User)-[:IN_COHORT]->(c:Cohort)-[:OF_VERSION]->(pv:PlanVersion)
 MERGE (u)-[:ENROLLED_IN]->(pv);
+
+// Deduplicate ENROLLED_IN per (user, PlanVersion)
+MATCH (u:User)-[r:ENROLLED_IN]->(pv:PlanVersion)
+WITH u, pv, collect(r) AS rels
+WHERE size(rels) > 1
+FOREACH (rel IN rels[1..] | DELETE rel);
 
 // 4) Remove legacy ACTIVE_IN/PlanEnrollment structures (optional, comment out for dry run)
 MATCH (e:PlanEnrollment)-[r:ACTIVE_IN]->(:Cohort)

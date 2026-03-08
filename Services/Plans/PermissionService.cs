@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Data.SqlClient;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
@@ -16,6 +17,13 @@ namespace Sciencetopia.Services;
     {
         _db = db;
         _cache = cache;
+    }
+
+    private static bool IsMissingObjectException(Exception ex, params string[] objectNames)
+    {
+        if (ex is not SqlException sqlEx || sqlEx.Number != 208) return false;
+        if (objectNames == null || objectNames.Length == 0) return true;
+        return objectNames.Any(n => sqlEx.Message.Contains(n, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<(Guid stableId, Guid? creatorId, string? privacy)> ResolvePlanMetadataAsync(Guid identifier, CancellationToken ct)
@@ -74,17 +82,33 @@ namespace Sciencetopia.Services;
         PlanRole best = PlanRole.Viewer;
 
         // b) Direct user role
-        var direct = await _db.StudyPlanUserRoles
-            .Where(r => r.PlanStableId == stableId && r.UserId == userId)
-            .Select(r => r.Role)
-            .FirstOrDefaultAsync(ct);
+        var direct = PlanRole.Viewer;
+        try
+        {
+            direct = await _db.StudyPlanUserRoles
+                .Where(r => r.PlanStableId == stableId && r.UserId == userId)
+                .Select(r => r.Role)
+                .FirstOrDefaultAsync(ct);
+        }
+        catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanUserRoles"))
+        {
+            direct = PlanRole.Viewer;
+        }
         if (direct > best) best = direct;
 
         // c) Group visibility: user is member of groups with roles; plan linked to those groups
-        var hasGroupLink = await _db.UserGroups
-            .Where(gr => gr.UserId == userId)
-            .Join(_db.StudyGroupStudyPlans, gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => new { gr, gp })
-            .AnyAsync(x => x.gp.StudyPlanStableId == stableId, ct);
+        var hasGroupLink = false;
+        try
+        {
+            hasGroupLink = await _db.UserGroups.AsNoTracking()
+                .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(), gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => gp.StudyPlanStableId)
+                .AnyAsync(stable => stable == stableId, ct);
+        }
+        catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups", "StudyGroupStudyPlans"))
+        {
+            hasGroupLink = false;
+        }
         if (hasGroupLink && best < PlanRole.Viewer)
             best = PlanRole.Viewer; // default visibility level from group
 
@@ -160,8 +184,20 @@ namespace Sciencetopia.Services;
                 if (info.StudyGroupId.HasValue && info.StudyGroupId.Value != Guid.Empty)
                 {
                     // Group-scoped cohort: group managers manage/invite
-                    var isManager = await _db.UserGroups.AsNoTracking()
-                        .AnyAsync(x => x.GroupId == info.StudyGroupId.Value && x.UserId == userId && x.Role >= Models.Enums.GroupRole.Admin, ct);
+                    var isManager = false;
+                    try
+                    {
+                        isManager = await _db.UserGroups.AsNoTracking()
+                            .AnyAsync(x =>
+                                x.GroupId == info.StudyGroupId.Value
+                                && x.UserId == userId
+                                && (string.IsNullOrEmpty(x.Status) || x.Status == "Active" || x.Status == "active")
+                                && x.Role >= Models.Enums.GroupRole.Admin, ct);
+                    }
+                    catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups"))
+                    {
+                        isManager = false;
+                    }
                     if (isManager)
                     {
                         cohortManage = true;

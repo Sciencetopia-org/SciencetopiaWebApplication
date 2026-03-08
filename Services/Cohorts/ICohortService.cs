@@ -64,6 +64,35 @@ public interface ICohortService
         return exists ? identifier : Guid.Empty;
     }
 
+    private async Task<(Guid stableId, int versionNumber)> ResolvePlanVersionKeyAsync(Guid versionId, CancellationToken ct = default)
+    {
+        var key = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.Id == versionId)
+            .Select(p => new
+            {
+                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                p.VersionNumber
+            })
+            .FirstOrDefaultAsync(ct);
+        if (key == null) return (Guid.Empty, 0);
+        return (key.StableId, key.VersionNumber);
+    }
+
+    private async Task<Guid> ResolvePlanVersionIdAsync(Guid stableId, int versionNumber, CancellationToken ct = default)
+    {
+        return await _db.StudyPlans.AsNoTracking()
+            .Where(p => (p.StableId == stableId || p.Id == stableId) && p.VersionNumber == versionNumber)
+            .Select(p => p.Id)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private static string ToGroupRoleLabel(Sciencetopia.Models.Enums.GroupRole role)
+    {
+        if (role == Sciencetopia.Models.Enums.GroupRole.Owner) return "Owner";
+        if (role >= Sciencetopia.Models.Enums.GroupRole.Admin) return "Admin";
+        return "Member";
+    }
+
     private async Task<CohortOffering?> GetCurrentOfferingAsync(Guid cohortId, CancellationToken ct = default)
     {
         var cohort = await _db.Cohorts.AsNoTracking()
@@ -121,54 +150,68 @@ public interface ICohortService
     public async Task<Sciencetopia.DTOs.EnrollmentMeDto> GetEnrollmentForUserAsync(Guid planId, string userId, CancellationToken ct = default)
     {
         var dto = new Sciencetopia.DTOs.EnrollmentMeDto();
-
-        // Fetch active cohort via Neo4j
-        await using var session = _driver.AsyncSession();
-        var record = await session.ExecuteReadAsync(async tx =>
+        var stableId = await ResolvePlanStableIdAsync(planId, ct);
+        if (stableId == Guid.Empty)
         {
-            var cypher = @"
-MATCH (p:StudyPlan {id:$planId})
-OPTIONAL MATCH (u:User {id:$userId})-[:IN_COHORT]->(c:Cohort)-[:FOR_PLAN]->(p)
-WITH p, c
-OPTIONAL MATCH (u2:User {id:$userId})-[:IN_COHORT]->(c2:Cohort)-[:FOR_PLAN]->(p)
-RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
-            var cursor = await tx.RunAsync(cypher, new { planId = planId.ToString(), userId });
-            return await cursor.SingleAsync();
-        });
+            return dto;
+        }
 
-        Guid? activeId = null;
-        var activeStr = record["activeId"].As<string>();
-        if (!string.IsNullOrEmpty(activeStr))
-            activeId = Guid.Parse(activeStr);
+        var rows = await _db.StudyPlanEnrollments.AsNoTracking()
+            .Where(x => x.UserId == userId && x.ScopeType == "Cohort")
+            .Join(_db.StudyPlans.AsNoTracking(),
+                e => e.PlanVersionId,
+                p => p.Id,
+                (e, p) => new
+                {
+                    e.ScopeId,
+                    e.Status,
+                    e.EnrolledAt,
+                    e.UpdatedAt,
+                    StableId = p.StableId == Guid.Empty ? p.Id : p.StableId
+                })
+            .Where(x => x.StableId == stableId)
+            .ToListAsync(ct);
 
-        dto.ActiveCohortId = activeId;
-        dto.JoinedAt = null;
-
-        // Determine role (group roles only)
-        string? role = null;
-        if (activeId.HasValue)
+        if (rows.Count == 0)
         {
-            // If group-scoped, derive from SQL group membership
+            return dto;
+        }
+
+        var active = rows
+            .Where(x => string.Equals(x.Status, "Active", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => x.UpdatedAt ?? x.EnrolledAt)
+            .FirstOrDefault()
+            ?? rows.OrderByDescending(x => x.UpdatedAt ?? x.EnrolledAt).FirstOrDefault();
+
+        if (active != null)
+        {
+            dto.ActiveCohortId = active.ScopeId;
+            dto.JoinedAt = (active.UpdatedAt ?? active.EnrolledAt).ToUnixTimeMilliseconds();
+        }
+
+        dto.ArchivedCohortIds = rows
+            .Select(x => x.ScopeId)
+            .Where(id => !dto.ActiveCohortId.HasValue || id != dto.ActiveCohortId.Value)
+            .Distinct()
+            .ToList();
+
+        if (dto.ActiveCohortId.HasValue)
+        {
             var groupId = await _db.Cohorts.AsNoTracking()
-                .Where(x => x.Id == activeId.Value)
+                .Where(x => x.Id == dto.ActiveCohortId.Value)
                 .Select(x => x.StudyGroupId)
                 .FirstOrDefaultAsync(ct);
             if (groupId.HasValue && groupId.Value != Guid.Empty)
             {
-                var isManager = await _db.UserGroups.AsNoTracking()
-                    .AnyAsync(x => x.GroupId == groupId.Value && x.UserId == userId && x.Role >= Models.Enums.GroupRole.Admin, ct);
-                role = isManager ? "manager" : "member";
+                var membershipRole = await _db.UserGroups.AsNoTracking()
+                    .Where(x => x.GroupId == groupId.Value && x.UserId == userId && x.Status == "Active")
+                    .Select(x => (Sciencetopia.Models.Enums.GroupRole?)x.Role)
+                    .FirstOrDefaultAsync(ct);
+                if (membershipRole.HasValue)
+                {
+                    dto.Role = ToGroupRoleLabel(membershipRole.Value);
+                }
             }
-        }
-        dto.Role = role;
-
-        // Archived = participated minus active
-        var arr = record["participated"].As<List<object>>();
-        foreach (var o in arr)
-        {
-            var s = o?.ToString();
-            if (Guid.TryParse(s, out var gid) && (!activeId.HasValue || gid != activeId.Value))
-                dto.ArchivedCohortIds.Add(gid);
         }
 
         return dto;
@@ -302,8 +345,11 @@ RETURN coalesce(c.id,'') AS activeId, collect(c2.id) AS participated";
         {
             var cypher = @"
 MATCH (u:User {id:$userId})
-MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
-MATCH (u)-[r:ENROLLED_IN]->(pv)
+OPTIONAL MATCH (u)-[ic:IN_COHORT]->(:Cohort {id:$cohortId})
+DELETE ic
+WITH u
+OPTIONAL MATCH (:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
+OPTIONAL MATCH (u)-[r:ENROLLED_IN]->(pv)
 DELETE r
 ";
             await tx.RunAsync(cypher, new { userId, cohortId = cohortId.ToString() });
@@ -357,64 +403,79 @@ DELETE r
 
     public async Task<int> RunAutoEnrollAsync(Guid cohortId, Guid groupId, CancellationToken ct = default)
     {
-        await using var session = _driver.AsyncSession();
-        var count = await session.ExecuteWriteAsync(async tx =>
-        {
-            var cypher = @"
-MATCH (g:StudyGroup {id:$groupId})<-[:MEMBER_OF]-(u:User)
-MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
-MERGE (u)-[:ENROLLED_IN]->(pv)
-RETURN count(DISTINCT u) AS processed";
-            var cursor = await tx.RunAsync(cypher, new { cohortId = cohortId.ToString(), groupId = groupId.ToString() });
-            var rec = await cursor.SingleAsync();
-            return rec["processed"].As<int>();
-        });
-
         var planInfo = await GetCohortPlanInfoAsync(cohortId, ct);
         var planVersionId = planInfo.planVersionId;
-        if (planVersionId != Guid.Empty)
+        if (planVersionId == Guid.Empty)
         {
-            var userIds = await _db.UserGroups.AsNoTracking()
-                .Where(x => x.GroupId == groupId && x.Status == "Active")
-                .Select(x => x.UserId)
-                .ToListAsync(ct);
+            return 0;
+        }
 
-            if (userIds.Count > 0)
+        var userIds = await _db.UserGroups.AsNoTracking()
+            .Where(x => x.GroupId == groupId && x.Status == "Active")
+            .Select(x => x.UserId)
+            .ToListAsync(ct);
+
+        if (userIds.Count == 0)
+        {
+            return 0;
+        }
+
+        var (stableId, versionNumber) = await ResolvePlanVersionKeyAsync(planVersionId, ct);
+        var count = 0;
+        if (stableId != Guid.Empty && versionNumber > 0)
+        {
+            await using var session = _driver.AsyncSession();
+            count = await session.ExecuteWriteAsync(async tx =>
             {
-                var existing = await _db.StudyPlanEnrollments
-                    .Where(x => x.ScopeType == "Cohort" && x.ScopeId == cohortId && userIds.Contains(x.UserId))
-                    .ToListAsync(ct);
-                var existingMap = existing.ToDictionary(x => x.UserId, StringComparer.OrdinalIgnoreCase);
-
-                var now = DateTimeOffset.UtcNow;
-                foreach (var userId in userIds)
+                var cypher = @"
+MERGE (pv:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
+UNWIND $userIds AS uid
+MERGE (u:User {id:uid})
+MERGE (u)-[:ENROLLED_IN]->(pv)
+RETURN count(DISTINCT uid) AS processed";
+                var cursor = await tx.RunAsync(cypher, new
                 {
-                    if (existingMap.TryGetValue(userId, out var enrollment))
-                    {
-                        enrollment.PlanVersionId = planVersionId;
-                        if (!string.Equals(enrollment.Status, "Completed", StringComparison.OrdinalIgnoreCase))
-                        {
-                            enrollment.Status = "Active";
-                        }
-                        enrollment.UpdatedAt = now;
-                    }
-                    else
-                    {
-                        _db.StudyPlanEnrollments.Add(new StudyPlanEnrollment
-                        {
-                            UserId = userId,
-                            ScopeType = "Cohort",
-                            ScopeId = cohortId,
-                            PlanVersionId = planVersionId,
-                            Status = "Active",
-                            EnrolledAt = now
-                        });
-                    }
-                }
+                    planId = stableId.ToString(),
+                    versionNumber,
+                    userIds
+                });
+                var rec = await cursor.SingleAsync();
+                return rec["processed"].As<int>();
+            });
+        }
 
-                await _db.SaveChangesAsync(ct);
+        var existing = await _db.StudyPlanEnrollments
+            .Where(x => x.ScopeType == "Cohort" && x.ScopeId == cohortId && userIds.Contains(x.UserId))
+            .ToListAsync(ct);
+        var existingMap = existing.ToDictionary(x => x.UserId, StringComparer.OrdinalIgnoreCase);
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var uid in userIds)
+        {
+            if (existingMap.TryGetValue(uid, out var enrollment))
+            {
+                enrollment.PlanVersionId = planVersionId;
+                if (!string.Equals(enrollment.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+                {
+                    enrollment.Status = "Active";
+                }
+                enrollment.UpdatedAt = now;
+            }
+            else
+            {
+                _db.StudyPlanEnrollments.Add(new StudyPlanEnrollment
+                {
+                    UserId = uid,
+                    ScopeType = "Cohort",
+                    ScopeId = cohortId,
+                    PlanVersionId = planVersionId,
+                    Status = "Active",
+                    EnrolledAt = now
+                });
             }
         }
+
+        await _db.SaveChangesAsync(ct);
         return count;
     }
 
@@ -422,8 +483,14 @@ RETURN count(DISTINCT u) AS processed";
     {
         // Validate cohort and group-scope access consistently with Enroll
         var (planId, planVersionId) = await EnsureCohortScopeAccessAsync(cohortId, userId, ct);
+        var existingActive = await GetActiveCohortForPlanAsync(userId, planId, ct);
+        if (existingActive.HasValue && existingActive.Value != cohortId)
+        {
+            throw new InvalidOperationException("alreadyInPlan");
+        }
 
         await EnsureCohortMembershipAsync(userId, cohortId, ct);
+        await DeactivateOtherPlanEnrollmentsAsync(userId, planId, cohortId, ct);
 
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
@@ -431,9 +498,21 @@ RETURN count(DISTINCT u) AS processed";
             var cypher = @"
 MATCH (c:Cohort {id:$cohortId})
 MATCH (c)-[:OF_VERSION]->(pv:PlanVersion)
-MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)
+MERGE (u:User {id:$userId})
+OPTIONAL MATCH (u)-[oldIn:IN_COHORT]->(:Cohort)-[:FOR_PLAN]->(:StudyPlan {id:$planId})
+DELETE oldIn
+WITH u, c, pv
+OPTIONAL MATCH (u)-[oldEn:ENROLLED_IN]->(:PlanVersion {studyPlanId:$planId})
+DELETE oldEn
+MERGE (u)-[:IN_COHORT]->(c)
+MERGE (u)-[:ENROLLED_IN]->(pv)
 RETURN c.id AS cohortId;";
-            await tx.RunAsync(cypher, new { userId, cohortId = cohortId.ToString() });
+            await tx.RunAsync(cypher, new
+            {
+                userId,
+                cohortId = cohortId.ToString(),
+                planId = planId.ToString()
+            });
         });
 
         await UpsertStudyPlanEnrollmentAsync(userId, cohortId, planVersionId, ct);
@@ -451,7 +530,7 @@ RETURN c.id AS cohortId;";
             throw new InvalidOperationException("cohort_not_group_scoped");
 
         var isMember = await _db.UserGroups.AsNoTracking()
-            .AnyAsync(x => x.GroupId == info.studyGroupId.Value && x.UserId == userId, ct);
+            .AnyAsync(x => x.GroupId == info.studyGroupId.Value && x.UserId == userId && x.Status == "Active", ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
         var stableId = info.planStableId != Guid.Empty
@@ -476,29 +555,88 @@ RETURN c.id AS cohortId;";
         if (!target.studyGroupId.HasValue || target.studyGroupId.Value == Guid.Empty)
             throw new InvalidOperationException("cohort_not_group_scoped");
         var isMember = await _db.UserGroups.AsNoTracking()
-            .AnyAsync(x => x.GroupId == target.studyGroupId.Value && x.UserId == userId, ct);
+            .AnyAsync(x => x.GroupId == target.studyGroupId.Value && x.UserId == userId && x.Status == "Active", ct);
         if (!isMember) throw new UnauthorizedAccessException("forbidden_not_group_member");
 
-        Guid? fromId = null;
+        var fromId = await GetActiveCohortForPlanAsync(userId, stableId, ct);
+        await EnsureCohortMembershipAsync(userId, toCohortId, ct);
+        await DeactivateOtherPlanEnrollmentsAsync(userId, stableId, toCohortId, ct);
+
         await using var session = _driver.AsyncSession();
-        var result = await session.ExecuteWriteAsync(async tx =>
+        await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
 MATCH (to:Cohort {id:$toCohortId})-[:OF_VERSION]->(toPv:PlanVersion)
-MERGE (u:User {id:$userId})-[:IN_COHORT]->(to)
-// Ensure enrollment to target cohort's PlanVersion (no deletion of prior)
+MERGE (u:User {id:$userId})
+OPTIONAL MATCH (u)-[oldIn:IN_COHORT]->(:Cohort)-[:FOR_PLAN]->(:StudyPlan {id:$planId})
+DELETE oldIn
+WITH u, to, toPv
+OPTIONAL MATCH (u)-[oldEn:ENROLLED_IN]->(:PlanVersion {studyPlanId:$planId})
+DELETE oldEn
+MERGE (u)-[:IN_COHORT]->(to)
 MERGE (u)-[:ENROLLED_IN]->(toPv)
-RETURN '' AS fromCohortId, to.id AS toCohortId;";
-            var cursor = await tx.RunAsync(cypher, new { userId, toCohortId = toCohortId.ToString() });
-            return await cursor.SingleAsync();
+RETURN to.id AS toCohortId;";
+            await tx.RunAsync(cypher, new
+            {
+                userId,
+                toCohortId = toCohortId.ToString(),
+                planId = stableId.ToString()
+            });
         });
-        var fromStr = result["fromCohortId"].As<string>();
-        if (!string.IsNullOrEmpty(fromStr))
-            fromId = Guid.Parse(fromStr);
 
         await UpsertStudyPlanEnrollmentAsync(userId, toCohortId, target.planVersionId, ct);
 
         return (stableId, fromId, toCohortId);
+    }
+
+    private async Task<Guid?> GetActiveCohortForPlanAsync(string userId, Guid planStableId, CancellationToken ct)
+    {
+        return await _db.StudyPlanEnrollments.AsNoTracking()
+            .Where(x => x.UserId == userId && x.ScopeType == "Cohort" && x.Status == "Active")
+            .Join(_db.StudyPlans.AsNoTracking(),
+                e => e.PlanVersionId,
+                p => p.Id,
+                (e, p) => new
+                {
+                    e.ScopeId,
+                    e.EnrolledAt,
+                    e.UpdatedAt,
+                    StableId = p.StableId == Guid.Empty ? p.Id : p.StableId
+                })
+            .Where(x => x.StableId == planStableId)
+            .OrderByDescending(x => x.UpdatedAt ?? x.EnrolledAt)
+            .Select(x => (Guid?)x.ScopeId)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    private async Task DeactivateOtherPlanEnrollmentsAsync(string userId, Guid planStableId, Guid keepCohortId, CancellationToken ct)
+    {
+        var others = await _db.StudyPlanEnrollments
+            .Where(x => x.UserId == userId && x.ScopeType == "Cohort" && x.ScopeId != keepCohortId && x.Status == "Active")
+            .Join(_db.StudyPlans.AsNoTracking(),
+                e => e.PlanVersionId,
+                p => p.Id,
+                (e, p) => new
+                {
+                    Enrollment = e,
+                    StableId = p.StableId == Guid.Empty ? p.Id : p.StableId
+                })
+            .Where(x => x.StableId == planStableId)
+            .Select(x => x.Enrollment)
+            .ToListAsync(ct);
+
+        if (others.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var enrollment in others)
+        {
+            enrollment.Status = "Inactive";
+            enrollment.UpdatedAt = now;
+        }
+        await _db.SaveChangesAsync(ct);
     }
 
     private async Task UpsertCohortNodeAsync(CohortEntity c)
@@ -557,11 +695,19 @@ MERGE (c)-[:OF_VERSION]->(v)
 
     public async Task EnsureEnrollmentAsync(string userId, Guid planVersionId, CancellationToken ct = default)
     {
+        var (stableId, versionNumber) = await ResolvePlanVersionKeyAsync(planVersionId, ct);
+        if (stableId == Guid.Empty || versionNumber <= 0)
+        {
+            throw new InvalidOperationException("plan_version_not_found");
+        }
+
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
-            var cypher = @"MATCH (pv:PlanVersion {id:$pvId}) MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)";
-            await tx.RunAsync(cypher, new { userId, pvId = planVersionId.ToString() });
+            var cypher = @"
+MERGE (pv:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
+MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)";
+            await tx.RunAsync(cypher, new { userId, planId = stableId.ToString(), versionNumber });
         });
     }
 
@@ -635,13 +781,18 @@ MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
 MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)
 OPTIONAL MATCH (:User {id:$userId})-[:ENROLLED_IN]->(other:PlanVersion {studyPlanId: pv.studyPlanId})
 WITH pv, collect(other.versionNumber) AS nums
-RETURN any(x IN nums WHERE x <> pv.versionNumber) AS mismatch, pv.id AS pvId";
+RETURN any(x IN nums WHERE x <> pv.versionNumber) AS mismatch, pv.studyPlanId AS planId, pv.versionNumber AS versionNumber";
             var cur = await tx.RunAsync(cypher, new { userId, cohortId = cohortId.ToString() });
             return await cur.SingleAsync();
         });
         var mismatch = result["mismatch"].As<bool>();
-        var pvIdStr = result["pvId"].As<string>();
-        Guid.TryParse(pvIdStr, out var pvId);
+        var planIdStr = result["planId"].As<string>();
+        var versionNumber = result["versionNumber"].As<int>();
+        Guid pvId = Guid.Empty;
+        if (Guid.TryParse(planIdStr, out var stableId))
+        {
+            pvId = await ResolvePlanVersionIdAsync(stableId, versionNumber, ct);
+        }
         if (pvId != Guid.Empty)
         {
             await UpsertStudyPlanEnrollmentAsync(userId, cohortId, pvId, ct);
@@ -651,35 +802,55 @@ RETURN any(x IN nums WHERE x <> pv.versionNumber) AS mismatch, pv.id AS pvId";
 
     public async Task AlignEnrollmentVersionAsync(string userId, Guid targetVersionId, CancellationToken ct = default)
     {
+        var (stableId, versionNumber) = await ResolvePlanVersionKeyAsync(targetVersionId, ct);
+        if (stableId == Guid.Empty || versionNumber <= 0)
+        {
+            return;
+        }
+
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (:User {id:$userId})-[r:ENROLLED_IN]->(old:PlanVersion)
-MATCH (pv:PlanVersion {id:$pvId})
-WHERE old.studyPlanId = pv.studyPlanId AND old.versionNumber <> pv.versionNumber
+MATCH (:User {id:$userId})-[r:ENROLLED_IN]->(old:PlanVersion {studyPlanId:$planId})
+WHERE old.versionNumber <> $versionNumber
 DELETE r
+MERGE (pv:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
 MERGE (:User {id:$userId})-[:ENROLLED_IN]->(pv)";
-            await tx.RunAsync(cypher, new { userId, pvId = targetVersionId.ToString() });
+            await tx.RunAsync(cypher, new { userId, planId = stableId.ToString(), versionNumber });
         });
     }
 
     public async Task<int> MigrateProgressAsync(string userId, Guid fromVersionId, Guid toVersionId, CancellationToken ct = default)
     {
+        var (fromStableId, fromVersionNo) = await ResolvePlanVersionKeyAsync(fromVersionId, ct);
+        var (toStableId, toVersionNo) = await ResolvePlanVersionKeyAsync(toVersionId, ct);
+        if (fromStableId == Guid.Empty || toStableId == Guid.Empty || fromVersionNo <= 0 || toVersionNo <= 0)
+        {
+            return 0;
+        }
+
         await using var session = _driver.AsyncSession();
         return await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (from:PlanVersion {id:$fromId})-[:HAS_RESOURCE]->(r:Resource)
+MATCH (from:PlanVersion {studyPlanId:$fromPlanId, versionNumber:$fromVersionNo})-[:HAS_RESOURCE]->(r:Resource)
 WITH collect(r) AS fromSet
-MATCH (to:PlanVersion {id:$toId})-[:HAS_RESOURCE]->(r2:Resource)
+MATCH (to:PlanVersion {studyPlanId:$toPlanId, versionNumber:$toVersionNo})-[:HAS_RESOURCE]->(r2:Resource)
 WITH fromSet, collect(r2) AS toSet
 WITH [x IN fromSet WHERE x IN toSet] AS common
 MATCH (u:User {id:$userId})
 UNWIND common AS res
 MERGE (u)-[c:COMPLETED]->(res)
 RETURN count(res) AS migrated";
-            var cur = await tx.RunAsync(cypher, new { userId, fromId = fromVersionId.ToString(), toId = toVersionId.ToString() });
+            var cur = await tx.RunAsync(cypher, new
+            {
+                userId,
+                fromPlanId = fromStableId.ToString(),
+                fromVersionNo,
+                toPlanId = toStableId.ToString(),
+                toVersionNo
+            });
             var rec = await cur.SingleAsync();
             return rec["migrated"].As<int>();
         });

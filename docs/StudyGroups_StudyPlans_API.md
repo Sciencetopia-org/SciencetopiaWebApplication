@@ -15,7 +15,7 @@
 权限模型摘要
 - 学习计划 Plan 角色：Viewer / Commenter / Editor / Owner
 - Cohort 强耦合到学习小组：
-  - 组域 Cohort：该组 Manager 具备 Cohort 管理/邀请权限；组成员才可加入/切换
+  - 组域 Cohort：该组 Owner/Admin 具备 Cohort 管理/邀请权限；组成员才可加入/切换
   - 非组域 Cohort：不作为管理目标（当前模型）
 
 —
@@ -42,8 +42,8 @@ Study Plans（学习计划）
   - 响应：`{ activeCohortId, archivedCohortIds, role, joinedAt }`
     - `activeCohortId: Guid?` 当前所在 Cohort
     - `archivedCohortIds: Guid[]` 历史参与过的 Cohort（不含当前）
-    - `role: "manager"|"member"|null` 仅当所在 Cohort 为组域时给出（基于组角色）
-    - `joinedAt: null`（预留字段）
+    - `role: "Owner"|"Admin"|"Member"|null` 仅当所在 Cohort 为组域时给出（基于组角色）
+    - `joinedAt: long?` 入学时间（Unix epoch 毫秒）
 
 - GET `api/StudyPlans/{id}/JoinableCohorts`
   - 功能：列出用户可加入的 Cohort（组域须为组成员）
@@ -89,20 +89,20 @@ Study Group ↔ Plan 分享
 Group‑Scoped Cohorts（组域 Cohort 管理）
 - POST `api/Groups/{groupId}/Plans/{planId}/Cohorts`
   - 功能：在小组下为某计划创建 Cohort
-  - 权限：调用者必须为该组 Manager；且具备计划编辑策略（Plan.Edit）
+  - 权限：调用者必须为该组 Owner/Admin；且具备计划编辑策略（Plan.Edit）
   - 请求体：`{ title?: string, visibility?: "group"|"public"|"private", enrollMode?: "OptIn"|"Auto" }`
   - 响应：`{ cohortId }`
 
 - PATCH `api/Groups/{groupId}/Cohorts/{cohortId}`
   - 功能：更新 Cohort 的入学模式或固定版本（pin）
-  - 权限：组 Manager 且 Cohort.Manage
-  - 请求体：`{ enrollMode?: "OptIn"|"Auto", pinnedVersionId?: long, pinnedVersionNumber?: int }`
+  - 权限：组 Owner/Admin 且 Cohort.Manage
+  - 请求体：`{ enrollMode?: "OptIn"|"Auto", pinnedVersionNumber?: int }`
   - 响应：`200 OK`
 
 - POST `api/Groups/{groupId}/Cohorts/{cohortId}/UpgradeVersion`
   - 功能：将 Cohort 固定到计划当前版本，并为现有成员建立对应 ENROLLED_IN
-  - 权限：组 Manager 且 Cohort.Manage
-  - 响应：`{ pinnedVersionId, pinnedVersionNumber }`
+  - 权限：组 Owner/Admin 且 Cohort.Manage
+  - 响应：`{ pinnedVersionNumber }`
 
 —
 
@@ -143,12 +143,12 @@ Cohorts（通用）
 
 - POST `api/Cohorts/{cohortId}/AutoEnroll/{groupId}?run=true|false`
   - 功能：配置学习小组对 Cohort 的自动入学关系；`run=true` 立即批量导入当前组成员
-  - 权限：该组 Manager
+  - 权限：该组 Owner/Admin
   - 响应：`200 OK` 或 `{ processed: number }`（当 `run=true`）
 
 - DELETE `api/Cohorts/{cohortId}/AutoEnroll/{groupId}`
   - 功能：移除自动入学配置
-  - 权限：该组 Manager
+  - 权限：该组 Owner/Admin
   - 响应：`200 OK`
 
 —
@@ -206,8 +206,12 @@ Progress（学习进度）
 —
 
 Permissions（权限）
+- GET `api/StudyPlans/{id}/Permissions/Effective`
+  - 功能：返回当前用户在指定计划上的有效 PlanRole
+  - 响应：`{ role: "Viewer|Commenter|Editor|Owner" }`
+
 - GET `api/Permissions/Effective?planId={id}&cohortId={optional}&userId={optional}`
-  - 功能：返回当前（或指定）用户在指定 Plan/Cohort 上的有效权限
+  - 功能：返回当前（或指定）用户在指定 Plan/Cohort 上的聚合权限（兼容接口）
   - 响应：`{ CanView, CanComment, CanEdit, CanPublish, CohortManage, CohortInvite }`
 
 —

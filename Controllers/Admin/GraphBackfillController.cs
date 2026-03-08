@@ -57,9 +57,19 @@ public class GraphBackfillController : ControllerBase
                     var cypher = @"
 MATCH (c:Cohort {id:$cohortId})
 MATCH (p:StudyPlan {id:$planId})
-MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
+MERGE (c)-[:FOR_PLAN]->(p)
+WITH c, $planId AS planId, $versionNumber AS versionNumber
+OPTIONAL MATCH (c)-[old:OF_VERSION]->(:PlanVersion)
+DELETE old
+WITH c, planId, versionNumber
+MERGE (v:PlanVersion {studyPlanId:planId, versionNumber:versionNumber})
 MERGE (c)-[:OF_VERSION]->(v)";
-                    await tx.RunAsync(cypher, new { cohortId = it.cohortId, planId = it.planId.ToString(), versionNumber = it.versionNumber });
+                    await tx.RunAsync(cypher, new
+                    {
+                        cohortId = it.cohortId.ToString(),
+                        planId = it.planId.ToString(),
+                        versionNumber = it.versionNumber
+                    });
                     count++;
                 }
                 return count;

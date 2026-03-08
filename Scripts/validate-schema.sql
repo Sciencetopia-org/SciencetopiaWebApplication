@@ -15,11 +15,11 @@ END
 IF EXISTS (
     SELECT 1
     FROM [StudyGroups].[StudyGroups] sg
-    LEFT JOIN [Groups].[Groups] g ON g.[GroupId] = sg.[GroupId]
+    LEFT JOIN [Groups].[Groups] g ON g.[GroupId] = sg.[Id]
     WHERE g.[GroupId] IS NULL OR g.[Type] <> N'StudyGroup'
 )
 BEGIN
-    THROW 50000, 'Invariant failed: StudyGroups.GroupId must exist in Groups with Type = StudyGroup.', 1;
+    THROW 50000, 'Invariant failed: StudyGroups.Id must exist in Groups with Type = StudyGroup.', 1;
 END
 
 -- Cohort enrollments must point to Cohorts
@@ -112,6 +112,67 @@ IF EXISTS (
 )
 BEGIN
     THROW 50000, 'Invariant failed: CohortOfferings.StudyPlanVersionId must match StudyGroupStudyPlans.StudyPlanStableId.', 1;
+END
+
+-- UserGroups role domain must match enum GroupRole (Member/Learner/TA/Admin/Owner)
+IF EXISTS (
+    SELECT 1
+    FROM [Groups].[UserGroups] ug
+    WHERE ug.[Role] NOT IN (0, 1, 2, 3, 4)
+)
+BEGIN
+    THROW 50000, 'Invariant failed: Groups.UserGroups.Role out of allowed enum range (0..4).', 1;
+END
+
+-- UserGroups status domain
+IF EXISTS (
+    SELECT 1
+    FROM [Groups].[UserGroups] ug
+    WHERE ug.[Status] NOT IN (N'Active', N'Inactive')
+)
+BEGIN
+    THROW 50000, 'Invariant failed: Groups.UserGroups.Status out of allowed values (Active/Inactive).', 1;
+END
+
+-- UserGroups column contract check
+IF COL_LENGTH('Groups.UserGroups', 'Role') IS NULL
+   OR COL_LENGTH('Groups.UserGroups', 'Status') IS NULL
+   OR COL_LENGTH('Groups.UserGroups', 'JoinedAt') IS NULL
+   OR COL_LENGTH('Groups.UserGroups', 'LeftAt') IS NULL
+BEGIN
+    THROW 50000, 'Invariant failed: Groups.UserGroups must include Role/Status/JoinedAt/LeftAt columns.', 1;
+END
+
+-- Legacy date columns must be removed after migration
+IF COL_LENGTH('Groups.UserGroups', 'JoinDate') IS NOT NULL
+   OR COL_LENGTH('Groups.UserGroups', 'JoinedDate') IS NOT NULL
+   OR COL_LENGTH('Groups.UserGroups', 'LeftDate') IS NOT NULL
+BEGIN
+    THROW 50000, 'Invariant failed: legacy columns JoinDate/JoinedDate/LeftDate should not exist in Groups.UserGroups.', 1;
+END
+
+-- StudyGroupStudyPlans.ActivePlanVersionId (PlanVersionId) must align to StudyPlanStableId when present
+IF EXISTS (
+    SELECT 1
+    FROM [StudyGroups].[StudyGroupStudyPlans] sgsp
+    JOIN [StudyPlans].[StudyPlans] p ON p.[Id] = sgsp.[ActivePlanVersionId]
+    WHERE sgsp.[ActivePlanVersionId] IS NOT NULL
+      AND p.[StableId] <> sgsp.[StudyPlanStableId]
+      AND p.[Id] <> sgsp.[StudyPlanStableId]
+)
+BEGIN
+    THROW 50000, 'Invariant failed: StudyGroupStudyPlans.ActivePlanVersionId must match StudyPlanStableId.', 1;
+END
+
+-- StudyPlans version key should be unique per (StableId, VersionNumber)
+IF EXISTS (
+    SELECT 1
+    FROM [StudyPlans].[StudyPlans]
+    GROUP BY [StableId], [VersionNumber]
+    HAVING COUNT(*) > 1
+)
+BEGIN
+    THROW 50000, 'Invariant failed: StudyPlans duplicate (StableId, VersionNumber) rows detected.', 1;
 END
 
 -- Optional legacy table checks

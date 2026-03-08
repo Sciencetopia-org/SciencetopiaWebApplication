@@ -137,7 +137,7 @@ MERGE (u)-[:ENROLLED_IN]->(pv)";
             .FirstOrDefaultAsync();
 
         var memberCount = await _db.UserGroups.AsNoTracking()
-            .CountAsync(ug => ug.GroupId == c.Id);
+            .CountAsync(ug => ug.GroupId == c.Id && ug.Status == "Active");
 
         return Ok(new
         {
