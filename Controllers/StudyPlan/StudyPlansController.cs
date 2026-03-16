@@ -9,6 +9,10 @@ using Neo4j.Driver;
 using System.Security.Claims;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using Sciencetopia.Services.Progress;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace Sciencetopia.Controllers.StudyPlan
 {
@@ -19,12 +23,27 @@ namespace Sciencetopia.Controllers.StudyPlan
         private readonly ApplicationDbContext _db;
         private readonly PermissionService _perm;
         private readonly Neo4j.Driver.IDriver _driver;
+        private readonly IResourceProgressService _progress;
+        private readonly IMemoryCache _cache;
+        private readonly ILogger<StudyPlansController> _logger;
+        private static readonly TimeSpan StudyPlansVisibilityCacheTtl = TimeSpan.FromMinutes(1);
+        private static readonly TimeSpan StudyPlansCompatCacheTtl = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan StudyPlansResponseCacheTtl = TimeSpan.FromSeconds(30);
 
-        public StudyPlansController(ApplicationDbContext db, PermissionService perm, Neo4j.Driver.IDriver driver)
+        public StudyPlansController(
+            ApplicationDbContext db,
+            PermissionService perm,
+            Neo4j.Driver.IDriver driver,
+            IResourceProgressService progress,
+            IMemoryCache cache,
+            ILogger<StudyPlansController> logger)
         {
             _db = db;
             _perm = perm;
             _driver = driver;
+            _progress = progress;
+            _cache = cache;
+            _logger = logger;
         }
 
         private static bool IsMissingObjectException(Exception ex, params string[] objectNames)
@@ -36,6 +55,12 @@ namespace Sciencetopia.Controllers.StudyPlan
 
         private async Task<bool> TableExistsAsync(string schema, string tableName)
         {
+            var cacheKey = $"studyplans:table-exists:{schema}:{tableName}";
+            if (_cache.TryGetValue(cacheKey, out bool cached))
+            {
+                return cached;
+            }
+
             var conn = _db.Database.GetDbConnection();
             var shouldClose = conn.State != ConnectionState.Open;
             try
@@ -51,7 +76,9 @@ namespace Sciencetopia.Controllers.StudyPlan
 
                 var scalar = await cmd.ExecuteScalarAsync();
                 if (scalar == null || scalar == DBNull.Value) return false;
-                return Convert.ToInt32(scalar) == 1;
+                var exists = Convert.ToInt32(scalar) == 1;
+                _cache.Set(cacheKey, exists, StudyPlansCompatCacheTtl);
+                return exists;
             }
             catch
             {
@@ -254,6 +281,107 @@ WHERE [UserId] = @uid
             return false;
         }
 
+        private async Task<List<Guid>> GetGraphVisibleStableIdsCompatAsync(string userId)
+        {
+            var cacheKey = $"studyplans:graph-visible:{userId}";
+            if (_cache.TryGetValue(cacheKey, out List<Guid>? cached) && cached != null)
+            {
+                return cached;
+            }
+
+            var ids = new HashSet<Guid>();
+            try
+            {
+                await using var session = _driver.AsyncSession();
+                var rows = await session.ExecuteReadAsync(async tx =>
+                {
+                    var cypher = @"
+MATCH (u:User {id:$uid})
+CALL {
+    WITH u
+    MATCH (u)-[:CREATED]->(p:StudyPlan)
+    RETURN p.id AS id
+    UNION
+    WITH u
+    MATCH (u)-[:MEMBER_OF]->(:StudyGroup)-[:SHARES_PLAN]->(p:StudyPlan)
+    RETURN p.id AS id
+    UNION
+    WITH u
+    MATCH (u)-[:ENROLLED_IN]->(pv:PlanVersion)
+    RETURN pv.studyPlanId AS id
+    UNION
+    WITH u
+    MATCH (u)-[:ENROLLED_IN]->(p:StudyPlan)
+    RETURN p.id AS id
+}
+WITH DISTINCT id
+WHERE id IS NOT NULL
+RETURN id";
+                    var cursor = await tx.RunAsync(cypher, new { uid = userId });
+                    return await cursor.ToListAsync();
+                });
+
+                foreach (var row in rows)
+                {
+                    var idStr = row["id"].As<string?>();
+                    if (Guid.TryParse(idStr, out var id))
+                    {
+                        ids.Add(id);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "StudyPlans graph compatibility visibility read failed for user {UserId}", userId);
+            }
+
+            var list = ids.ToList();
+            _cache.Set(cacheKey, list, StudyPlansVisibilityCacheTtl);
+            return list;
+        }
+
+        private async Task<List<Guid>> GetVisibleStableIdsAsync(string userId, Guid userGuid)
+        {
+            var cacheKey = $"studyplans:visible-stableids:{userId}";
+            if (_cache.TryGetValue(cacheKey, out List<Guid>? cached) && cached != null)
+            {
+                return cached;
+            }
+
+            var visible = new HashSet<Guid>();
+
+            // Keep EF Core operations serialized on the scoped DbContext.
+            // The Neo4j compatibility read can still run in parallel because it uses a separate driver/session.
+            var graphTask = GetGraphVisibleStableIdsCompatAsync(userId);
+
+            var createdStableIds = await _db.StudyPlans.AsNoTracking()
+                .Where(p => (userGuid != Guid.Empty && p.CreatorId == userGuid) || p.CreatedBy == userId)
+                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .Distinct()
+                .ToListAsync();
+            visible.UnionWith(createdStableIds.Where(x => x != Guid.Empty));
+
+            var directRoleStableIds = await GetDirectRoleStableIdsCompatAsync(userId);
+            visible.UnionWith(directRoleStableIds.Where(x => x != Guid.Empty));
+
+            var groupIds = await GetActiveGroupIdsForUserAsync(userId);
+            if (groupIds.Count > 0)
+            {
+                var groupSharedStableIds = await GetGroupSharedStableIdsCompatAsync(groupIds);
+                visible.UnionWith(groupSharedStableIds.Where(x => x != Guid.Empty));
+            }
+
+            var enrolledStableIds = await GetEnrolledStableIdsCompatAsync(userId);
+            visible.UnionWith(enrolledStableIds.Where(x => x != Guid.Empty));
+
+            var graphVisibleStableIds = await graphTask;
+            visible.UnionWith(graphVisibleStableIds.Where(x => x != Guid.Empty));
+
+            var result = visible.ToList();
+            _cache.Set(cacheKey, result, StudyPlansVisibilityCacheTtl);
+            return result;
+        }
+
         // User-group membership source-of-truth: Groups.UserGroups
         private async Task<List<Guid>> GetActiveGroupIdsForUserAsync(string userId)
         {
@@ -275,83 +403,33 @@ WHERE [UserId] = @uid
         [HttpGet]
         public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? q = null, [FromQuery] string? sort = null)
         {
+            var totalSw = Stopwatch.StartNew();
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
 
+            var responseCacheKey = $"studyplans:list:{userId}:page:{page}:size:{pageSize}:q:{q ?? string.Empty}:sort:{sort ?? string.Empty}";
+            if (_cache.TryGetValue(responseCacheKey, out object? cachedPayload) && cachedPayload != null)
+            {
+                totalSw.Stop();
+                _logger.LogInformation(
+                    "StudyPlans.List cache hit. userId={UserId} page={Page} pageSize={PageSize} totalMs={TotalMs}",
+                    userId,
+                    page,
+                    pageSize,
+                    totalSw.ElapsedMilliseconds);
+                return Ok(cachedPayload);
+            }
+
             var ug = Guid.TryParse(userId, out var parsed) ? parsed : Guid.Empty;
-
-            // SQL is the source of truth for visibility.
-            var stableSetSql = new HashSet<Guid>();
-
-            var createdStableIds = await _db.StudyPlans.AsNoTracking()
-                .Where(p => (ug != Guid.Empty && p.CreatorId == ug) || p.CreatedBy == userId)
-                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
-                .Distinct()
-                .ToListAsync();
-            stableSetSql.UnionWith(createdStableIds.Where(x => x != Guid.Empty));
-
-            var directRoleStableIds = await GetDirectRoleStableIdsCompatAsync(userId);
-            stableSetSql.UnionWith(directRoleStableIds.Where(x => x != Guid.Empty));
-
-            var myGroupIds = await GetActiveGroupIdsForUserAsync(userId);
-            if (myGroupIds.Count > 0)
-            {
-                var groupSharedStableIds = await GetGroupSharedStableIdsCompatAsync(myGroupIds);
-                stableSetSql.UnionWith(groupSharedStableIds.Where(x => x != Guid.Empty));
-            }
-
-            var enrolledStableIds = await GetEnrolledStableIdsCompatAsync(userId);
-            stableSetSql.UnionWith(enrolledStableIds.Where(x => x != Guid.Empty));
-
-            // Optional graph compatibility: supplement SQL visibility if graph has legacy links.
-            try
-            {
-                var planIdsFromGraph = new HashSet<Guid>();
-                await using var session = _driver.AsyncSession();
-
-                var createdCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:CREATED]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
-                while (await createdCur.FetchAsync())
-                {
-                    var idStr = createdCur.Current["id"].As<string>();
-                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
-                }
-
-                var shareCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:MEMBER_OF]->(:StudyGroup)-[:SHARES_PLAN]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
-                while (await shareCur.FetchAsync())
-                {
-                    var idStr = shareCur.Current["id"].As<string>();
-                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
-                }
-
-                var enrollPvCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:ENROLLED_IN]->(pv:PlanVersion) RETURN DISTINCT pv.studyPlanId AS id", new { uid = userId });
-                while (await enrollPvCur.FetchAsync())
-                {
-                    var idStr = enrollPvCur.Current["id"].As<string>();
-                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
-                }
-
-                var enrollPlanCur = await session.RunAsync("MATCH (u:User {id:$uid})-[:ENROLLED_IN]->(p:StudyPlan) RETURN DISTINCT p.id AS id", new { uid = userId });
-                while (await enrollPlanCur.FetchAsync())
-                {
-                    var idStr = enrollPlanCur.Current["id"].As<string>();
-                    if (!string.IsNullOrWhiteSpace(idStr) && Guid.TryParse(idStr, out var gid)) planIdsFromGraph.Add(gid);
-                }
-
-                stableSetSql.UnionWith(planIdsFromGraph.Where(x => x != Guid.Empty));
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[StudyPlansController.List] Graph read failed for user {userId}: {ex.Message}");
-            }
-
-            var stableSet = stableSetSql.ToList();
-            Console.WriteLine($"[StudyPlansController.List] User {userId} has {stableSet.Count} visible plan stableIds from SQL/graph.");
+            var visibilitySw = Stopwatch.StartNew();
+            var stableSet = await GetVisibleStableIdsAsync(userId, ug);
+            visibilitySw.Stop();
 
             var baseQ = _db.StudyPlans.AsNoTracking().Where(p =>
-                stableSet.Contains(p.StableId == Guid.Empty ? p.Id : p.StableId)
-                // public plans (case-insensitive)
-                || (EF.Property<string>(p, "Privacy") != null && (EF.Property<string>(p, "Privacy").ToLower() == "public"))
-            );
+                stableSet.Contains(p.StableId)
+                || (p.StableId == Guid.Empty && stableSet.Contains(p.Id))
+                || EF.Property<string>(p, "Privacy") == "public"
+                || EF.Property<string>(p, "Privacy") == "Public");
 
             if (!string.IsNullOrWhiteSpace(q))
             {
@@ -365,9 +443,12 @@ WHERE [UserId] = @uid
                 _ => baseQ.OrderByDescending(p => p.UpdatedDate)
             };
 
+            var countSw = Stopwatch.StartNew();
             var total = await baseQ.CountAsync();
+            countSw.Stop();
 
             // Project only Id and Title for speed
+            var sliceSw = Stopwatch.StartNew();
             var slice = await baseQ
                 .Skip((page - 1) * pageSize)
                 .Take(pageSize)
@@ -384,11 +465,16 @@ WHERE [UserId] = @uid
                     p.UpdatedDate
                 })
                 .ToListAsync();
+            sliceSw.Stop();
 
             var stableIds = slice.Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId).Distinct().ToList();
 
+            var progressSw = Stopwatch.StartNew();
+            var progressTask = _progress.GetPlanProgressByPlanIdsAsync(userId, stableIds);
+
+            var aggregatesSw = Stopwatch.StartNew();
             var aggregates = await _db.StudyPlans.AsNoTracking()
-                .Where(p => stableIds.Contains(p.StableId == Guid.Empty ? p.Id : p.StableId))
+                .Where(p => stableIds.Contains(p.StableId) || (p.StableId == Guid.Empty && stableIds.Contains(p.Id)))
                 .GroupBy(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
                 .Select(g => new
                 {
@@ -397,10 +483,16 @@ WHERE [UserId] = @uid
                     CurrentVersionNumber = g.Where(p => p.IsCurrent).Select(p => (int?)p.VersionNumber).FirstOrDefault()
                 })
                 .ToListAsync();
+            aggregatesSw.Stop();
 
             var aggregatesDict = aggregates.ToDictionary(a => a.StableId, a => a);
+            var progressByStableId = await progressTask;
+            progressSw.Stop();
+            var permSw = Stopwatch.StartNew();
+            var rolesByPlanId = await _perm.GetEffectivePlanRolesAsync(userId, slice.Select(p => p.Id));
+            permSw.Stop();
 
-            var items = await Task.WhenAll(slice.Select(async p =>
+            var items = slice.Select(p =>
             {
                 var stableId = p.StableId == Guid.Empty ? p.Id : p.StableId;
                 var agg = aggregatesDict.TryGetValue(stableId, out var entry)
@@ -410,7 +502,12 @@ WHERE [UserId] = @uid
                 var currentVersionNumber = agg.CurrentVersionNumber ?? agg.LatestVersionNumber;
                 var hasUpgrade = !p.IsCurrent && p.VersionNumber < agg.LatestVersionNumber;
 
-                var role = (await _perm.GetEffectivePlanRoleAsync(userId, p.Id)).ToString();
+                var role = rolesByPlanId.TryGetValue(p.Id, out var resolvedRole)
+                    ? resolvedRole.ToString()
+                    : PlanRole.Viewer.ToString();
+                var progress = progressByStableId.TryGetValue(stableId, out var planProgress)
+                    ? planProgress
+                    : new Sciencetopia.DTOs.UserPlanProgressDto(0.0, Array.Empty<Sciencetopia.DTOs.UserLessonProgressDto>(), 0.0);
 
                 return new
                 {
@@ -426,11 +523,32 @@ WHERE [UserId] = @uid
                     updatedAt = p.UpdatedDate,
                     createdAt = p.CreatedDate,
                     hasUpgrade,
-                    role
+                    role,
+                    progress = progress.planProgress,
+                    advancedProgress = progress.advancedTopicProgress
                 };
-            }));
+            }).ToList();
 
-            return Ok(new { total, page, pageSize, items });
+            var payload = new { total, page, pageSize, items };
+            _cache.Set(responseCacheKey, payload, StudyPlansResponseCacheTtl);
+
+            totalSw.Stop();
+            _logger.LogInformation(
+                "StudyPlans.List completed. userId={UserId} visibleStableIds={VisibleCount} page={Page} pageSize={PageSize} total={Total} visibilityMs={VisibilityMs} countMs={CountMs} sliceMs={SliceMs} aggregatesMs={AggregatesMs} progressMs={ProgressMs} permMs={PermMs} totalMs={TotalMs}",
+                userId,
+                stableSet.Count,
+                page,
+                pageSize,
+                total,
+                visibilitySw.ElapsedMilliseconds,
+                countSw.ElapsedMilliseconds,
+                sliceSw.ElapsedMilliseconds,
+                aggregatesSw.ElapsedMilliseconds,
+                progressSw.ElapsedMilliseconds,
+                permSw.ElapsedMilliseconds,
+                totalSw.ElapsedMilliseconds);
+
+            return Ok(payload);
         }
 
         [HttpGet("{id}")]

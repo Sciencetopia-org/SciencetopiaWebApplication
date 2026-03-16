@@ -5,6 +5,7 @@ using Sciencetopia.Models;
 using Microsoft.AspNetCore.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Sas;
+using Microsoft.EntityFrameworkCore;
 
 public class UserService
 {
@@ -59,6 +60,46 @@ public class UserService
         return user?.UserName ?? string.Empty; // Return the UserName if user exists, otherwise an empty string
     }
 
+    public async Task<Dictionary<string, UserDisplayInfo>> GetUserDisplayInfoByIdsAsync(IEnumerable<string> userIds)
+    {
+        var ids = userIds?
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList() ?? new List<string>();
+
+        var result = ids.ToDictionary(
+            id => id,
+            _ => new UserDisplayInfo(string.Empty, string.Empty),
+            StringComparer.Ordinal);
+
+        if (ids.Count == 0)
+        {
+            return result;
+        }
+
+        var users = await _userManager.Users
+            .AsNoTracking()
+            .Where(user => ids.Contains(EF.Functions.Collate(user.Id, "SQL_Latin1_General_CP1_CI_AS")))
+            .Select(user => new
+            {
+                user.Id,
+                user.UserName,
+                user.AvatarUrl
+            })
+            .ToListAsync();
+
+        foreach (var user in users)
+        {
+            var avatarUrl = string.IsNullOrEmpty(user.AvatarUrl)
+                ? string.Empty
+                : GenerateBlobSasUri(_blobServiceClient, "avatars", $"{user.Id}.jpg");
+
+            result[user.Id] = new UserDisplayInfo(user.UserName ?? string.Empty, avatarUrl);
+        }
+
+        return result;
+    }
+
     private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, TimeSpan? lifetime = null)
     {
         var containerClient = blobServiceClient.GetBlobContainerClient(containerName);
@@ -82,3 +123,5 @@ public class UserService
         return blobClient.Uri + sasToken;
     }
 }
+
+public record UserDisplayInfo(string UserName, string AvatarUrl);

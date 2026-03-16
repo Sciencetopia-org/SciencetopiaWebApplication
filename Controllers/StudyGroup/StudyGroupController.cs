@@ -1,6 +1,10 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Models;
 
@@ -10,12 +14,59 @@ namespace Sciencetopia.Controllers.StudyGroups;
 [Route("api/[controller]")]
 public class StudyGroupController : ControllerBase
 {
+    private sealed class SettingsCohortRow
+    {
+        public Guid Id { get; set; }
+        public string? Title { get; set; }
+        public object? EnrollmentPolicy { get; set; }
+        public Guid StudyPlanVersionId { get; set; }
+        public Guid StudyPlanStableId { get; set; }
+        public int? PinnedVersionNumber { get; set; }
+    }
+
+    private sealed class SettingsEnrollmentRow
+    {
+        public Guid ScopeId { get; set; }
+        public string? Status { get; set; }
+        public DateTimeOffset EnrolledAt { get; set; }
+        public DateTimeOffset? UpdatedAt { get; set; }
+        public Guid PlanVersionId { get; set; }
+        public string? CohortTitle { get; set; }
+        public Guid? StudyGroupId { get; set; }
+    }
+
     // Dependency injection for database context
     private readonly StudyGroupService _studyGroupService;
+    private readonly ApplicationDbContext _db;
+    private readonly IMemoryCache _cache;
 
-    public StudyGroupController(StudyGroupService studyGroupService)
+    public StudyGroupController(StudyGroupService studyGroupService, ApplicationDbContext db, IMemoryCache cache)
     {
         _studyGroupService = studyGroupService;
+        _db = db;
+        _cache = cache;
+    }
+
+    private static bool IsMissingColumnException(Exception ex, params string[] columnNames)
+    {
+        for (var current = ex; current != null; current = current.InnerException!)
+        {
+            if (current is SqlException sqlEx && sqlEx.Number == 207)
+            {
+                if (columnNames == null || columnNames.Length == 0)
+                {
+                    return true;
+                }
+
+                var message = sqlEx.Message ?? string.Empty;
+                if (columnNames.Any(name => message.Contains(name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     [HttpGet("GetAllStudyGroups")]
@@ -48,6 +99,269 @@ public class StudyGroupController : ControllerBase
             return NotFound("Study group not found.");
         }
         return Ok(group);
+    }
+
+    [HttpGet("Bootstrap/{groupId}")]
+    public async Task<IActionResult> GetBootstrap(string groupId)
+    {
+        if (!Guid.TryParse(groupId, out _))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
+
+        string userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+        var cacheKey = $"studygroup:bootstrap:{groupId}:{userId}";
+        if (_cache.TryGetValue<object>(cacheKey, out var cachedBootstrap) && cachedBootstrap != null)
+        {
+            return Ok(cachedBootstrap);
+        }
+
+        // These service calls share scoped EF dependencies; keep them serialized to avoid
+        // nondeterministic first-load state or DbContext concurrency issues.
+        var group = await _studyGroupService.GetStudyGroupPreviewByIdAsync(groupId, memberLimit: 8);
+        if (group == null)
+        {
+            return NotFound("Study group not found.");
+        }
+
+        var tags = await _studyGroupService.GetGroupTagsAsync(groupId);
+        var role = string.IsNullOrEmpty(userId)
+            ? string.Empty
+            : await _studyGroupService.GetUserRoleInGroupAsync(groupId, userId) ?? string.Empty;
+        var isMember = !string.IsNullOrEmpty(role);
+        var pendingJoinRequests = 0;
+        if (!string.IsNullOrEmpty(userId)
+            && (role.Equals("Owner", StringComparison.OrdinalIgnoreCase)
+                || role.Equals("Admin", StringComparison.OrdinalIgnoreCase)
+                || role.Equals("Manager", StringComparison.OrdinalIgnoreCase)))
+        {
+            pendingJoinRequests = await _studyGroupService.GetPendingJoinRequestsCount(groupId);
+        }
+
+        var payload = new
+        {
+            group,
+            role,
+            isMember,
+            tags,
+            pendingJoinRequests
+        };
+
+        _cache.Set(cacheKey, payload, TimeSpan.FromSeconds(30));
+        return Ok(payload);
+    }
+
+    [HttpGet("SettingsBootstrap/{groupId}")]
+    [Authorize]
+    public async Task<IActionResult> GetSettingsBootstrap(string groupId)
+    {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return BadRequest("Invalid groupId format. Expected GUID.");
+        }
+
+        var userId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+        if (string.IsNullOrEmpty(userId))
+        {
+            return Unauthorized("User is not authenticated.");
+        }
+
+        var groupTask = _studyGroupService.GetStudyGroupByIdAsync(groupId);
+        Task<string?> roleTask = _studyGroupService.GetUserRoleInGroupAsync(groupId, userId);
+
+        await Task.WhenAll(groupTask, roleTask);
+
+        var group = groupTask.Result;
+        if (group == null)
+        {
+            return NotFound("Study group not found.");
+        }
+
+        var role = roleTask.Result ?? string.Empty;
+        if (string.IsNullOrEmpty(role))
+        {
+            return Forbid();
+        }
+
+        var sharedPlans = await _db.StudyGroupStudyPlans.AsNoTracking()
+            .Where(x => x.StudyGroupId == gid)
+            .Select(x => new
+            {
+                x.StudyPlanStableId,
+                x.PlanVersionId,
+                x.PinnedVersionNumber,
+                x.Permission,
+                x.AutoEnroll
+            })
+            .ToListAsync();
+
+        var planStableIds = sharedPlans.Select(x => x.StudyPlanStableId).Where(x => x != Guid.Empty).Distinct().ToList();
+        var planVersionIds = sharedPlans.Where(x => x.PlanVersionId.HasValue).Select(x => x.PlanVersionId!.Value).Distinct().ToList();
+        var relevantPlanByIdFallbacks = planStableIds;
+
+        var relevantPlans = await _db.StudyPlans.AsNoTracking()
+            .Where(p =>
+                planVersionIds.Contains(p.Id)
+                || planStableIds.Contains(p.StableId)
+                || (p.StableId == Guid.Empty && relevantPlanByIdFallbacks.Contains(p.Id)))
+            .Select(p => new
+            {
+                p.Id,
+                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                p.VersionNumber,
+                p.IsCurrent,
+                p.Title
+            })
+            .ToListAsync();
+
+        var sharedPlanTitleLookup = relevantPlans
+            .GroupBy(p => p.StableId)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(x => x.IsCurrent).ThenByDescending(x => x.VersionNumber).First().Title
+            );
+
+        var versionLookup = relevantPlans.ToDictionary(x => x.Id, x => x);
+
+        var sharedPlanDtos = sharedPlans.Select(x =>
+        {
+            var title = string.Empty;
+            if (x.PlanVersionId.HasValue && versionLookup.TryGetValue(x.PlanVersionId.Value, out var versionInfo))
+            {
+                title = versionInfo.Title;
+            }
+            else if (sharedPlanTitleLookup.TryGetValue(x.StudyPlanStableId, out var stableTitle))
+            {
+                title = stableTitle;
+            }
+
+            return new
+            {
+                studyPlanStableId = x.StudyPlanStableId,
+                planVersionId = x.PlanVersionId,
+                pinnedVersionNumber = x.PinnedVersionNumber,
+                permission = x.Permission,
+                autoEnroll = x.AutoEnroll,
+                title
+            };
+        }).ToList();
+
+        List<SettingsCohortRow> cohorts;
+        try
+        {
+            cohorts = await _db.Cohorts.AsNoTracking()
+                .Where(c => c.StudyGroupId == gid)
+                .Join(_db.CohortOfferings.AsNoTracking(),
+                    c => c.CurrentOfferingId,
+                    o => o.Id,
+                    (c, o) => new { Cohort = c, Offering = o })
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    co => co.Offering.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (co, sgsp) => new SettingsCohortRow
+                    {
+                        Id = co.Cohort.Id,
+                        Title = co.Cohort.Title,
+                        EnrollmentPolicy = co.Cohort.EnrollmentPolicy,
+                        StudyPlanVersionId = co.Offering.StudyPlanVersionId,
+                        StudyPlanStableId = sgsp.StudyPlanStableId,
+                        PinnedVersionNumber = sgsp.PinnedVersionNumber
+                    })
+                .ToListAsync();
+        }
+        catch (Exception ex) when (IsMissingColumnException(ex, "GroupId", "EnrollmentPolicy", "CurrentOfferingId"))
+        {
+            cohorts = new List<SettingsCohortRow>();
+        }
+
+        var cohortDtos = cohorts.Select(c =>
+        {
+            var planStableId = c.StudyPlanStableId;
+            var planTitle = string.Empty;
+            if (versionLookup.TryGetValue(c.StudyPlanVersionId, out var versionInfo))
+            {
+                planTitle = versionInfo.Title;
+                if (planStableId == Guid.Empty)
+                {
+                    planStableId = versionInfo.StableId;
+                }
+            }
+            else if (planStableId != Guid.Empty && sharedPlanTitleLookup.TryGetValue(planStableId, out var stableTitle))
+            {
+                planTitle = stableTitle;
+            }
+
+            return new
+            {
+                id = c.Id,
+                title = c.Title,
+                planTitle,
+                enrollMode = c.EnrollmentPolicy,
+                pinnedVersionNumber = c.PinnedVersionNumber,
+                planStableId,
+                planVersionId = c.StudyPlanVersionId
+            };
+        }).ToList();
+
+        List<object> myPlans = new();
+        var isManager = role.Equals("Owner", StringComparison.OrdinalIgnoreCase)
+            || role.Equals("Admin", StringComparison.OrdinalIgnoreCase)
+            || role.Equals("Manager", StringComparison.OrdinalIgnoreCase);
+
+        if (!isManager)
+        {
+            List<SettingsEnrollmentRow> myEnrollmentRows;
+            try
+            {
+                myEnrollmentRows = await _db.StudyPlanEnrollments.AsNoTracking()
+                    .Where(x => x.UserId == userId && x.ScopeType == "Cohort")
+                    .Join(_db.Cohorts.AsNoTracking(),
+                        e => e.ScopeId,
+                        c => c.Id,
+                        (e, c) => new SettingsEnrollmentRow
+                        {
+                            ScopeId = e.ScopeId,
+                            Status = e.Status,
+                            EnrolledAt = e.EnrolledAt,
+                            UpdatedAt = e.UpdatedAt,
+                            PlanVersionId = e.PlanVersionId,
+                            CohortTitle = c.Title,
+                            StudyGroupId = c.StudyGroupId
+                        })
+                    .Where(x => x.StudyGroupId == gid && (x.Status == "Active" || x.Status == "active"))
+                    .ToListAsync();
+            }
+            catch (Exception ex) when (IsMissingColumnException(ex, "GroupId", "EnrollmentPolicy", "CurrentOfferingId"))
+            {
+                myEnrollmentRows = new List<SettingsEnrollmentRow>();
+            }
+
+            myPlans = myEnrollmentRows
+                .GroupBy(x => x.PlanVersionId)
+                .Select(g => g.OrderByDescending(x => x.UpdatedAt ?? x.EnrolledAt).First())
+                .Select(x =>
+                {
+                    var title = versionLookup.TryGetValue(x.PlanVersionId, out var versionInfo)
+                        ? versionInfo.Title
+                        : x.PlanVersionId.ToString();
+                    return (object)new
+                    {
+                        planId = versionLookup.TryGetValue(x.PlanVersionId, out var info) ? info.StableId : x.PlanVersionId,
+                        title,
+                        cohortTitle = x.CohortTitle ?? string.Empty
+                    };
+                })
+                .ToList();
+        }
+
+        return Ok(new
+        {
+            group,
+            role,
+            sharedPlans = sharedPlanDtos,
+            cohorts = cohortDtos,
+            myPlans
+        });
     }
 
     [HttpGet("GetUserRoleInGroup/{groupId}")]

@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Sciencetopia.Services;
+using Sciencetopia.Services.Progress;
 using System.Security.Claims;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace Sciencetopia.Controllers.StudyPlan
 {
@@ -11,35 +14,62 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly StudyPlanService _svc;
         private readonly PermissionService _perm;
-        private readonly Sciencetopia.Services.Region.IRegionService _region;
+        private readonly IResourceProgressService _progress;
+        private readonly ILogger<LessonsController> _logger;
 
-        public LessonsController(StudyPlanService svc, PermissionService perm, Sciencetopia.Services.Region.IRegionService region)
+        public LessonsController(StudyPlanService svc, PermissionService perm, IResourceProgressService progress, ILogger<LessonsController> logger)
         {
             _svc = svc;
             _perm = perm;
-            _region = region;
+            _progress = progress;
+            _logger = logger;
         }
 
         // Lazy-load lesson details including resources + learned flags
         [HttpGet("{lessonId:guid}")]
         public async Task<IActionResult> GetLesson(Guid planId, Guid lessonId)
         {
+            var totalSw = Stopwatch.StartNew();
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
+            var permSw = Stopwatch.StartNew();
             if (!await _perm.CanReadAsync(userId, planId)) return Forbid();
+            permSw.Stop();
 
+            var detailSw = Stopwatch.StartNew();
             var dto = await _svc.GetLessonDetailAsync(planId, lessonId, userId);
+            detailSw.Stop();
             if (dto == null) return NotFound();
-            // Filter resources by region: if Mainland China, hide blocked ones
-            try
+
+            var progressSw = Stopwatch.StartNew();
+            if ((dto.Resources?.Count ?? 0) > 0)
             {
-                var isCn = await _region.IsMainlandChinaAsync(HttpContext);
-                if (isCn && dto.Resources != null)
+                var completedIds = await _progress.GetCompletedResourceIdsForLessonAsync(userId, lessonId);
+
+                var finishedCount = 0;
+                foreach (var resource in dto.Resources ?? Enumerable.Empty<ResourceDTO>())
                 {
-                    dto.Resources = Sciencetopia.Utils.ChinaAccessFilter.FilterResourcesForChina(dto.Resources).ToList();
+                    resource.Learned = Guid.TryParse(resource.Id, out var resourceId)
+                        && completedIds.Contains(resourceId);
+                    if (resource.Learned)
+                    {
+                        finishedCount++;
+                    }
                 }
+
+                dto.FinishedResourcesCount = finishedCount;
             }
-            catch { /* ignore region failures */ }
+            progressSw.Stop();
+            totalSw.Stop();
+            _logger.LogInformation(
+                "LessonsController.GetLesson completed. planId={PlanId} lessonId={LessonId} permissionMs={PermissionMs} detailMs={DetailMs} progressMs={ProgressMs} totalMs={TotalMs}",
+                planId,
+                lessonId,
+                permSw.ElapsedMilliseconds,
+                detailSw.ElapsedMilliseconds,
+                progressSw.ElapsedMilliseconds,
+                totalSw.ElapsedMilliseconds);
+
             return Ok(dto);
         }
     }

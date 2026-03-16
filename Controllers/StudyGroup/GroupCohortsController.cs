@@ -7,6 +7,8 @@ using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
 using Sciencetopia.Services;
 using Microsoft.AspNetCore.Authorization;
+using Sciencetopia.Services.Progress;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Sciencetopia.Controllers.StudyGroups;
 
@@ -17,12 +19,24 @@ public class GroupCohortsController : ControllerBase
     private readonly ApplicationDbContext _db;
     private readonly IDriver _driver;
     private readonly StudyGroupService _groups;
+    private readonly IResourceProgressService _progress;
+    private readonly PermissionService _perm;
+    private readonly IMemoryCache _cache;
 
-    public GroupCohortsController(ApplicationDbContext db, IDriver driver, StudyGroupService groups)
+    public GroupCohortsController(
+        ApplicationDbContext db,
+        IDriver driver,
+        StudyGroupService groups,
+        IResourceProgressService progress,
+        PermissionService perm,
+        IMemoryCache cache)
     {
         _db = db;
         _driver = driver;
         _groups = groups;
+        _progress = progress;
+        _perm = perm;
+        _cache = cache;
     }
 
     private async Task<Dictionary<Guid, int>> GetCohortMemberCountsAsync(List<Guid> cohortIds)
@@ -48,6 +62,12 @@ public class GroupCohortsController : ControllerBase
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        var cacheKey = $"group:cohortplans:{groupId}:{userId}";
+        if (_cache.TryGetValue<object>(cacheKey, out var cached) && cached != null)
+        {
+            return Ok(cached);
+        }
+
         var cohorts = await _db.Cohorts.AsNoTracking()
             .Where(c => c.StudyGroupId == groupId)
             .Join(_db.CohortOfferings.AsNoTracking(),
@@ -108,7 +128,7 @@ public class GroupCohortsController : ControllerBase
         var cohortIds = cohorts.Select(c => c.Cohort.Id).ToList();
         var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
 
-        var result = cohorts.Select(c =>
+        var result = await Task.WhenAll(cohorts.Select(async c =>
         {
             versionLookup.TryGetValue(c.Offering.StudyPlanVersionId, out var versionInfo);
             var stableId = c.StudyPlanStableId != Guid.Empty ? c.StudyPlanStableId : (versionInfo?.StableId ?? Guid.Empty);
@@ -116,6 +136,8 @@ public class GroupCohortsController : ControllerBase
             var currentNo = stableId != Guid.Empty && currentVersionLookup.TryGetValue(stableId, out var cur) ? cur : (int?)null;
             var pinnedNo = versionInfo?.VersionNumber;
             var memberCount = memberCounts.TryGetValue(c.Cohort.Id, out var cnt) ? cnt : 0;
+            var summary = await _progress.GetCohortSummaryAsync(c.Cohort.Id);
+            var role = await _perm.GetEffectivePlanRoleAsync(userId, c.Offering.StudyPlanVersionId);
 
             return new
             {
@@ -128,12 +150,15 @@ public class GroupCohortsController : ControllerBase
                 visibility = c.Cohort.Visibility,
                 enrollMode = c.Cohort.EnrollmentPolicy,
                 pinnedVersionNumber = pinnedNo,
-                memberCount,
+                memberCount = summary.memberCount > 0 ? summary.memberCount : memberCount,
+                avgProgress = summary.avgProgress,
+                role = role.ToString(),
                 createdAt = c.Cohort.CreatedAt,
                 createdBy = c.Cohort.CreatedBy
             };
-        });
+        }));
 
+        _cache.Set(cacheKey, result, TimeSpan.FromSeconds(30));
         return Ok(result);
     }
 

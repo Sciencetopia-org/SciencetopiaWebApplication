@@ -241,6 +241,7 @@ public class StudyPlanRepository : IStudyPlanRepository
             .ToList();
 
         return await _dbContext.Resources
+            .AsNoTracking()
             .Where(r => guidIds.Contains(r.Id))
             .ToListAsync();
     }

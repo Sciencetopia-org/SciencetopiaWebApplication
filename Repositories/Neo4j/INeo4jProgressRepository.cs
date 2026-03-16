@@ -8,6 +8,8 @@ public interface INeo4jProgressRepository
     Task UndoCompleteResourceAsync(string userId, Guid resourceId);
 
     Task<UserPlanProgressDto>   GetMyPlanProgressAsync(string userId, Guid planId);
+    Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetMyPlanProgressSnapshotAsync(string userId, Guid planId);
+    Task<Dictionary<Guid, UserPlanProgressDto>> GetMyPlanProgressByPlanIdsAsync(string userId, IEnumerable<Guid> planIds);
     Task<UserLessonProgressDto> GetMyLessonProgressAsync(string userId, Guid lessonId);
     Task<UserPlanProgressDto>   GetMyPlanProgressWithLessonsAsync(string userId, Guid planId);
 
@@ -19,5 +21,7 @@ public interface INeo4jProgressRepository
 
     Task<bool> ToggleCompleteByLinkAsync(string userId, string resourceLink, DateTime now, string? source, string? device);
 
+    Task<HashSet<Guid>> GetCompletedResourceIdsForPlanAsync(string userId, Guid planStableId);
+    Task<HashSet<Guid>> GetCompletedResourceIdsForLessonAsync(string userId, Guid lessonId);
     Task<HashSet<Guid>> GetCompletedResourceIdsAsync(string userId, IEnumerable<Guid> resourceIds);
 }

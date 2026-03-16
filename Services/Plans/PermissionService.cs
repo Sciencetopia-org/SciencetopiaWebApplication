@@ -28,6 +28,13 @@ namespace Sciencetopia.Services;
 
     private async Task<(Guid stableId, Guid? creatorId, string? privacy)> ResolvePlanMetadataAsync(Guid identifier, CancellationToken ct)
     {
+        var cacheKey = $"perm:plan-meta:{identifier}";
+        if (_cache.TryGetValue<(Guid stableId, Guid? creatorId, string? privacy)>(cacheKey, out var cachedMetadata)
+            && cachedMetadata.stableId != Guid.Empty)
+        {
+            return cachedMetadata;
+        }
+
         var plan = await _db.StudyPlans.AsNoTracking()
             .Where(p => p.Id == identifier)
             .Select(p => new
@@ -40,7 +47,10 @@ namespace Sciencetopia.Services;
 
         if (plan != null)
         {
-            return (plan.StableId, plan.CreatorId, plan.Privacy);
+            var resolved = (plan.StableId, plan.CreatorId, plan.Privacy);
+            _cache.Set(cacheKey, resolved, TimeSpan.FromMinutes(5));
+            _cache.Set($"perm:plan-meta:{plan.StableId}", resolved, TimeSpan.FromMinutes(5));
+            return resolved;
         }
 
         var fallback = await _db.StudyPlans.AsNoTracking()
@@ -55,7 +65,129 @@ namespace Sciencetopia.Services;
             })
             .FirstOrDefaultAsync(ct);
 
-        return fallback == null ? (Guid.Empty, null, null) : (fallback.StableId, fallback.CreatorId, fallback.Privacy);
+        if (fallback == null)
+        {
+            return (Guid.Empty, null, null);
+        }
+
+        var fallbackResolved = (fallback.StableId, fallback.CreatorId, fallback.Privacy);
+        _cache.Set(cacheKey, fallbackResolved, TimeSpan.FromMinutes(5));
+        _cache.Set($"perm:plan-meta:{fallback.StableId}", fallbackResolved, TimeSpan.FromMinutes(5));
+        return fallbackResolved;
+    }
+
+    public async Task<Dictionary<Guid, PlanRole>> GetEffectivePlanRolesAsync(string userId, IEnumerable<Guid> planIds, CancellationToken ct = default)
+    {
+        var requestedIds = (planIds ?? Enumerable.Empty<Guid>())
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .ToList();
+        if (requestedIds.Count == 0)
+        {
+            return new Dictionary<Guid, PlanRole>();
+        }
+
+        var metadataRows = await _db.StudyPlans.AsNoTracking()
+            .Where(p => requestedIds.Contains(p.Id))
+            .Select(p => new
+            {
+                p.Id,
+                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                p.CreatorId,
+                Privacy = (string?)EF.Property<string>(p, "Privacy")
+            })
+            .ToListAsync(ct);
+
+        if (metadataRows.Count == 0)
+        {
+            return requestedIds.ToDictionary(id => id, _ => PlanRole.Viewer);
+        }
+
+        var result = new Dictionary<Guid, PlanRole>(requestedIds.Count);
+        var pendingRows = new List<(Guid PlanId, Guid StableId, Guid? CreatorId, string? Privacy)>();
+
+        foreach (var row in metadataRows)
+        {
+            var cacheKey = $"perm:plan:{row.StableId}:user:{userId}";
+            if (_cache.TryGetValue(cacheKey, out PlanRole cached))
+            {
+                result[row.Id] = cached;
+                continue;
+            }
+
+            pendingRows.Add((row.Id, row.StableId, row.CreatorId, row.Privacy));
+        }
+
+        if (pendingRows.Count == 0)
+        {
+            return requestedIds.ToDictionary(id => id, id => result.TryGetValue(id, out var role) ? role : PlanRole.Viewer);
+        }
+
+        var stableIds = pendingRows.Select(x => x.StableId).Distinct().ToList();
+        var userGuid = Guid.TryParse(userId, out var ug) ? ug : Guid.Empty;
+
+        Dictionary<Guid, PlanRole> directRoleByStableId;
+        try
+        {
+            directRoleByStableId = await _db.StudyPlanUserRoles.AsNoTracking()
+                .Where(r => r.UserId == userId && stableIds.Contains(r.PlanStableId))
+                .GroupBy(r => r.PlanStableId)
+                .Select(g => new
+                {
+                    StableId = g.Key,
+                    Role = g.Max(x => x.Role)
+                })
+                .ToDictionaryAsync(x => x.StableId, x => x.Role, ct);
+        }
+        catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanUserRoles"))
+        {
+            directRoleByStableId = new Dictionary<Guid, PlanRole>();
+        }
+
+        HashSet<Guid> groupLinkedStableIds;
+        try
+        {
+            var groupLinkedRows = await _db.UserGroups.AsNoTracking()
+                .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    gr => gr.GroupId,
+                    gp => gp.StudyGroupId,
+                    (gr, gp) => gp.StudyPlanStableId)
+                .Where(stableId => stableIds.Contains(stableId))
+                .Distinct()
+                .ToListAsync(ct);
+            groupLinkedStableIds = groupLinkedRows.ToHashSet();
+        }
+        catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups", "StudyGroupStudyPlans"))
+        {
+            groupLinkedStableIds = new HashSet<Guid>();
+        }
+
+        foreach (var row in pendingRows)
+        {
+            var role = PlanRole.Viewer;
+
+            if (row.CreatorId.HasValue && row.CreatorId.Value == userGuid)
+            {
+                role = PlanRole.Owner;
+            }
+            else if (directRoleByStableId.TryGetValue(row.StableId, out var directRole))
+            {
+                role = directRole;
+            }
+            else if (groupLinkedStableIds.Contains(row.StableId))
+            {
+                role = PlanRole.Viewer;
+            }
+            else if (string.Equals(row.Privacy, "public", StringComparison.OrdinalIgnoreCase))
+            {
+                role = PlanRole.Viewer;
+            }
+
+            result[row.PlanId] = SetCache($"perm:plan:{row.StableId}:user:{userId}", role);
+        }
+
+        return requestedIds.ToDictionary(id => id, id => result.TryGetValue(id, out var role) ? role : PlanRole.Viewer);
     }
 
     public async Task<PlanRole> GetEffectivePlanRoleAsync(string userId, Guid planId, CancellationToken ct = default)

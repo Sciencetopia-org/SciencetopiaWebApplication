@@ -1,6 +1,11 @@
 using System.Collections;
 using System.Linq;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Neo4j.Driver;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
@@ -9,6 +14,7 @@ using Sciencetopia.Services.KnowledgeGraph;
 
 public class KnowledgeGraphService
 {
+    private static readonly TimeSpan GraphCacheTtl = TimeSpan.FromMinutes(10);
     private readonly IDriver _driver;
     private readonly ApplicationDbContext _context;
     private readonly IGraphRepository _graphRepository;
@@ -19,6 +25,8 @@ public class KnowledgeGraphService
     private readonly Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> _l10nOptions;
     private readonly IKnowledgeGraphWorkflowService _workflow;
     private readonly IDraftFreezeService _draftFreeze;
+    private readonly IMemoryCache _cache;
+    private readonly ILogger<KnowledgeGraphService> _logger;
 
     public KnowledgeGraphService(
         IDriver driver,
@@ -30,7 +38,9 @@ public class KnowledgeGraphService
         Sciencetopia.Services.L10n.IL10nService l10n,
         Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions> l10nOptions,
         IKnowledgeGraphWorkflowService workflow,
-        IDraftFreezeService draftFreeze)
+        IDraftFreezeService draftFreeze,
+        IMemoryCache cache,
+        ILogger<KnowledgeGraphService> logger)
     {
         _driver = driver;
         _context = context;
@@ -42,18 +52,33 @@ public class KnowledgeGraphService
         _l10nOptions = l10nOptions;
         _workflow = workflow;
         _draftFreeze = draftFreeze;
+        _cache = cache;
+        _logger = logger;
     }
 
 
-    public async Task<object> GetKnowledgeGraphAsync(string tagSystem, string viewType, string userId, string language = "zh")
+    public async Task<object> GetKnowledgeGraphAsync(string tagSystem, string viewType, string userId, string language = "zh", bool includePending = false)
     {
-        var allTagIds = await GetTagIdsByTagTypeAsync(tagSystem);
-
-        return viewType.ToLower() switch
+        var cacheKey = $"kg:all:{tagSystem}:{viewType}:{language}";
+        var data = await _cache.GetOrCreateAsync(cacheKey, async entry =>
         {
-            "venn" => await GetVennGraphDataAsync(allTagIds, language),
-            _ => await GetNetworkGraphDataAsync(allTagIds, userId, language)
-        };
+            entry.AbsoluteExpirationRelativeToNow = GraphCacheTtl;
+            var allTagIds = await GetCachedTagIdsByTagTypeAsync(tagSystem);
+
+            return viewType.ToLower() switch
+            {
+                "venn" => await GetVennGraphDataAsync(allTagIds, language),
+                _ => await GetNetworkGraphDataAsync(allTagIds, language)
+            };
+        });
+
+        if (includePending && !string.IsNullOrEmpty(userId))
+        {
+            var dataPending = await GetPendingNodesByUserIdAsync(userId);
+            return new { data = UnwrapGraphPayload(data), data_pending = dataPending };
+        }
+
+        return data!;
     }
 
     public async Task<object?> GetNodeDetailsByIdAsync(Guid nodeId, string language = "zh")
@@ -78,72 +103,134 @@ public class KnowledgeGraphService
         };
     }
 
-    public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, IEnumerable<string> zoomLevels, string userId, string language = "zh")
+    public async Task<object> GetKnowledgeGraphInViewAsync(string tagSystem, string viewType, IEnumerable<string> zoomLevels, string userId, string language = "zh", bool includePending = false)
     {
-        // var startTime = DateTime.UtcNow;
-        var allTagIds = await _tagRepo.GetTagNodeIdsByTagTypeAsync(tagSystem);
-        // var elapsed1 = DateTime.UtcNow - startTime;
-        // Console.WriteLine($"GetTagNodeIdsByTagTypeAsync took {elapsed1.TotalSeconds} seconds.");
-        // var tagIdsInView = await _graphRepository.GetTagIdsInViewAsync(zoomLevels, allTagIds);
-        // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
-        // Console.WriteLine($"GetTagIdsInViewAsync took {elapsed2.TotalSeconds} seconds.");
-
-        return viewType.ToLower() switch
+        var zoomLevelList = (zoomLevels ?? Enumerable.Empty<string>()).Distinct().ToList();
+        var zoomKey = string.Join(",", zoomLevelList.OrderBy(x => x, StringComparer.Ordinal));
+        var cacheKey = $"kg:view:{tagSystem}:{viewType}:{language}:{zoomKey}";
+        var totalSw = Stopwatch.StartNew();
+        var cacheHit = _cache.TryGetValue<object>(cacheKey, out var cachedData);
+        if (cacheHit)
         {
-            "venn" => await GetVennGraphDataInViewAsync(allTagIds, zoomLevels, language),
-            _ => await GetNetworkGraphDataInViewAsync(allTagIds, userId, zoomLevels, language)
-        };
+            _logger.LogInformation(
+                "KG GetNodeInView cache hit. tagSystem={TagSystem} viewType={ViewType} zoomLevels={ZoomLevels} lang={Lang} elapsedMs={ElapsedMs}",
+                tagSystem,
+                viewType,
+                zoomKey,
+                language,
+                totalSw.ElapsedMilliseconds);
+        }
+
+        var data = cacheHit
+            ? cachedData
+            : await _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = GraphCacheTtl;
+            var missSw = Stopwatch.StartNew();
+
+            var tagSw = Stopwatch.StartNew();
+            var allTagIds = await GetCachedTagIdsByTagTypeAsync(tagSystem);
+            tagSw.Stop();
+
+            _logger.LogInformation(
+                "KG GetNodeInView cache miss. tagSystem={TagSystem} viewType={ViewType} zoomLevels={ZoomLevels} lang={Lang} tagCount={TagCount} tagFetchMs={TagFetchMs}",
+                tagSystem,
+                viewType,
+                zoomKey,
+                language,
+                allTagIds.Count(),
+                tagSw.ElapsedMilliseconds);
+
+            var graphData = viewType.ToLower() switch
+            {
+                "venn" => await GetVennGraphDataInViewAsync(allTagIds, zoomLevelList, language),
+                _ => await GetNetworkGraphDataInViewAsync(allTagIds, zoomLevelList, language)
+            };
+
+            missSw.Stop();
+            _logger.LogInformation(
+                "KG GetNodeInView cache miss completed. tagSystem={TagSystem} viewType={ViewType} zoomLevels={ZoomLevels} lang={Lang} elapsedMs={ElapsedMs}",
+                tagSystem,
+                viewType,
+                zoomKey,
+                language,
+                missSw.ElapsedMilliseconds);
+
+            return graphData;
+        });
+
+        if (includePending && !string.IsNullOrEmpty(userId))
+        {
+            var pendingSw = Stopwatch.StartNew();
+            var dataPending = await GetPendingNodesByUserIdAsync(userId);
+            pendingSw.Stop();
+            totalSw.Stop();
+            _logger.LogInformation(
+                "KG GetNodeInView includePending. tagSystem={TagSystem} viewType={ViewType} zoomLevels={ZoomLevels} lang={Lang} pendingCount={PendingCount} pendingMs={PendingMs} totalMs={TotalMs}",
+                tagSystem,
+                viewType,
+                zoomKey,
+                language,
+                dataPending.Count,
+                pendingSw.ElapsedMilliseconds,
+                totalSw.ElapsedMilliseconds);
+            return new { data = UnwrapGraphPayload(data), data_pending = dataPending };
+        }
+
+        totalSw.Stop();
+        _logger.LogInformation(
+            "KG GetNodeInView completed. tagSystem={TagSystem} viewType={ViewType} zoomLevels={ZoomLevels} lang={Lang} totalMs={TotalMs}",
+            tagSystem,
+            viewType,
+            zoomKey,
+            language,
+            totalSw.ElapsedMilliseconds);
+
+        return data!;
     }
 
-    private async Task<object> GetNetworkGraphDataAsync(IEnumerable<Guid> tagIds, string userId, string language)
+    private async Task<object> GetNetworkGraphDataAsync(IEnumerable<Guid> tagIds, string language)
     {
         var nodeTagTriples = await _graphRepository.GetNodeTagTriplesRelatedToTagsAsync(tagIds);
-
-        var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
-
-        // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
-        var nodeToLevel = nodeTagTriples
-            .GroupBy(p => p.NodeId)
-            .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
-
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, tagIds, nodeToLevel, language);
-
-        if (!string.IsNullOrEmpty(userId))
-        {
-            var data_pending = await GetPendingNodesByUserIdAsync(userId);
-            return new { data, data_pending };
-        }
+        var data = await BuildKnowledgeGraphDataFromTriplesAsync(nodeTagTriples, language);
 
         return new { data };
     }
 
-    private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<Guid> tagIds, string userId, IEnumerable<string> zoomLevels, string language)
+    private async Task<object> GetNetworkGraphDataInViewAsync(IEnumerable<Guid> tagIds, IEnumerable<string> zoomLevels, string language)
     {
-        // var startTime = DateTime.UtcNow;
-        var nodeTagTriples = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevels);
-        // var elapsed1 = DateTime.UtcNow - startTime;
-        // Console.WriteLine($"GetAllNodesRelatedToTagsInViewAsync took {elapsed1.TotalSeconds} seconds.");
-        var allNodeIds = nodeTagTriples.Select(p => p.NodeId).Distinct().ToList();
-        var allTagIds = nodeTagTriples.Select(p => p.TagId).Distinct().ToList();
+        var totalSw = Stopwatch.StartNew();
+        var zoomLevelList = (zoomLevels ?? Enumerable.Empty<string>()).Distinct().ToList();
 
-        // NodeId -> TagLevel（若同一节点多层级，可自定义规则，这里取第一个）
-        var nodeToLevel = nodeTagTriples
-            .GroupBy(p => p.NodeId)
-            .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
+        var tripleSw = Stopwatch.StartNew();
+        var nodeTagTriples = await _graphRepository.GetAllNodesRelatedToTagsInViewAsync(tagIds, zoomLevelList);
+        tripleSw.Stop();
 
-        // var elapsed2 = DateTime.UtcNow - startTime - elapsed1;
-        // Console.WriteLine($"Node to level mapping took {elapsed2.TotalSeconds} seconds.");
+        var distinctNodeCount = nodeTagTriples.Select(x => x.NodeId).Distinct().Count();
+        var distinctTagCount = nodeTagTriples.Select(x => x.TagId).Distinct().Count();
+        _logger.LogInformation(
+            "KG GetNodeInView triples fetched. zoomLevels={ZoomLevels} inputTagCount={InputTagCount} filteredTagCount={FilteredTagCount} tagFilterMs={TagFilterMs} tripleCount={TripleCount} nodeCount={NodeCount} tagCount={TagCount} triplesMs={TriplesMs}",
+            string.Join(",", zoomLevelList),
+            tagIds?.Distinct().Count() ?? 0,
+            distinctTagCount,
+            0,
+            nodeTagTriples.Count,
+            distinctNodeCount,
+            distinctTagCount,
+            tripleSw.ElapsedMilliseconds);
 
-        var data = await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds, nodeToLevel, language);
-        // var endTime = DateTime.UtcNow;
-        // var elapsed3 = endTime - startTime - elapsed1 - elapsed2;
-        // Console.WriteLine($"GetKnowledgeGraphDataByNodeId took {elapsed3.TotalSeconds} seconds.");
+        var buildSw = Stopwatch.StartNew();
+        var data = await BuildKnowledgeGraphDataFromTriplesAsync(nodeTagTriples, language);
+        buildSw.Stop();
+        totalSw.Stop();
 
-        if (!string.IsNullOrEmpty(userId))
-        {
-            var data_pending = await GetPendingNodesByUserIdAsync(userId);
-            return new { data, data_pending };
-        }
+        _logger.LogInformation(
+            "KG GetNodeInView network graph built. zoomLevels={ZoomLevels} nodes={NodeCount} links={LinkCount} buildMs={BuildMs} totalMs={TotalMs}",
+            string.Join(",", zoomLevelList),
+            data.Nodes?.Count ?? 0,
+            data.Links?.Count ?? 0,
+            buildSw.ElapsedMilliseconds,
+            totalSw.ElapsedMilliseconds);
 
         return new { data };
     }
@@ -308,12 +395,48 @@ public class KnowledgeGraphService
     public async Task<GraphDTO> GetAdjacentNodesByLevelAsync(IEnumerable<string> parentIds, string zoomLevel)
     {
         var parentGuids = parentIds.Select(Guid.Parse).ToList();
-        var childNodeIds = await _graphRepository.GetAdjacentNodesByLevelAsync(parentGuids, zoomLevel);
-        var allNodeIds = parentGuids.Concat(childNodeIds).Distinct().ToList();
+        var parentChildLinks = await _graphRepository.GetAdjacentNodeLinksByLevelAsync(parentGuids, zoomLevel);
+        var childNodeIds = parentChildLinks
+            .Select(link => link.ChildId)
+            .Distinct()
+            .ToList();
 
-        var allTagIds = await _graphRepository.GetAllTagsRelatedToNodesAsync(allNodeIds);
+        if (childNodeIds.Count == 0)
+        {
+            return new GraphDTO
+            {
+                Nodes = new List<NodeDTO>(),
+                Links = new List<LinkDTO>()
+            };
+        }
 
-        return await GetKnowledgeGraphDataByNodeId(allNodeIds, allTagIds);
+        var childNames = await _knowledgeRepo.GetNodesNamesAsync(childNodeIds);
+
+        var nodes = childNodeIds
+            .Select(nodeId => new NodeDTO
+            {
+                Id = nodeId,
+                Name = childNames.TryGetValue(nodeId, out var name) ? name : nodeId.ToString(),
+                TagLevel = zoomLevel
+            })
+            .ToList();
+
+        var links = parentChildLinks
+            .Select(link => new LinkDTO
+            {
+                Source = link.ParentId,
+                Target = link.ChildId,
+                Relation = "CONTAIN"
+            })
+            .GroupBy(link => new { link.Source, link.Target, link.Relation })
+            .Select(group => group.First())
+            .ToList();
+
+        return new GraphDTO
+        {
+            Nodes = nodes,
+            Links = links
+        };
     }
 
     public async Task<IEnumerable<Guid>> GetAllKnowledgeNodeIdsAsync()
@@ -459,6 +582,178 @@ public class KnowledgeGraphService
             Nodes = sqlNodes,
             Links = linksDto
         };
+    }
+
+    private async Task<GraphDTO> BuildKnowledgeGraphDataFromTriplesAsync(
+        IEnumerable<(Guid NodeId, Guid TagId, string TagLevel)> nodeTagTriples,
+        string language)
+    {
+        var totalSw = Stopwatch.StartNew();
+        var triples = (nodeTagTriples ?? Enumerable.Empty<(Guid NodeId, Guid TagId, string TagLevel)>()).ToList();
+        if (triples.Count == 0)
+        {
+            _logger.LogInformation("KG graph build skipped because triples are empty.");
+            return new GraphDTO
+            {
+                Nodes = new List<NodeDTO>(),
+                Links = new List<LinkDTO>()
+            };
+        }
+
+        var allNodeIds = triples.Select(x => x.NodeId).Distinct().ToList();
+        var allTagIds = triples.Select(x => x.TagId).Distinct().ToList();
+        var nodeToLevel = triples
+            .GroupBy(x => x.NodeId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.TagLevel).First());
+
+        var repMeasured = await MeasureAsync(() => GetCachedRepresentativeNodeIdsAsync(allTagIds));
+        var repMap = repMeasured.Result;
+        var repNodeIds = repMap.Values.Distinct().ToList();
+        var nodeIdsToBuild = allNodeIds.Union(repNodeIds).Distinct().ToList();
+
+        var levelsMap = new Dictionary<Guid, string>(nodeToLevel);
+        var missingLevels = nodeIdsToBuild.Where(id => !levelsMap.ContainsKey(id)).ToList();
+        var levelsSw = Stopwatch.StartNew();
+        if (missingLevels.Count > 0)
+        {
+            var fetched = await _graphRepository.GetNodeLevelsByNodeIdsAsync(missingLevels);
+            foreach (var kv in fetched)
+            {
+                levelsMap[kv.Key] = kv.Value;
+            }
+        }
+        levelsSw.Stop();
+
+        var namesTask = MeasureAsync(() => GetCachedCurrentNodeNamesAsync(nodeIdsToBuild, language));
+        var containTask = MeasureAsync(() => GetCachedTagContainRelationsAsync(allTagIds));
+        await Task.WhenAll(namesTask, containTask);
+        var nodesDict = namesTask.Result.Result;
+        var sqlNodes = nodesDict.Select(kvp => new NodeDTO
+        {
+            Id = kvp.Key,
+            Name = kvp.Value,
+            TagLevel = levelsMap.TryGetValue(kvp.Key, out var lvl) ? lvl : "Keyword"
+        }).ToList();
+
+        var tagContainRelations = containTask.Result.Result;
+
+        var linksSw = Stopwatch.StartNew();
+        var linksDto = new List<LinkDTO>();
+
+        linksDto.AddRange(tagContainRelations
+            .Where(relation => repMap.ContainsKey(relation.ParentTagId) && repMap.ContainsKey(relation.ChildTagId))
+            .Select(relation => new LinkDTO
+            {
+                Source = repMap[relation.ParentTagId],
+                Target = repMap[relation.ChildTagId],
+                Relation = "CONTAIN"
+            }));
+
+        linksDto.AddRange(triples
+            .Where(triple => repMap.ContainsKey(triple.TagId))
+            .Select(triple => new LinkDTO
+            {
+                Source = repMap[triple.TagId],
+                Target = triple.NodeId,
+                Relation = "CONTAIN"
+            }));
+
+        var dedupedLinks = linksDto
+            .GroupBy(link => new { link.Source, link.Target, link.Relation })
+            .Select(group => group.First())
+            .ToList();
+        linksSw.Stop();
+        totalSw.Stop();
+        _logger.LogInformation(
+            "KG graph build segments. triples={TripleCount} sourceNodes={SourceNodeCount} sourceTags={SourceTagCount} representativeTags={RepresentativeTagCount} representativeFetchMs={RepresentativeFetchMs} levelFillMs={LevelFillMs} nodeNameMs={NodeNameMs} containMs={ContainMs} linkAssembleMs={LinkAssembleMs} builtNodes={BuiltNodeCount} builtLinks={BuiltLinkCount} totalMs={TotalMs}",
+            triples.Count,
+            allNodeIds.Count,
+            allTagIds.Count,
+            repMap.Count,
+            repMeasured.ElapsedMs,
+            levelsSw.ElapsedMilliseconds,
+            namesTask.Result.ElapsedMs,
+            containTask.Result.ElapsedMs,
+            linksSw.ElapsedMilliseconds,
+            sqlNodes.Count,
+            dedupedLinks.Count,
+            totalSw.ElapsedMilliseconds);
+
+        return new GraphDTO
+        {
+            Nodes = sqlNodes,
+            Links = dedupedLinks
+        };
+    }
+
+    private Task<Dictionary<Guid, Guid>> GetCachedRepresentativeNodeIdsAsync(IReadOnlyCollection<Guid> tagIds)
+    {
+        if (tagIds.Count == 0)
+        {
+            return Task.FromResult(new Dictionary<Guid, Guid>());
+        }
+
+        var cacheKey = BuildGuidSetCacheKey("kg:repmap", tagIds);
+        return _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+            return await _tagRepo.GetRepresentativeNodeIdsAsync(tagIds);
+        })!;
+    }
+
+    private Task<Dictionary<Guid, string>> GetCachedCurrentNodeNamesAsync(IReadOnlyCollection<Guid> stableIds, string language)
+    {
+        if (stableIds.Count == 0)
+        {
+            return Task.FromResult(new Dictionary<Guid, string>());
+        }
+
+        var cacheKey = BuildGuidSetCacheKey($"kg:nodenames:{language}", stableIds);
+        return _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2);
+            return await _knowledgeRepo.GetCurrentNodeNamesByStableIdsAsync(stableIds, language);
+        })!;
+    }
+
+    private Task<List<TagContainRelationDTO>> GetCachedTagContainRelationsAsync(IReadOnlyCollection<Guid> tagIds)
+    {
+        if (tagIds.Count == 0)
+        {
+            return Task.FromResult(new List<TagContainRelationDTO>());
+        }
+
+        var cacheKey = BuildGuidSetCacheKey("kg:contain", tagIds);
+        return _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+            return await _graphRepository.GetPureTagContainRelationsAsync(tagIds);
+        })!;
+    }
+
+    private Task<List<Guid>> GetCachedTagIdsByTagTypeAsync(string tagSystem)
+    {
+        var cacheKey = $"kg:tagsystem:{tagSystem}";
+        return _cache.GetOrCreateAsync(cacheKey, async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5);
+            return (await _tagRepo.GetTagNodeIdsByTagTypeAsync(tagSystem)).Distinct().ToList();
+        })!;
+    }
+
+    private static string BuildGuidSetCacheKey(string prefix, IEnumerable<Guid> ids)
+    {
+        var joined = string.Join(",", ids.OrderBy(id => id).Select(id => id.ToString("N")));
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(joined)));
+        return $"{prefix}:{hash}";
+    }
+
+    private static async Task<(T Result, long ElapsedMs)> MeasureAsync<T>(Func<Task<T>> work)
+    {
+        var sw = Stopwatch.StartNew();
+        var result = await work();
+        sw.Stop();
+        return (result, sw.ElapsedMilliseconds);
     }
 
     // Helpers
@@ -701,8 +996,24 @@ public class KnowledgeGraphService
 
     public async Task<IReadOnlyList<PendingNodeSummary>> GetPendingNodesByUserIdAsync(string userId)
     {
-        var drafts = await _workflow.GetPendingNodeDraftsAsync();
-        return drafts.Where(x => string.Equals(x.SubmittedBy, userId, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            return Array.Empty<PendingNodeSummary>();
+        }
+
+        return await _context.KnowledgeNodes
+            .AsNoTracking()
+            .Where(x => x.Status == "Draft" && !x.IsCurrent && x.CreatedBy == userId)
+            .OrderByDescending(x => x.CreatedAt ?? DateTimeOffset.MinValue)
+            .Select(x => new PendingNodeSummary(
+                x.StableId,
+                x.Id!.Value,
+                x.Name ?? string.Empty,
+                x.Description,
+                x.CreatedAt,
+                x.CreatedBy
+            ))
+            .ToListAsync();
     }
 
     public Task<IReadOnlyList<PendingTagSummary>> GetPendingTagsAsync()
@@ -712,6 +1023,17 @@ public class KnowledgeGraphService
     {
         var drafts = await _workflow.GetPendingTagDraftsAsync();
         return drafts.Where(x => string.Equals(x.SubmittedBy, userId, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    private static object? UnwrapGraphPayload(object? payload)
+    {
+        if (payload == null)
+        {
+            return null;
+        }
+
+        var prop = payload.GetType().GetProperty("data");
+        return prop?.GetValue(payload) ?? payload;
     }
 
     public async Task<List<int>> CountContributedNodesAndLinks(string userId)

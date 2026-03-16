@@ -45,13 +45,14 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         public async Task<IActionResult> GetKnowledgeGraph(
             [FromQuery] string tagSystem = "MainTag",
             [FromQuery] string viewType = "network",
-            [FromQuery] string lang = "zh")
+            [FromQuery] string lang = "zh",
+            [FromQuery] bool includePending = false)
         {
             string userId = User?.Identity?.IsAuthenticated == true
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                 : string.Empty;
 
-            var result = await _knowledgeGraphService.GetKnowledgeGraphAsync(tagSystem, viewType, userId, lang);
+            var result = await _knowledgeGraphService.GetKnowledgeGraphAsync(tagSystem, viewType, userId, lang, includePending);
             return Ok(result);
         }
 
@@ -60,7 +61,8 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             [FromQuery] string tagSystem = "MainTag",
             [FromQuery] string viewType = "network",
             [FromQuery] string zoomLevel = "Field",
-            [FromQuery] string lang = "zh")
+            [FromQuery] string lang = "zh",
+            [FromQuery] bool includePending = false)
         {
             try
             {
@@ -79,7 +81,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 // Find the zoom levels greater than or equal to the requested zoom level
                 var zoomLevels = validZoomLevels.SkipWhile(z => z != zoomLevel).ToList();
 
-                var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId, lang);
+                var result = await _knowledgeGraphService.GetKnowledgeGraphInViewAsync(tagSystem, viewType, zoomLevels, userId, lang, includePending);
                 return Ok(result);
             }
             catch (Neo4j.Driver.ServiceUnavailableException)

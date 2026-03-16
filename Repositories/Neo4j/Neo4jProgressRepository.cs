@@ -88,6 +88,149 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
         return new UserPlanProgressDto(progress, Enumerable.Empty<UserLessonProgressDto>(), advProgress);
     }
 
+    public async Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetMyPlanProgressSnapshotAsync(string userId, Guid planId)
+    {
+        await using var session = _driver.AsyncSession();
+        var rows = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+MATCH (p:StudyPlan {id:$planId})-[hs:HAS_STEP]->(l:Lesson)
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (u:User {id:$userId})-[c:COMPLETED]->(r)
+RETURN l.id AS lessonId,
+       hs.type AS stepType,
+       collect(DISTINCT r.id) AS resourceIds,
+       collect(DISTINCT CASE WHEN c IS NULL THEN NULL ELSE r.id END) AS completedResourceIds";
+            var cursor = await tx.RunAsync(cypher, new { planId = planId.ToString(), userId });
+            return await cursor.ToListAsync();
+        });
+
+        var allResourceIds = new HashSet<Guid>();
+        var completedResourceIds = new HashSet<Guid>();
+        var advancedResourceIds = new HashSet<Guid>();
+        var advancedCompletedIds = new HashSet<Guid>();
+        var perLesson = new List<UserLessonProgressDto>();
+
+        foreach (var row in rows)
+        {
+            var lessonIdStr = row["lessonId"].As<string?>();
+            Guid.TryParse(lessonIdStr, out var lessonId);
+            var stepType = row["stepType"].As<string?>();
+
+            var lessonResourceIds = new HashSet<Guid>();
+            foreach (var raw in row["resourceIds"].As<List<object?>>())
+            {
+                var value = raw?.ToString();
+                if (!Guid.TryParse(value, out var resourceId))
+                {
+                    continue;
+                }
+
+                lessonResourceIds.Add(resourceId);
+                allResourceIds.Add(resourceId);
+                if (StudyPlanStepTypes.AdvancedTopicAliases.Contains(stepType ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+                {
+                    advancedResourceIds.Add(resourceId);
+                }
+            }
+
+            var lessonCompletedIds = new HashSet<Guid>();
+            foreach (var raw in row["completedResourceIds"].As<List<object?>>())
+            {
+                var value = raw?.ToString();
+                if (!Guid.TryParse(value, out var resourceId))
+                {
+                    continue;
+                }
+
+                lessonCompletedIds.Add(resourceId);
+                completedResourceIds.Add(resourceId);
+                if (StudyPlanStepTypes.AdvancedTopicAliases.Contains(stepType ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+                {
+                    advancedCompletedIds.Add(resourceId);
+                }
+            }
+
+            var lessonTotal = lessonResourceIds.Count;
+            var lessonCompleted = lessonCompletedIds.Count;
+            var lessonProgress = lessonTotal == 0 ? 0.0 : (double)lessonCompleted / lessonTotal;
+            perLesson.Add(new UserLessonProgressDto(lessonId, lessonProgress, lessonCompleted, lessonTotal));
+        }
+
+        var totalCount = allResourceIds.Count;
+        var completedCount = completedResourceIds.Count;
+        var advancedTotalCount = advancedResourceIds.Count;
+        var advancedCompletedCount = advancedCompletedIds.Count;
+
+        var progress = totalCount == 0 ? 0.0 : ((double)completedCount / totalCount) * 100.0;
+        var advancedProgress = advancedTotalCount == 0 ? 0.0 : ((double)advancedCompletedCount / advancedTotalCount) * 100.0;
+
+        return (new UserPlanProgressDto(progress, perLesson, advancedProgress), completedResourceIds);
+    }
+
+    public async Task<Dictionary<Guid, UserPlanProgressDto>> GetMyPlanProgressByPlanIdsAsync(string userId, IEnumerable<Guid> planIds)
+    {
+        var ids = planIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        var result = ids.ToDictionary(
+            id => id,
+            _ => new UserPlanProgressDto(0.0, Enumerable.Empty<UserLessonProgressDto>(), 0.0));
+        if (ids.Count == 0)
+        {
+            return result;
+        }
+
+        await using var session = _driver.AsyncSession();
+        var rows = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+UNWIND $planIds AS pid
+MATCH (p:StudyPlan {id: pid})
+OPTIONAL MATCH (p)-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
+WITH p, collect(DISTINCT r) AS totalResources
+OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+WHERE rc IN totalResources
+WITH p, totalResources, collect(DISTINCT rc) AS completedResources
+OPTIONAL MATCH (p)-[hs:HAS_STEP]->(l:Lesson)
+WHERE hs.type IN $advancedTypes
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(ar:Resource)
+WITH p, totalResources, completedResources, collect(DISTINCT ar) AS totalAdvancedResources
+OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(arc:Resource)
+WHERE arc IN totalAdvancedResources
+RETURN p.id AS planId,
+       size(totalResources) AS totalCount,
+       size(completedResources) AS completedCount,
+       size(totalAdvancedResources) AS advancedTotalCount,
+       size(collect(DISTINCT arc)) AS advancedCompletedCount";
+            var cursor = await tx.RunAsync(cypher, new
+            {
+                planIds = ids.Select(id => id.ToString()).ToList(),
+                userId,
+                advancedTypes = StudyPlanStepTypes.AdvancedTopicAliases
+            });
+            return await cursor.ToListAsync();
+        });
+
+        foreach (var row in rows)
+        {
+            var planIdStr = row["planId"].As<string?>();
+            if (!Guid.TryParse(planIdStr, out var planId))
+            {
+                continue;
+            }
+
+            var total = row["totalCount"].As<int>();
+            var completed = row["completedCount"].As<int>();
+            var advancedTotal = row["advancedTotalCount"].As<int>();
+            var advancedCompleted = row["advancedCompletedCount"].As<int>();
+            var progress = total == 0 ? 0.0 : ((double)completed / total) * 100.0;
+            var advancedProgress = advancedTotal == 0 ? 0.0 : ((double)advancedCompleted / advancedTotal) * 100.0;
+
+            result[planId] = new UserPlanProgressDto(progress, Enumerable.Empty<UserLessonProgressDto>(), advancedProgress);
+        }
+
+        return result;
+    }
+
     public async Task<UserLessonProgressDto> GetMyLessonProgressAsync(string userId, Guid lessonId)
     {
         await using var session = _driver.AsyncSession();
@@ -110,38 +253,8 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
 
     public async Task<UserPlanProgressDto> GetMyPlanProgressWithLessonsAsync(string userId, Guid planId)
     {
-        await using var session = _driver.AsyncSession();
-
-        // Overall plan progress
-        var overall = await GetMyPlanProgressAsync(userId, planId);
-
-        // Per-lesson progress
-        var perLesson = await session.ExecuteReadAsync(async tx =>
-        {
-            var cypher = @"
-MATCH (p:StudyPlan {id:$planId})-[:HAS_STEP]->(l:Lesson)
-OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
-WITH l, COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
-WHERE rc IN total
-WITH l, size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
-RETURN l.id AS lessonId, completed AS completed, totalResources AS totalResources
-";
-            var cursor = await tx.RunAsync(cypher, new { planId = planId.ToString(), userId });
-            var list = new List<UserLessonProgressDto>();
-            await cursor.ForEachAsync(r =>
-            {
-                var lidStr = r["lessonId"].As<string>();
-                Guid.TryParse(lidStr, out var lid);
-                var completed = r["completed"].As<int>();
-                var total = r["totalResources"].As<int>();
-                var progress = total == 0 ? 0.0 : (double)completed / total;
-                list.Add(new UserLessonProgressDto(lid, progress, completed, total));
-            });
-            return list;
-        });
-
-        return new UserPlanProgressDto(overall.planProgress, perLesson, overall.advancedTopicProgress);
+        var snapshot = await GetMyPlanProgressSnapshotAsync(userId, planId);
+        return snapshot.progress;
     }
 
     public async Task<CohortSummaryDto> GetCohortSummaryAsync(Guid cohortId)
@@ -323,15 +436,74 @@ RETURN c IS NULL AS completedNow
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-UNWIND $ids AS rid
-MATCH (r:Resource {id: rid})
-WITH COLLECT(r) AS target
 MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
-WHERE rc IN target
+WHERE rc.id IN $ids
 RETURN COLLECT(DISTINCT rc.id) AS completedIds
 ";
             var idsStr = ids.Select(x => x.ToString()).ToArray();
             var cursor = await tx.RunAsync(cypher, new { userId, ids = idsStr });
+            var rec = await cursor.SingleAsync();
+            var arr = rec["completedIds"].As<List<object>>();
+            var set = new HashSet<Guid>();
+            foreach (var o in arr)
+            {
+                var s = o?.ToString();
+                if (Guid.TryParse(s, out var gid)) set.Add(gid);
+            }
+            return set;
+        });
+    }
+
+    public async Task<HashSet<Guid>> GetCompletedResourceIdsForPlanAsync(string userId, Guid planStableId)
+    {
+        if (planStableId == Guid.Empty)
+        {
+            return new HashSet<Guid>();
+        }
+
+        await using var session = _driver.AsyncSession();
+        return await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+MATCH (u:User {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(:Lesson)<-[:HAS_STEP]-(p:StudyPlan {id:$planId})
+RETURN COLLECT(DISTINCT r.id) AS completedIds
+";
+            var cursor = await tx.RunAsync(cypher, new
+            {
+                userId,
+                planId = planStableId.ToString()
+            });
+            var rec = await cursor.SingleAsync();
+            var arr = rec["completedIds"].As<List<object>>();
+            var set = new HashSet<Guid>();
+            foreach (var o in arr)
+            {
+                var s = o?.ToString();
+                if (Guid.TryParse(s, out var gid)) set.Add(gid);
+            }
+            return set;
+        });
+    }
+
+    public async Task<HashSet<Guid>> GetCompletedResourceIdsForLessonAsync(string userId, Guid lessonId)
+    {
+        if (lessonId == Guid.Empty)
+        {
+            return new HashSet<Guid>();
+        }
+
+        await using var session = _driver.AsyncSession();
+        return await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+MATCH (u:User {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(l:Lesson {id:$lessonId})
+RETURN COLLECT(DISTINCT r.id) AS completedIds
+";
+            var cursor = await tx.RunAsync(cypher, new
+            {
+                userId,
+                lessonId = lessonId.ToString()
+            });
             var rec = await cursor.SingleAsync();
             var arr = rec["completedIds"].As<List<object>>();
             var set = new HashSet<Guid>();

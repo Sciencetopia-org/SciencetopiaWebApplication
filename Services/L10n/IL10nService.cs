@@ -88,6 +88,7 @@ namespace Sciencetopia.Services.L10n
 
             // Support both version-id and stable-id inputs
             var setId = await _db.KnowledgeNodes
+                .AsNoTracking()
                 .Where(n => (n.Id.HasValue && n.Id.Value == nodeId) || n.StableId == nodeId)
                 .Select(n => n.DefaultL10nSetId)
                 .FirstOrDefaultAsync();
@@ -124,6 +125,7 @@ namespace Sciencetopia.Services.L10n
 
             // Load nodes matching either version-id or stable-id from the inputs
             var nodes = await _db.KnowledgeNodes
+                .AsNoTracking()
                 .Where(n => n.Id.HasValue)
                 .Where(n => idSet.Contains(n.Id!.Value) || idSet.Contains(n.StableId))
                 .Select(n => new { VersionId = n.Id!.Value, n.StableId, n.DefaultL10nSetId })
@@ -143,6 +145,7 @@ namespace Sciencetopia.Services.L10n
 
             var setIds = mapRequestedIdToSet.Values.Distinct().ToList();
             var items = await (from si in _db.L10nSetItems
+                               .AsNoTracking()
                                join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
                                where setIds.Contains(si.L10nSetId)
                                      && i.FieldKey == fieldKey
@@ -233,7 +236,7 @@ namespace Sciencetopia.Services.L10n
             var key = CacheKey(tagId, fieldKey, lang);
             if (_cache.TryGetValue(key, out string? cached)) return cached;
 
-            var setId = await _db.Tags.Where(t => t.Id == tagId).Select(t => t.DefaultL10nSetId).FirstOrDefaultAsync();
+            var setId = await _db.Tags.AsNoTracking().Where(t => t.Id == tagId).Select(t => t.DefaultL10nSetId).FirstOrDefaultAsync();
             if (!setId.HasValue) return null;
             var q = from si in _db.L10nSetItems
                     join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
@@ -254,17 +257,39 @@ namespace Sciencetopia.Services.L10n
             var result = new Dictionary<Guid, string>();
             if (idSet.Count == 0) return result;
 
+            var sortedIds = idSet.OrderBy(x => x).ToList();
+            var cacheKey = $"l10n:tagmany:{fieldKey}:{lang ?? "_"}:{string.Join(",", sortedIds)}";
+            if (_cache.TryGetValue(cacheKey, out Dictionary<Guid, string>? cached) && cached != null)
+            {
+                return cached;
+            }
+
             var tags = await _db.Tags
-                .Where(t => t.Id.HasValue && idSet.Contains(t.Id.Value))
-                .Select(t => new { TagId = t.Id!.Value, t.DefaultL10nSetId })
+                .AsNoTracking()
+                .Where(t => t.Id.HasValue && (idSet.Contains(t.Id.Value) || idSet.Contains(t.StableId)))
+                .Select(t => new { VersionId = t.Id!.Value, t.StableId, t.DefaultL10nSetId })
                 .ToListAsync();
 
-            var mapTagToSet = tags.Where(x => x.DefaultL10nSetId.HasValue)
-                                   .ToDictionary(x => x.TagId, x => x.DefaultL10nSetId!.Value);
+            var mapTagToSet = new Dictionary<Guid, Guid>();
+            foreach (var tag in tags.Where(x => x.DefaultL10nSetId.HasValue))
+            {
+                var setId = tag.DefaultL10nSetId!.Value;
+                if (idSet.Contains(tag.VersionId))
+                {
+                    mapTagToSet[tag.VersionId] = setId;
+                }
+
+                if (idSet.Contains(tag.StableId))
+                {
+                    mapTagToSet[tag.StableId] = setId;
+                }
+            }
+
             if (mapTagToSet.Count == 0) return result;
 
             var setIds = mapTagToSet.Values.Distinct().ToList();
             var items = await (from si in _db.L10nSetItems
+                               .AsNoTracking()
                                join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
                                where setIds.Contains(si.L10nSetId)
                                      && i.FieldKey == fieldKey
@@ -286,6 +311,7 @@ namespace Sciencetopia.Services.L10n
                     result[tagId] = text;
             }
 
+            _cache.Set(cacheKey, result, TimeSpan.FromMinutes(10));
             return result;
         }
 

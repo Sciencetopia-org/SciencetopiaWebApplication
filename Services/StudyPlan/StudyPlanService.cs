@@ -4,6 +4,7 @@ using System.Linq;
 using Sciencetopia.Constants;
 using Sciencetopia.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -12,14 +13,32 @@ public class StudyPlanService
     private readonly IDriver _neo4jDriver;
     private readonly ILogger<StudyPlanService> _logger;
     private readonly IStudyPlanRepository _sqlRepository;
+    private readonly IMemoryCache _cache;
     private readonly ITagRepository? _tagRepo; // optional via DI in controller methods
     private readonly ITagResolutionService? _tagResolution;
+    private static readonly TimeSpan PlanDetailCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan PlanEntityCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan LessonDetailCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TagNameMapCacheTtl = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan LessonGraphMetaCacheTtl = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan SingleLessonGraphMetaCacheTtl = TimeSpan.FromMinutes(10);
+    private static readonly JsonSerializerOptions CloneJsonOptions = new(JsonSerializerDefaults.Web);
 
-    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository)
+    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository, IMemoryCache cache)
     {
         _neo4jDriver = neo4jDriver;
         _logger = logger;
         _sqlRepository = sqlRepository;
+        _cache = cache;
+    }
+
+    private void InvalidatePlanDetailCache(Guid planVersionId)
+    {
+        if (planVersionId != Guid.Empty)
+        {
+            _cache.Remove($"studyplan:detail:{planVersionId}");
+            _cache.Remove($"studyplan:entity:{planVersionId}");
+        }
     }
 
     private async Task TryAutoTagAsync(string planStableId, StudyPlanDetail planDto, string userId)
@@ -86,9 +105,10 @@ public class StudyPlanService
         IDriver neo4jDriver,
         ILogger<StudyPlanService> logger,
         IStudyPlanRepository sqlRepository,
+        IMemoryCache cache,
         ITagRepository tagRepository,
         ITagResolutionService tagResolution)
-        : this(neo4jDriver, logger, sqlRepository)
+        : this(neo4jDriver, logger, sqlRepository, cache)
     {
         _tagRepo = tagRepository;
         _tagResolution = tagResolution;
@@ -160,6 +180,7 @@ public class StudyPlanService
         planDto.IsCurrent = true;
         planDto.Status = planEntity.Status;
         planDto.PublishedAt = planEntity.PublishedAt;
+        InvalidatePlanDetailCache(planVersionId);
 
         return planVersionId.ToString();
     }
@@ -543,6 +564,8 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             await _sqlRepository.UpdateStudyPlanAsync(targetVersion);
         }
         await UpsertStudyPlanGraphAsync(stableId.ToString(), updatedStudyPlan.StudyPlan, targetVersion.VersionNumber);
+        InvalidatePlanDetailCache(existingPlan.Id);
+        InvalidatePlanDetailCache(targetVersion.Id);
 
         updatedStudyPlan.StudyPlan.Id = targetVersion.Id.ToString();
         updatedStudyPlan.StudyPlan.StableId = stableId.ToString();
@@ -702,13 +725,44 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             return null;
         }
 
-        var entity = await _sqlRepository.GetStudyPlanByIdAsync(studyPlanId);
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
+        var cacheKey = $"studyplan:detail:{studyPlanId}";
+        if (_cache.TryGetValue<StudyPlanDetail>(cacheKey, out var cachedDetail))
+        {
+            totalSw.Stop();
+            _logger.LogInformation("StudyPlan.GetStudyPlanById cache hit. planId={PlanId} elapsedMs={ElapsedMs}", studyPlanId, totalSw.ElapsedMilliseconds);
+            return new StudyPlanDTO { StudyPlan = CloneDetail(cachedDetail) };
+        }
+
+        var entitySw = System.Diagnostics.Stopwatch.StartNew();
+        var entityCacheKey = $"studyplan:entity:{studyPlanId}";
+        if (!_cache.TryGetValue<StudyPlanEntity>(entityCacheKey, out var entity))
+        {
+            entity = await _sqlRepository.GetStudyPlanByIdAsync(studyPlanId);
+            if (entity != null)
+            {
+                _cache.Set(entityCacheKey, entity, PlanEntityCacheTtl);
+            }
+        }
+        entitySw.Stop();
         if (entity == null)
         {
             return null;
         }
 
+        var detailSw = System.Diagnostics.Stopwatch.StartNew();
         var detail = await BuildPlanDetailAsync(entity, requesterId);
+        detailSw.Stop();
+
+        _cache.Set(cacheKey, detail, PlanDetailCacheTtl);
+        totalSw.Stop();
+        _logger.LogInformation(
+            "StudyPlan.GetStudyPlanById built. planId={PlanId} entityMs={EntityMs} detailMs={DetailMs} totalMs={TotalMs} lessons={LessonCount}",
+            studyPlanId,
+            entitySw.ElapsedMilliseconds,
+            detailSw.ElapsedMilliseconds,
+            totalSw.ElapsedMilliseconds,
+            (detail.Prerequisite?.Count ?? 0) + (detail.MainCurriculum?.Count ?? 0) + (detail.AdvancedTopics?.Count ?? 0));
         return new StudyPlanDTO { StudyPlan = detail };
     }
 
@@ -727,6 +781,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         }
 
         await _sqlRepository.DeleteStudyPlanByIdAsync(target.Id.ToString());
+        InvalidatePlanDetailCache(target.Id);
 
         // Best-effort Neo4j cleanup
         try
@@ -882,17 +937,56 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
 
     public async Task<Lesson?> GetLessonDetailAsync(Guid planId, Guid lessonId, string userId)
     {
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
+        var cacheKey = $"studyplan:lesson-detail:{lessonId}";
+        if (_cache.TryGetValue<Lesson>(cacheKey, out var cachedLesson) && cachedLesson != null)
+        {
+            totalSw.Stop();
+            _logger.LogInformation(
+                "StudyPlan.GetLessonDetail cache hit. planId={PlanId} lessonId={LessonId} totalMs={TotalMs}",
+                planId,
+                lessonId,
+                totalSw.ElapsedMilliseconds);
+            return CloneLesson(cachedLesson);
+        }
+
+        var entitySw = System.Diagnostics.Stopwatch.StartNew();
         var lessonEntity = await _sqlRepository.GetLessonByIdAsync(lessonId);
+        entitySw.Stop();
         if (lessonEntity == null)
         {
             return null;
         }
 
-        var dto = MapLessonEntityToDto(lessonEntity);
-        dto.Resources = await LoadLessonResourcesAsync(lessonEntity.Id);
+        var graphSw = System.Diagnostics.Stopwatch.StartNew();
+        var lessonGraphMeta = await LoadSingleLessonGraphMetaAsync(lessonEntity.Id);
+        graphSw.Stop();
 
-        var lessonTags = await GetLessonTagStableIdsFromGraphAsync(lessonEntity.Id);
-        dto.Tags = await BuildTagDtosAsync(lessonTags);
+        var dto = MapLessonEntityToDto(lessonEntity);
+        dto.Resources = lessonGraphMeta.Resources.Select(CloneResource).ToList();
+
+        var tagNamesSw = System.Diagnostics.Stopwatch.StartNew();
+        var lessonTagIds = lessonGraphMeta.TagIds;
+        var tagNameMap = await BuildTagNameMapAsync(lessonTagIds);
+        dto.Tags = lessonTagIds
+            .Select(id => new TagDTO { Id = id, Name = tagNameMap.TryGetValue(id, out var nm) ? nm : null })
+            .ToList();
+        tagNamesSw.Stop();
+
+        _cache.Set(cacheKey, CloneLesson(dto), LessonDetailCacheTtl);
+        totalSw.Stop();
+        _logger.LogInformation(
+            "StudyPlan.GetLessonDetail completed. planId={PlanId} lessonId={LessonId} entityMs={EntityMs} lessonGraphMs={LessonGraphMs} lessonGraphCacheHit={LessonGraphCacheHit} lessonResourceGraphMs={LessonResourceGraphMs} lessonResourceSqlMs={LessonResourceSqlMs} lessonTagGraphMs={LessonTagGraphMs} tagNamesMs={TagNamesMs} totalMs={TotalMs}",
+            planId,
+            lessonId,
+            entitySw.ElapsedMilliseconds,
+            graphSw.ElapsedMilliseconds,
+            lessonGraphMeta.CacheHit,
+            lessonGraphMeta.GraphMs,
+            0,
+            0,
+            tagNamesSw.ElapsedMilliseconds,
+            totalSw.ElapsedMilliseconds);
 
         return dto;
     }
@@ -919,6 +1013,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
 
     private async Task<StudyPlanDetail> BuildPlanDetailAsync(StudyPlanEntity entity, string requesterId)
     {
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
         var stableId = entity.StableId == Guid.Empty ? entity.Id : entity.StableId;
         var detail = new StudyPlanDetail
         {
@@ -935,6 +1030,10 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             AdvancedTopics = new List<Lesson>(),
             Tags = new List<TagDTO>()
         };
+        var snapshotLoadMs = 0L;
+        var lessonLoadMs = 0L;
+        var graphMetaMs = 0L;
+        var planTagMs = 0L;
         // Prepare lesson references (stableId + versionNo, and type) either from lockfile or snapshots
         var desired = new List<(Guid LessonStableId, int VersionNumber, string StepType, int StepOrder)>();
         var lockfile = TryParseLockfile(entity.LockfileJson);
@@ -947,7 +1046,10 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         }
         else
         {
+            var snapshotsSw = System.Diagnostics.Stopwatch.StartNew();
             var snapshots = await _sqlRepository.GetPlanLessonSnapshotsAsync(stableId, entity.VersionNumber);
+            snapshotsSw.Stop();
+            snapshotLoadMs = snapshotsSw.ElapsedMilliseconds;
             foreach (var s in snapshots.OrderBy(x => x.StepOrder))
             {
                 desired.Add((s.LessonStableId, s.LessonVersionNumber, s.StepType, s.StepOrder));
@@ -995,7 +1097,10 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         {
             // Batch load all lessons for involved stableIds and select required versions
             var stableSet = desired.Select(d => d.LessonStableId).Distinct().ToList();
+            var lessonsSw = System.Diagnostics.Stopwatch.StartNew();
             var candidates = await _sqlRepository.GetLessonsByStableIdsAsync(stableSet);
+            lessonsSw.Stop();
+            lessonLoadMs = lessonsSw.ElapsedMilliseconds;
             var picked = new List<(LessonEntity Entity, string StepType, int StepOrder)>();
             // Build lookup of (stableId, versionNo) -> lesson
             var byStable = candidates.GroupBy(l => l.StableId).ToDictionary(g => g.Key, g => g.ToDictionary(x => x.VersionNumber, x => x));
@@ -1008,12 +1113,30 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             }
 
             // Batch load resources from graph for all picked lesson version ids
-            var resourcesMap = await LoadLessonResourcesBatchAsync(picked.Select(p => p.Entity.Id));
-
-            // Batch load tags from graph for all lesson version ids, then resolve names once
-            var tagByLessonId = await GetLessonTagStableIdsByLessonIdsAsync(picked.Select(p => p.Entity.Id));
+            var graphMetaSw = System.Diagnostics.Stopwatch.StartNew();
+            var lessonMetaSw = System.Diagnostics.Stopwatch.StartNew();
+            var lessonGraphMeta = await LoadLessonGraphMetaBatchAsync(picked.Select(p => p.Entity.Id));
+            lessonMetaSw.Stop();
+            var resourcesMap = lessonGraphMeta.ResourcesByLessonId;
+            var tagByLessonId = lessonGraphMeta.TagIdsByLessonId;
             var allTagIds = tagByLessonId.Values.SelectMany(x => x).Distinct().ToList();
+            var tagNamesSw = System.Diagnostics.Stopwatch.StartNew();
             var tagNameMap = await BuildTagNameMapAsync(allTagIds);
+            tagNamesSw.Stop();
+            graphMetaSw.Stop();
+            graphMetaMs = graphMetaSw.ElapsedMilliseconds;
+            _logger.LogInformation(
+                "StudyPlan.BuildPlanDetail graph meta segments. planId={PlanId} version={Version} lessonGraphMs={LessonGraphMs} lessonResourceGraphMs={LessonResourceGraphMs} lessonResourceSqlMs={LessonResourceSqlMs} lessonTagGraphMs={LessonTagGraphMs} lessonGraphCacheHit={LessonGraphCacheHit} tagNamesMs={TagNamesMs} lessonCount={LessonCount} tagCount={TagCount}",
+                entity.Id,
+                entity.VersionNumber,
+                lessonMetaSw.ElapsedMilliseconds,
+                lessonGraphMeta.ResourceGraphMs,
+                lessonGraphMeta.ResourceSqlMs,
+                lessonGraphMeta.TagGraphMs,
+                lessonGraphMeta.CacheHit,
+                tagNamesSw.ElapsedMilliseconds,
+                picked.Count,
+                allTagIds.Count);
 
             // Assemble DTOs in order
             foreach (var item in picked.OrderBy(x => x.StepOrder))
@@ -1028,27 +1151,99 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             }
         }
 
+        var planTagSw = System.Diagnostics.Stopwatch.StartNew();
         var planTags = await _sqlRepository.GetPlanTagStableIdsAsync(stableId, entity.VersionNumber);
         detail.Tags = await BuildTagDtosAsync(planTags);
+        planTagSw.Stop();
+        planTagMs = planTagSw.ElapsedMilliseconds;
+        totalSw.Stop();
+        _logger.LogInformation(
+            "StudyPlan.BuildPlanDetail completed. planId={PlanId} version={Version} desiredLessons={DesiredLessons} snapshotMs={SnapshotMs} lessonLoadMs={LessonLoadMs} graphMetaMs={GraphMetaMs} planTagsMs={PlanTagsMs} totalMs={TotalMs}",
+            entity.Id,
+            entity.VersionNumber,
+            desired.Count,
+            snapshotLoadMs,
+            lessonLoadMs,
+            graphMetaMs,
+            planTagMs,
+            totalSw.ElapsedMilliseconds);
 
         return detail;
     }
 
-    private async Task<Dictionary<Guid, List<ResourceDTO>>> LoadLessonResourcesBatchAsync(IEnumerable<Guid> lessonVersionIds)
+    private sealed record LessonGraphMetaBatch(
+        Dictionary<Guid, List<ResourceDTO>> ResourcesByLessonId,
+        Dictionary<Guid, List<Guid>> TagIdsByLessonId,
+        long ResourceGraphMs,
+        long ResourceSqlMs,
+        long TagGraphMs,
+        bool CacheHit);
+
+    private sealed record LessonResourceBatchResult(
+        Dictionary<Guid, List<ResourceDTO>> ResourcesByLessonId,
+        long GraphMs,
+        long SqlMs);
+
+    private sealed record LessonTagBatchResult(
+        Dictionary<Guid, List<Guid>> TagIdsByLessonId,
+        long QueryMs);
+
+    private sealed record SingleLessonGraphMetaResult(
+        List<ResourceDTO> Resources,
+        List<Guid> TagIds,
+        long GraphMs,
+        bool CacheHit);
+
+    private async Task<LessonGraphMetaBatch> LoadLessonGraphMetaBatchAsync(IEnumerable<Guid> lessonVersionIds)
+    {
+        var ids = lessonVersionIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
+        if (ids.Count == 0)
+        {
+            return new LessonGraphMetaBatch(new Dictionary<Guid, List<ResourceDTO>>(), new Dictionary<Guid, List<Guid>>(), 0, 0, 0, false);
+        }
+
+        ids.Sort();
+        var cacheKey = $"studyplan:lesson-graph-meta:{string.Join(",", ids)}";
+        if (_cache.TryGetValue<LessonGraphMetaBatch>(cacheKey, out var cached) && cached != null)
+        {
+            return cached with { CacheHit = true };
+        }
+
+        var resourcesTask = LoadLessonResourcesBatchAsync(ids);
+        var tagsTask = GetLessonTagStableIdsByLessonIdsAsync(ids);
+        await Task.WhenAll(resourcesTask, tagsTask);
+
+        var resourceBatch = resourcesTask.Result;
+        var tagBatch = tagsTask.Result;
+        var batch = new LessonGraphMetaBatch(
+            resourceBatch.ResourcesByLessonId,
+            tagBatch.TagIdsByLessonId,
+            resourceBatch.GraphMs,
+            resourceBatch.SqlMs,
+            tagBatch.QueryMs,
+            false);
+        _cache.Set(cacheKey, batch, LessonGraphMetaCacheTtl);
+        return batch;
+    }
+
+    private async Task<LessonResourceBatchResult> LoadLessonResourcesBatchAsync(IEnumerable<Guid> lessonVersionIds)
     {
         var ids = lessonVersionIds?.Distinct().ToList() ?? new List<Guid>();
         var result = new Dictionary<Guid, List<ResourceDTO>>();
-        if (ids.Count == 0) return result;
+        if (ids.Count == 0) return new LessonResourceBatchResult(result, 0, 0);
 
         // 1) Read lesson->resource ids from graph in one pass
+        var graphSw = System.Diagnostics.Stopwatch.StartNew();
         var linkRows = new List<(Guid LessonId, string ResourceId, string? OrdKey)>();
         await using (var session = _neo4jDriver.AsyncSession())
         {
             var records = await session.ExecuteReadAsync(async tx =>
             {
-                var cypher = @"MATCH (l:Lesson)-[:HAS_RESOURCE]->(r:Resource)
-                               WHERE l.id IN $lessonIds
-                               RETURN l.id AS lid, r.id AS rid, coalesce(r.order, r.name, r.title) AS ord";
+                var cypher = @"
+UNWIND $lessonIds AS lessonId
+MATCH (l:Lesson {id: lessonId})
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+RETURN lessonId AS lid, r.id AS rid, coalesce(r.order, r.name, r.title) AS ord";
                 var cursor = await tx.RunAsync(cypher, new { lessonIds = ids.Select(x => x.ToString()).ToList() });
                 return await cursor.ToListAsync();
             });
@@ -1063,14 +1258,19 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
                 }
             }
         }
+        graphSw.Stop();
 
         if (linkRows.Count == 0)
-            return ids.ToDictionary(x => x, _ => new List<ResourceDTO>());
+        {
+            return new LessonResourceBatchResult(ids.ToDictionary(x => x, _ => new List<ResourceDTO>()), graphSw.ElapsedMilliseconds, 0);
+        }
 
         // 2) Load all involved resources from SQL once
+        var sqlSw = System.Diagnostics.Stopwatch.StartNew();
         var allResIds = linkRows.Select(x => x.ResourceId).Distinct().ToList();
         var sqlResources = await _sqlRepository.GetResourcesByIdsAsync(allResIds);
         var resMap = sqlResources.ToDictionary(r => r.Id.ToString(), r => r, StringComparer.OrdinalIgnoreCase);
+        sqlSw.Stop();
 
         // 3) Build per-lesson ordered DTO lists
         foreach (var group in linkRows.GroupBy(x => x.LessonId))
@@ -1088,7 +1288,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         {
             result.TryAdd(id, new List<ResourceDTO>());
         }
-        return result;
+        return new LessonResourceBatchResult(result, graphSw.ElapsedMilliseconds, sqlSw.ElapsedMilliseconds);
     }
 
     private async Task ReplaceLessonTagsInGraphAsync(Guid lessonVersionId, IEnumerable<Guid> tagStableIds)
@@ -1118,29 +1318,31 @@ MERGE (t)-[:TAGGED_WITH]->(l)", new { lessonId = lessonVersionId.ToString(), tag
     private async Task<List<Guid>> GetLessonTagStableIdsFromGraphAsync(Guid lessonVersionId)
     {
         var map = await GetLessonTagStableIdsByLessonIdsAsync(new[] { lessonVersionId });
-        return map.TryGetValue(lessonVersionId, out var ids) ? ids : new List<Guid>();
+        return map.TagIdsByLessonId.TryGetValue(lessonVersionId, out var ids) ? ids : new List<Guid>();
     }
 
-    private async Task<Dictionary<Guid, List<Guid>>> GetLessonTagStableIdsByLessonIdsAsync(IEnumerable<Guid> lessonVersionIds)
+    private async Task<LessonTagBatchResult> GetLessonTagStableIdsByLessonIdsAsync(IEnumerable<Guid> lessonVersionIds)
     {
         var ids = lessonVersionIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
         var result = ids.ToDictionary(id => id, _ => new List<Guid>());
         if (ids.Count == 0)
         {
-            return result;
+            return new LessonTagBatchResult(result, 0);
         }
 
+        var querySw = System.Diagnostics.Stopwatch.StartNew();
         await using var session = _neo4jDriver.AsyncSession();
         var records = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
 UNWIND $lessonIds AS lid
-OPTIONAL MATCH (l:Lesson {id: lid})
+MATCH (l:Lesson {id: lid})
 OPTIONAL MATCH (t:Tag)-[:TAGGED_WITH]->(l)
 RETURN lid AS lessonId, collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds";
             var cursor = await tx.RunAsync(cypher, new { lessonIds = ids.Select(x => x.ToString()).ToList() });
             return await cursor.ToListAsync();
         });
+        querySw.Stop();
 
         foreach (var rec in records)
         {
@@ -1163,6 +1365,114 @@ RETURN lid AS lessonId, collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds";
             result[lessonId] = tagList.Distinct().ToList();
         }
 
+        return new LessonTagBatchResult(result, querySw.ElapsedMilliseconds);
+    }
+
+    private async Task<SingleLessonGraphMetaResult> LoadSingleLessonGraphMetaAsync(Guid lessonVersionId)
+    {
+        if (lessonVersionId == Guid.Empty)
+        {
+            return new SingleLessonGraphMetaResult(new List<ResourceDTO>(), new List<Guid>(), 0, false);
+        }
+
+        var cacheKey = $"studyplan:lesson-graph-single:{lessonVersionId}";
+        if (_cache.TryGetValue<SingleLessonGraphMetaResult>(cacheKey, out var cached) && cached != null)
+        {
+            return cached with { CacheHit = true };
+        }
+
+        var graphSw = System.Diagnostics.Stopwatch.StartNew();
+        await using var session = _neo4jDriver.AsyncSession();
+        var record = await session.ExecuteReadAsync(async tx =>
+        {
+            var cypher = @"
+MATCH (l:Lesson {id:$lessonId})
+CALL {
+  WITH l
+  OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
+  WITH collect(DISTINCT {
+    id: r.id,
+    name: coalesce(r.name, r.title, r.id),
+    link: r.link,
+    ord: coalesce(r.order, r.name, r.title, r.id)
+  }) AS resourceRows
+  RETURN [row IN resourceRows WHERE row.id IS NOT NULL] AS resources
+}
+CALL {
+  WITH l
+  OPTIONAL MATCH (t:Tag)-[:TAGGED_WITH]->(l)
+  RETURN collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds
+}
+RETURN resources, tagIds";
+            var cursor = await tx.RunAsync(cypher, new { lessonId = lessonVersionId.ToString() });
+            return await cursor.SingleAsync();
+        });
+        graphSw.Stop();
+
+        var resources = new List<(string Id, string? Name, string? Link, string? Ord)>();
+        foreach (var raw in record["resources"].As<List<object>>())
+        {
+            if (raw is not IReadOnlyDictionary<string, object> row)
+            {
+                continue;
+            }
+
+            var id = row.TryGetValue("id", out var rawId) ? rawId?.ToString() : null;
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                continue;
+            }
+
+            resources.Add((
+                id,
+                row.TryGetValue("name", out var rawName) ? rawName?.ToString() : null,
+                row.TryGetValue("link", out var rawLink) ? rawLink?.ToString() : null,
+                row.TryGetValue("ord", out var rawOrd) ? rawOrd?.ToString() : null));
+        }
+
+        var orderedResources = resources
+            .OrderBy(r => r.Ord, StringComparer.Ordinal)
+            .ToList();
+
+        var sqlResources = await _sqlRepository.GetResourcesByIdsAsync(orderedResources.Select(r => r.Id).Distinct().ToList());
+        var sqlResourceMap = sqlResources.ToDictionary(r => r.Id.ToString(), r => r, StringComparer.OrdinalIgnoreCase);
+
+        var resourceDtos = orderedResources
+            .Select(r =>
+            {
+                if (sqlResourceMap.TryGetValue(r.Id, out var sqlResource))
+                {
+                    return new ResourceDTO
+                    {
+                        Id = sqlResource.Id.ToString(),
+                        Name = string.IsNullOrWhiteSpace(sqlResource.Name) ? r.Id : sqlResource.Name,
+                        Link = string.IsNullOrWhiteSpace(sqlResource.Link) ? r.Link : sqlResource.Link,
+                        Learned = false
+                    };
+                }
+
+                return new ResourceDTO
+                {
+                    Id = r.Id,
+                    Name = string.IsNullOrWhiteSpace(r.Name) ? r.Id : r.Name,
+                    Link = r.Link,
+                    Learned = false
+                };
+            })
+            .ToList();
+
+        var tagIds = new List<Guid>();
+        foreach (var raw in record["tagIds"].As<List<object>>())
+        {
+            var value = raw?.ToString();
+            if (Guid.TryParse(value, out var tagId))
+            {
+                tagIds.Add(tagId);
+            }
+        }
+
+        var result = new SingleLessonGraphMetaResult(resourceDtos, tagIds.Distinct().ToList(), graphSw.ElapsedMilliseconds, false);
+        _cache.Set(cacheKey, result, SingleLessonGraphMetaCacheTtl);
         return result;
     }
 
@@ -1171,7 +1481,17 @@ RETURN lid AS lessonId, collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds";
         if (_tagRepo == null) return new Dictionary<Guid, string>();
         var ids = tagStableIds?.Where(id => id != Guid.Empty).Distinct().ToList() ?? new List<Guid>();
         if (ids.Count == 0) return new Dictionary<Guid, string>();
-        return await _tagRepo.GetTagNamesAsync(ids);
+
+        ids.Sort();
+        var cacheKey = $"studyplan:tag-names:{string.Join(",", ids)}";
+        if (_cache.TryGetValue(cacheKey, out Dictionary<Guid, string>? cached) && cached != null)
+        {
+            return cached;
+        }
+
+        var map = await _tagRepo.GetTagNamesAsync(ids);
+        _cache.Set(cacheKey, map, TagNameMapCacheTtl);
+        return map;
     }
 
     private static void AddLessonByType(StudyPlanDetail detail, string stepType, Lesson lessonDto)
@@ -1188,6 +1508,38 @@ RETURN lid AS lessonId, collect(DISTINCT coalesce(t.stableId, t.id)) AS tagIds";
                 detail.MainCurriculum.Add(lessonDto);
                 break;
         }
+    }
+
+    private static Lesson CloneLesson(Lesson source)
+    {
+        return new Lesson
+        {
+            Id = source.Id,
+            StableId = source.StableId,
+            VersionNumber = source.VersionNumber,
+            Name = source.Name,
+            Description = source.Description,
+            ProgressPercentage = source.ProgressPercentage,
+            FinishedResourcesCount = source.FinishedResourcesCount,
+            Tags = (source.Tags ?? new List<TagDTO>())
+                .Select(t => new TagDTO { Id = t.Id, Name = t.Name })
+                .ToList(),
+            Resources = (source.Resources ?? new List<ResourceDTO>())
+                .Select(CloneResource)
+                .ToList(),
+            AssociatedKnowledgeNodes = source.AssociatedKnowledgeNodes
+        };
+    }
+
+    private static ResourceDTO CloneResource(ResourceDTO resource)
+    {
+        return new ResourceDTO
+        {
+            Id = resource.Id,
+            Name = resource.Name,
+            Link = resource.Link,
+            Learned = resource.Learned
+        };
     }
 
     private static Sciencetopia.DTOs.StudyPlanLockfile? TryParseLockfile(string? json)
@@ -1264,6 +1616,12 @@ ORDER BY ord", new { lessonId = lessonVersionId.ToString() });
             Id = id,
             Name = nameMap.TryGetValue(id, out var name) ? name : null
         }).ToList();
+    }
+
+    private static StudyPlanDetail CloneDetail(StudyPlanDetail source)
+    {
+        var json = JsonSerializer.Serialize(source, CloneJsonOptions);
+        return JsonSerializer.Deserialize<StudyPlanDetail>(json, CloneJsonOptions) ?? new StudyPlanDetail();
     }
 
     private async Task<List<Guid>> ResolveTagIdsAsync(IEnumerable<Guid> tagIds)

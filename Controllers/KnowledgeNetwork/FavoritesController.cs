@@ -250,6 +250,126 @@ public class FavoritesController : ControllerBase
         }
     }
 
+    [HttpPost("NodeStates")]
+    public async Task<IActionResult> GetNodeStates([FromBody] NodeStatesRequest? request)
+    {
+        try
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return Ok(new List<KnowledgeNodeUserStateDTO>());
+            }
+
+            var nodeIds = request?.NodeIds?
+                .Select(id => id?.Trim())
+                .Where(id => !string.IsNullOrWhiteSpace(id) && Guid.TryParse(id, out _))
+                .Select(id => Guid.Parse(id!).ToString())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+
+            if (nodeIds.Count == 0)
+            {
+                return Ok(new List<KnowledgeNodeUserStateDTO>());
+            }
+
+            var query = @"
+                UNWIND $nodeIds AS nodeId
+                MATCH (n:KnowledgeNode {stableId: nodeId})
+                CALL {
+                    WITH n, $userId AS userId
+                    OPTIONAL MATCH (:User {id: userId})-[:OWNS]->(:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
+                    RETURN COUNT(*) > 0 AS isFavorited
+                }
+                CALL {
+                    WITH n, $userId AS userId
+                    OPTIONAL MATCH (n)-[:HAS_RESOURCE]->(r:Resource)
+                    WITH collect(DISTINCT r.id) AS resourceIds, userId
+                    OPTIONAL MATCH (:User {id: userId})-[:COMPLETED]->(cr:Resource)
+                    WHERE cr.id IN resourceIds
+                    RETURN size(resourceIds) AS totalResourceCount,
+                           COUNT(DISTINCT cr) AS completedResourceCount
+                }
+                RETURN nodeId,
+                       isFavorited,
+                       totalResourceCount,
+                       completedResourceCount,
+                       CASE
+                           WHEN totalResourceCount > 0 AND completedResourceCount = totalResourceCount THEN true
+                           ELSE false
+                       END AS isLearned,
+                       CASE
+                           WHEN completedResourceCount > 0 AND completedResourceCount < totalResourceCount THEN true
+                           ELSE false
+                       END AS isPartiallyLearned
+            ";
+
+            var result = await _session.RunAsync(query, new { userId, nodeIds });
+            var data = await result.ToListAsync(record => new KnowledgeNodeUserStateDTO
+            {
+                NodeId = record["nodeId"].As<string>(),
+                IsFavorited = record["isFavorited"].As<bool>(),
+                IsLearned = record["isLearned"].As<bool>(),
+                IsPartiallyLearned = record["isPartiallyLearned"].As<bool>(),
+                TotalResourceCount = record["totalResourceCount"].As<int>(),
+                CompletedResourceCount = record["completedResourceCount"].As<int>()
+            });
+
+            return Ok(data);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
+    [HttpGet("MyDerivedLearned")]
+    public async Task<IActionResult> GetMyDerivedLearnedNodes()
+    {
+        try
+        {
+            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return Ok(new List<object>());
+            }
+
+            var query = @"
+                MATCH (u:User {id: $userId})-[:COMPLETED]->(completed:Resource)<-[:HAS_RESOURCE]-(n:KnowledgeNode)
+                WITH n, COUNT(DISTINCT completed) AS completedResourceCount
+                MATCH (n)-[:HAS_RESOURCE]->(resource:Resource)
+                WITH n, completedResourceCount, COUNT(DISTINCT resource) AS totalResourceCount
+                WHERE totalResourceCount > 0 AND completedResourceCount = totalResourceCount
+                OPTIONAL MATCH (n)<-[:TAGGED_WITH]-(l:TagLevel)
+                RETURN n,
+                       completedResourceCount,
+                       totalResourceCount,
+                       HEAD(COLLECT(DISTINCT l.name)) AS tagLevel
+            ";
+
+            var result = await _session.RunAsync(query, new { userId });
+            var data = await result.ToListAsync(record =>
+            {
+                var node = record["n"].As<INode>();
+                return new
+                {
+                    identity = node.Id,
+                    labels = node.Labels,
+                    properties = node.Properties,
+                    tagLevel = record["tagLevel"].As<string?>(),
+                    completedResourceCount = record["completedResourceCount"].As<int>(),
+                    totalResourceCount = record["totalResourceCount"].As<int>()
+                };
+            });
+
+            return Ok(data);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
     [HttpDelete("{nodeId}")]
     public async Task<IActionResult> RemoveFromFavorites(string nodeId)
     {

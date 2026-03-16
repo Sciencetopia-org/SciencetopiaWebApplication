@@ -3,7 +3,6 @@ using System.Security.Claims;
 using Sciencetopia.DTOs;
 using Sciencetopia.Services.Progress;
 using Sciencetopia.Services;
-using Sciencetopia.DTOs;
 
 namespace Sciencetopia.Controllers.Study;
 
@@ -58,7 +57,7 @@ public class ResourceProgressController : ControllerBase
             if (!allowed) return Forbid();
         }
 
-        await _svc.UndoAsync(userId, resourceId);
+        await _svc.UndoAsync(userId, resourceId, planId, lessonId);
 
         // Compute updated progress to allow immediate UI refresh
         double planProgress = 0;

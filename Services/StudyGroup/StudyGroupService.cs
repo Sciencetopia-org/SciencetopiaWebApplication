@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Models.Enums;
+using Microsoft.Extensions.Caching.Memory;
 using GroupMemberDto = global::GroupMember;
 
     public class StudyGroupService
@@ -17,8 +18,16 @@ using GroupMemberDto = global::GroupMember;
     private readonly ITagResolutionService _tagResolution;
     private readonly ITagRepository _tagRepo;
     private readonly IHubContext<ChatHub> _hubContext;
+    private readonly IMemoryCache _cache;
+    private static readonly TimeSpan GroupDetailCacheTtl = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan GroupMemberCacheTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan GroupTagCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan GroupPreviewCacheTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan GroupRoleCacheTtl = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan JoinRequestCacheTtl = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ActivityLogCacheTtl = TimeSpan.FromSeconds(30);
 
-    public StudyGroupService(IDriver neo4jDriver, UserService userService, IHubContext<ChatHub> hubContext, ApplicationDbContext context, ITagResolutionService tagResolution, ITagRepository tagRepo)
+    public StudyGroupService(IDriver neo4jDriver, UserService userService, IHubContext<ChatHub> hubContext, ApplicationDbContext context, ITagResolutionService tagResolution, ITagRepository tagRepo, IMemoryCache cache)
     {
         _neo4jDriver = neo4jDriver;
         _userService = userService;
@@ -26,7 +35,39 @@ using GroupMemberDto = global::GroupMember;
         _context = context;
         _tagResolution = tagResolution;
         _tagRepo = tagRepo;
+        _cache = cache;
     }
+
+    private void InvalidateGroupCache(Guid groupId)
+    {
+        if (groupId == Guid.Empty)
+        {
+            return;
+        }
+
+        _cache.Remove($"studygroup:detail:{groupId}");
+        _cache.Remove($"studygroup:members:{groupId}");
+        _cache.Remove($"studygroup:tags:{groupId}");
+        _cache.Remove($"studygroup:preview:{groupId}:8");
+        _cache.Remove($"studygroup:preview:{groupId}:8:group");
+        _cache.Remove($"studygroup:joinrequests:{groupId}");
+        _cache.Remove($"studygroup:joinrequests:count:{groupId}");
+        _cache.Remove($"studygroup:activitylogs:{groupId}");
+    }
+
+    private void InvalidateGroupRequestCaches(Guid groupId)
+    {
+        if (groupId == Guid.Empty)
+        {
+            return;
+        }
+
+        _cache.Remove($"studygroup:joinrequests:{groupId}");
+        _cache.Remove($"studygroup:joinrequests:count:{groupId}");
+    }
+
+    private static string GetRoleCacheKey(Guid groupId, string userId)
+        => $"studygroup:role:{groupId}:{userId}";
 
     private static string ToRoleLabel(GroupRole role)
     {
@@ -79,6 +120,104 @@ using GroupMemberDto = global::GroupMember;
             .Select(x => new { x.GroupId, x.UserId, x.Role, x.Status })
             .ToListAsync();
         return rows.Select(x => (x.GroupId, x.UserId, x.Role, (string?)x.Status)).ToList();
+    }
+
+    private async Task<(GroupRole Role, string? Status)?> GetMembershipRowAsync(Guid groupId, string userId)
+    {
+        if (groupId == Guid.Empty || string.IsNullOrWhiteSpace(userId))
+        {
+            return null;
+        }
+
+        var row = await _context.UserGroups.AsNoTracking()
+            .Where(x => x.GroupId == groupId && x.UserId == userId)
+            .Select(x => new { x.Role, x.Status })
+            .FirstOrDefaultAsync();
+
+        return row == null ? null : (row.Role, (string?)row.Status);
+    }
+
+    private async Task<Dictionary<Guid, List<GroupMemberDto>>> GetStudyGroupMembersByGroupsAsync(IEnumerable<Guid> groupIds)
+    {
+        var ids = groupIds
+            .Where(x => x != Guid.Empty)
+            .Distinct()
+            .ToList();
+
+        var result = new Dictionary<Guid, List<GroupMemberDto>>();
+        if (ids.Count == 0)
+        {
+            return result;
+        }
+
+        var missingGroupIds = new List<Guid>();
+        foreach (var groupId in ids)
+        {
+            var cacheKey = $"studygroup:members:{groupId}";
+            if (_cache.TryGetValue<List<GroupMemberDto>>(cacheKey, out var cachedMembers) && cachedMembers != null)
+            {
+                result[groupId] = cachedMembers.Select(m => new GroupMemberDto
+                {
+                    Id = m.Id,
+                    UserName = m.UserName,
+                    AvatarUrl = m.AvatarUrl,
+                    Role = m.Role
+                }).ToList();
+            }
+            else
+            {
+                missingGroupIds.Add(groupId);
+            }
+        }
+
+        if (missingGroupIds.Count == 0)
+        {
+            return result;
+        }
+
+        var membershipRows = await _context.UserGroups.AsNoTracking()
+            .Where(x => missingGroupIds.Contains(x.GroupId))
+            .Select(x => new { x.GroupId, x.UserId, x.Role, x.Status })
+            .ToListAsync();
+
+        var activeRows = membershipRows
+            .Where(x => IsActiveMembershipStatus(x.Status))
+            .ToList();
+
+        var displayInfoByUserId = await _userService.GetUserDisplayInfoByIdsAsync(activeRows.Select(x => x.UserId));
+        var rowsByGroup = activeRows.GroupBy(x => x.GroupId).ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var groupId in missingGroupIds)
+        {
+            rowsByGroup.TryGetValue(groupId, out var rows);
+            var members = new List<GroupMemberDto>(rows?.Count ?? 0);
+
+            if (rows != null)
+            {
+                foreach (var row in rows)
+                {
+                    displayInfoByUserId.TryGetValue(row.UserId, out var displayInfo);
+                    members.Add(new GroupMemberDto
+                    {
+                        Id = row.UserId,
+                        UserName = displayInfo?.UserName ?? string.Empty,
+                        AvatarUrl = displayInfo?.AvatarUrl ?? string.Empty,
+                        Role = ToRoleLabel(row.Role)
+                    });
+                }
+            }
+
+            _cache.Set($"studygroup:members:{groupId}", members, GroupMemberCacheTtl);
+            result[groupId] = members.Select(m => new GroupMemberDto
+            {
+                Id = m.Id,
+                UserName = m.UserName,
+                AvatarUrl = m.AvatarUrl,
+                Role = m.Role
+            }).ToList();
+        }
+
+        return result;
     }
 
     private async Task UpsertGraphMembershipAsync(string groupId, string userId, GroupRole role, DateTime? joinedAt = null)
@@ -267,6 +406,7 @@ SET s.name = coalesce($name, s.name),
 
         group.Status = "approved";
         await _context.SaveChangesAsync();
+        InvalidateGroupCache(gid);
 
         // Reflect status in Neo4j for consistency
         using (var session = _neo4jDriver.AsyncSession())
@@ -288,6 +428,7 @@ SET s.name = coalesce($name, s.name),
 
         group.Status = "rejected";
         await _context.SaveChangesAsync();
+        InvalidateGroupCache(gid);
 
         // Reflect status in Neo4j for consistency
         using (var session = _neo4jDriver.AsyncSession())
@@ -344,17 +485,19 @@ SET s.name = coalesce($name, s.name),
             .Take(take)
             .ToListAsync();
 
+        var groupIds = sqlGroups.Select(x => x.Id).ToList();
+        var membersByGroupId = await GetStudyGroupMembersByGroupsAsync(groupIds);
         var enrichedGroups = new List<StudyGroup>();
         foreach (var entity in sqlGroups)
         {
             var groupId = entity.Id.ToString();
-            var members = await GetStudyGroupMembers(groupId);
+            membersByGroupId.TryGetValue(entity.Id, out var members);
             enrichedGroups.Add(new StudyGroup
             {
                 Id = groupId,
                 Name = entity.Name,
                 Description = entity.Description,
-                MemberIds = members,
+                MemberIds = members ?? new List<GroupMemberDto>(),
                 Status = entity.Status,
                 ImageUrl = entity.ImageUrl
             });
@@ -364,6 +507,17 @@ SET s.name = coalesce($name, s.name),
 
     public async Task<List<TagDTO>> GetGroupTagsAsync(string groupId)
     {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return new List<TagDTO>();
+        }
+
+        var cacheKey = $"studygroup:tags:{gid}";
+        if (_cache.TryGetValue<List<TagDTO>>(cacheKey, out var cachedTags) && cachedTags != null)
+        {
+            return cachedTags.Select(x => new TagDTO { Id = x.Id, Name = x.Name }).ToList();
+        }
+
         using var session = _neo4jDriver.AsyncSession();
         var tagIdStrings = await session.ExecuteReadAsync(async tx =>
         {
@@ -376,11 +530,13 @@ SET s.name = coalesce($name, s.name),
         var ids = new List<Guid>();
         foreach (var s in tagIdStrings)
         {
-            if (Guid.TryParse(s, out var gid)) ids.Add(gid);
+            if (Guid.TryParse(s, out var tagId)) ids.Add(tagId);
         }
         if (ids.Count == 0) return new List<TagDTO>();
         var nameMap = await _tagRepo.GetTagNamesAsync(ids);
-        return ids.Distinct().Select(id => new TagDTO { Id = id, Name = nameMap.TryGetValue(id, out var nm) ? nm : id.ToString() }).ToList();
+        var tags = ids.Distinct().Select(id => new TagDTO { Id = id, Name = nameMap.TryGetValue(id, out var nm) ? nm : id.ToString() }).ToList();
+        _cache.Set(cacheKey, tags, GroupTagCacheTtl);
+        return tags;
     }
 
     public async Task<bool> UpdateGroupTagsAsync(string studyGroupId, List<Guid>? tagIds, List<string>? newTagNames, string userId)
@@ -440,6 +596,7 @@ SET s.name = coalesce($name, s.name),
                 var record = await cursor.SingleAsync();
                 return record["id"].As<string>() != null;
             });
+            InvalidateGroupCache(Guid.Parse(studyGroupId));
             return ok;
         }
         catch
@@ -455,44 +612,139 @@ SET s.name = coalesce($name, s.name),
             return new List<GroupMemberDto>();
         }
 
+        var cacheKey = $"studygroup:members:{gid}";
+        if (_cache.TryGetValue<List<GroupMemberDto>>(cacheKey, out var cachedMembers) && cachedMembers != null)
+        {
+            return cachedMembers.Select(m => new GroupMemberDto
+            {
+                Id = m.Id,
+                UserName = m.UserName,
+                AvatarUrl = m.AvatarUrl,
+                Role = m.Role
+            }).ToList();
+        }
+
         var rows = (await GetMembershipRowsByGroupAsync(gid))
             .Where(x => IsActiveMembershipStatus(x.Status))
             .Select(x => new { x.UserId, x.Role })
             .ToList();
 
-        var members = new List<GroupMemberDto>();
+        var displayInfoByUserId = await _userService.GetUserDisplayInfoByIdsAsync(rows.Select(x => x.UserId));
+        var members = new List<GroupMemberDto>(rows.Count);
         foreach (var row in rows)
         {
-            string userName;
-            try
-            {
-                userName = await _userService.GetUserNameByIdAsync(row.UserId);
-            }
-            catch
-            {
-                userName = string.Empty;
-            }
-
-            string avatarUrl;
-            try
-            {
-                avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(row.UserId);
-            }
-            catch
-            {
-                avatarUrl = string.Empty;
-            }
+            displayInfoByUserId.TryGetValue(row.UserId, out var displayInfo);
 
             members.Add(new GroupMemberDto
             {
                 Id = row.UserId,
-                UserName = userName,
-                AvatarUrl = avatarUrl,
+                UserName = displayInfo?.UserName ?? string.Empty,
+                AvatarUrl = displayInfo?.AvatarUrl ?? string.Empty,
                 Role = ToRoleLabel(row.Role)
             });
         }
 
+        _cache.Set(cacheKey, members, GroupMemberCacheTtl);
         return members;
+    }
+
+    public async Task<List<GroupMemberDto>> GetStudyGroupMemberPreviewAsync(string groupId, int take = 8)
+    {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return new List<GroupMemberDto>();
+        }
+
+        take = Math.Max(1, take);
+        var cacheKey = $"studygroup:preview:{gid}:{take}";
+        if (_cache.TryGetValue<List<GroupMemberDto>>(cacheKey, out var cachedMembers) && cachedMembers != null)
+        {
+            return cachedMembers.Select(m => new GroupMemberDto
+            {
+                Id = m.Id,
+                UserName = m.UserName,
+                AvatarUrl = m.AvatarUrl,
+                Role = m.Role
+            }).ToList();
+        }
+
+        var rows = await _context.UserGroups.AsNoTracking()
+            .Where(x => x.GroupId == gid && (string.IsNullOrEmpty(x.Status) || x.Status == "Active" || x.Status == "active"))
+            .OrderByDescending(x => x.Role)
+            .ThenBy(x => x.JoinedAt)
+            .Select(x => new { x.UserId, x.Role })
+            .Take(take)
+            .ToListAsync();
+
+        var displayInfoByUserId = await _userService.GetUserDisplayInfoByIdsAsync(rows.Select(x => x.UserId));
+        var members = rows.Select(row =>
+        {
+            displayInfoByUserId.TryGetValue(row.UserId, out var displayInfo);
+            return new GroupMemberDto
+            {
+                Id = row.UserId,
+                UserName = displayInfo?.UserName ?? string.Empty,
+                AvatarUrl = displayInfo?.AvatarUrl ?? string.Empty,
+                Role = ToRoleLabel(row.Role)
+            };
+        }).ToList();
+
+        _cache.Set(cacheKey, members, GroupPreviewCacheTtl);
+        return members;
+    }
+
+    public async Task<StudyGroup?> GetStudyGroupPreviewByIdAsync(string groupId, int memberLimit = 8)
+    {
+        if (!Guid.TryParse(groupId, out var gid)) return null;
+
+        var cacheKey = $"studygroup:preview:{gid}:{memberLimit}:group";
+        if (_cache.TryGetValue<StudyGroup>(cacheKey, out var cachedGroup) && cachedGroup != null)
+        {
+            return new StudyGroup
+            {
+                Id = cachedGroup.Id,
+                Name = cachedGroup.Name,
+                Description = cachedGroup.Description,
+                MemberIds = cachedGroup.MemberIds?.Select(m => new GroupMemberDto
+                {
+                    Id = m.Id,
+                    UserName = m.UserName,
+                    AvatarUrl = m.AvatarUrl,
+                    Role = m.Role
+                }).ToList(),
+                ImageUrl = cachedGroup.ImageUrl,
+                Status = cachedGroup.Status,
+                Role = cachedGroup.Role
+            };
+        }
+
+        var entity = await _context.StudyGroups.AsNoTracking()
+            .Where(x => x.Id == gid)
+            .Select(x => new
+            {
+                x.Id,
+                x.Name,
+                x.Description,
+                x.ImageUrl,
+                x.Status
+            })
+            .FirstOrDefaultAsync();
+
+        if (entity == null) return null;
+
+        var members = await GetStudyGroupMemberPreviewAsync(groupId, memberLimit);
+        var result = new StudyGroup
+        {
+            Id = entity.Id.ToString(),
+            Name = entity.Name,
+            Description = entity.Description,
+            MemberIds = members,
+            ImageUrl = entity.ImageUrl,
+            Status = entity.Status
+        };
+
+        _cache.Set(cacheKey, result, GroupPreviewCacheTtl);
+        return result;
     }
 
     public async Task<List<string>> GetGroupManagersAsync(string studyGroupId)
@@ -529,6 +781,7 @@ SET s.name = coalesce($name, s.name),
 
         // Logic to delete the study group
         await DeleteStudyGroupFromDatabaseAsync(groupId);
+        InvalidateGroupCache(Guid.Parse(groupId));
 
         return true; // Return true if deletion is successful
     }
@@ -536,11 +789,31 @@ SET s.name = coalesce($name, s.name),
     public async Task<StudyGroup> GetStudyGroupByIdAsync(string groupId)
     {
         if (!Guid.TryParse(groupId, out var gid)) return null;
+        var cacheKey = $"studygroup:detail:{gid}";
+        if (_cache.TryGetValue<StudyGroup>(cacheKey, out var cachedGroup) && cachedGroup != null)
+        {
+            return new StudyGroup
+            {
+                Id = cachedGroup.Id,
+                Name = cachedGroup.Name,
+                Description = cachedGroup.Description,
+                MemberIds = cachedGroup.MemberIds?.Select(m => new GroupMemberDto
+                {
+                    Id = m.Id,
+                    UserName = m.UserName,
+                    AvatarUrl = m.AvatarUrl,
+                    Role = m.Role
+                }).ToList(),
+                ImageUrl = cachedGroup.ImageUrl,
+                Status = cachedGroup.Status,
+                Role = cachedGroup.Role
+            };
+        }
         var entity = await _context.StudyGroups.FindAsync(gid);
         if (entity == null) return null;
 
         var members = await GetStudyGroupMembers(groupId);
-        return new StudyGroup
+        var result = new StudyGroup
         {
             Id = entity.Id.ToString(),
             Name = entity.Name,
@@ -549,6 +822,8 @@ SET s.name = coalesce($name, s.name),
             ImageUrl = entity.ImageUrl,
             Status = entity.Status
         };
+        _cache.Set(cacheKey, result, GroupDetailCacheTtl);
+        return result;
     }
 
     public async Task<List<StudyGroup>> SearchStudyGroups(string query, int skip, int take)
@@ -634,6 +909,10 @@ SET s.name = coalesce($name, s.name),
 
             if (result)
             {
+                if (Guid.TryParse(studyGroupId, out var gid))
+                {
+                    InvalidateGroupRequestCaches(gid);
+                }
                 // Notify all the managers of the study group about the application
                 await NotifyStudyGroupManagers(studyGroupId, userId);
             }
@@ -719,7 +998,16 @@ SET s.name = coalesce($name, s.name),
             // If the application was approved and successfully updated, add the user to the group
             if (status == "Approved" && result)
             {
+                if (Guid.TryParse(studyGroupId, out var gid))
+                {
+                    InvalidateGroupRequestCaches(gid);
+                }
                 return await JoinGroupAsync(studyGroupId, userId);
+            }
+
+            if (result && Guid.TryParse(studyGroupId, out var groupGuid))
+            {
+                InvalidateGroupRequestCaches(groupGuid);
             }
 
             return result;
@@ -755,6 +1043,8 @@ SET s.name = coalesce($name, s.name),
             await _context.SaveChangesAsync();
         }
 
+        InvalidateGroupCache(gid);
+        _cache.Remove(GetRoleCacheKey(gid, userId));
         await UpsertGraphMembershipAsync(groupId, userId, membership.Role);
         return true;
     }
@@ -776,6 +1066,8 @@ SET s.name = coalesce($name, s.name),
                 _context.UserGroups.Remove(role);
                 await _context.SaveChangesAsync();
             }
+            InvalidateGroupCache(gid);
+            _cache.Remove(GetRoleCacheKey(gid, userId));
         }
 
         return true;
@@ -896,6 +1188,8 @@ SET s.name = coalesce($name, s.name),
             await _context.SaveChangesAsync();
         }
 
+        InvalidateGroupCache(gid);
+        _cache.Remove(GetRoleCacheKey(gid, memberId));
         await UpsertGraphMembershipAsync(studyGroupId, memberId, membership.Role);
         return true;
     }
@@ -916,6 +1210,11 @@ DELETE r";
             await tx.RunAsync(query, new { studyGroupId, memberId });
         });
 
+        if (Guid.TryParse(studyGroupId, out var gid))
+        {
+            InvalidateGroupRequestCaches(gid);
+        }
+
         return await JoinGroupAsync(studyGroupId, memberId);
     }
 
@@ -933,6 +1232,8 @@ DELETE r";
             await _context.SaveChangesAsync();
         }
 
+        InvalidateGroupCache(gid);
+        _cache.Remove(GetRoleCacheKey(gid, memberId));
         await RemoveGraphMembershipAsync(studyGroupId, memberId);
         return existing != null;
     }
@@ -953,6 +1254,8 @@ DELETE r";
             await _context.SaveChangesAsync();
         }
 
+        InvalidateGroupCache(gid);
+        _cache.Remove(GetRoleCacheKey(gid, newManagerId));
         await UpsertGraphMembershipAsync(studyGroupId, newManagerId, GroupRole.Admin);
         return true;
     }
@@ -981,6 +1284,7 @@ DELETE r";
         var ancestor = await _context.Groups.FirstOrDefaultAsync(x => x.Id == gid);
         if (ancestor != null) ancestor.UpdatedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
+        InvalidateGroupCache(gid);
         await SyncGroupMetaToGraphAsync(studyGroupId, name: newName);
         return true;
     }
@@ -995,6 +1299,7 @@ DELETE r";
         var ancestor = await _context.Groups.FirstOrDefaultAsync(x => x.Id == gid);
         if (ancestor != null) ancestor.UpdatedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
+        InvalidateGroupCache(gid);
         await SyncGroupMetaToGraphAsync(studyGroupId, description: newDescription);
         return true;
     }
@@ -1006,21 +1311,24 @@ DELETE r";
 
         group.ImageUrl = newProfilePictureUrl;
         await _context.SaveChangesAsync();
+        InvalidateGroupCache(Guid.Parse(studyGroupId));
         return true;
     }
 
     public async Task<bool> IsUserManagerAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return (await GetMembershipRowsByGroupAsync(gid))
-            .Any(x => x.UserId == userId && x.Role >= GroupRole.Admin && IsActiveMembershipStatus(x.Status));
+        var row = await GetMembershipRowAsync(gid, userId);
+        return row.HasValue
+            && row.Value.Role >= GroupRole.Admin
+            && IsActiveMembershipStatus(row.Value.Status);
     }
 
     public async Task<bool> IsUserMemberAsync(string studyGroupId, string userId)
     {
         if (!Guid.TryParse(studyGroupId, out var gid)) return false;
-        return (await GetMembershipRowsByGroupAsync(gid))
-            .Any(x => x.UserId == userId && IsActiveMembershipStatus(x.Status));
+        var row = await GetMembershipRowAsync(gid, userId);
+        return row.HasValue && IsActiveMembershipStatus(row.Value.Status);
     }
 
     public async Task<string> GetUserRoleInGroupAsync(string groupId, string userId)
@@ -1030,17 +1338,43 @@ DELETE r";
             return null;
         }
 
-        var role = (await GetMembershipRowsByGroupAsync(gid))
-            .Where(x => x.UserId == userId && IsActiveMembershipStatus(x.Status))
-            .Select(x => (GroupRole?)x.Role)
-            .OrderByDescending(x => x)
-            .FirstOrDefault();
+        var cacheKey = GetRoleCacheKey(gid, userId);
+        if (_cache.TryGetValue<string>(cacheKey, out var cachedRole))
+        {
+            return cachedRole;
+        }
 
-        return role.HasValue ? ToRoleLabel(role.Value) : null;
+        var row = await GetMembershipRowAsync(gid, userId);
+        var resolvedRole = row.HasValue && IsActiveMembershipStatus(row.Value.Status)
+            ? ToRoleLabel(row.Value.Role)
+            : null;
+        if (resolvedRole != null)
+        {
+            _cache.Set(cacheKey, resolvedRole, GroupRoleCacheTtl);
+        }
+
+        return resolvedRole;
     }
 
     public async Task<IEnumerable<JoinRequest>> GetJoinRequests(string groupId)
     {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return Enumerable.Empty<JoinRequest>();
+        }
+
+        var cacheKey = $"studygroup:joinrequests:{gid}";
+        if (_cache.TryGetValue<List<JoinRequest>>(cacheKey, out var cachedRequests) && cachedRequests != null)
+        {
+            return cachedRequests.Select(x => new JoinRequest
+            {
+                UserId = x.UserId,
+                Name = x.Name,
+                AppliedOn = x.AppliedOn,
+                AvatarUrl = x.AvatarUrl
+            }).ToList();
+        }
+
         if (!await IsGroupApprovedAsync(groupId))
             return Enumerable.Empty<JoinRequest>();
         using (var session = _neo4jDriver.AsyncSession())
@@ -1049,7 +1383,9 @@ DELETE r";
             {
                 var query = @"
                 MATCH (u:User)-[r:APPLIED_TO]->(s:StudyGroup {id: $groupId})
-                RETURN u.id AS userId, r.appliedOn AS appliedOn";
+                WHERE coalesce(r.status, 'Pending') = 'Pending'
+                RETURN u.id AS userId, r.appliedOn AS appliedOn
+                ORDER BY r.appliedOn DESC";
                 var parameters = new { groupId };
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.ToListAsync(record => new
@@ -1060,23 +1396,25 @@ DELETE r";
             });
 
             var joinRequests = new List<JoinRequest>();
+            var displayInfoByUserId = await _userService.GetUserDisplayInfoByIdsAsync(result.Select(record => record.UserId));
 
             foreach (var record in result)
             {
-                // Sequentially fetching UserName and AvatarUrl
-                var userName = await _userService.GetUserNameByIdAsync(record.UserId);
-                var avatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(record.UserId);
+                displayInfoByUserId.TryGetValue(record.UserId, out var displayInfo);
 
                 var joinRequest = new JoinRequest
                 {
                     UserId = record.UserId,
-                    Name = userName,
-                    AvatarUrl = avatarUrl,
+                    Name = displayInfo?.UserName ?? string.Empty,
+                    AvatarUrl = displayInfo?.AvatarUrl ?? string.Empty,
                     AppliedOn = record.AppliedOn
                 };
 
                 joinRequests.Add(joinRequest);
             }
+
+            _cache.Set(cacheKey, joinRequests, JoinRequestCacheTtl);
+            _cache.Set($"studygroup:joinrequests:count:{gid}", joinRequests.Count, JoinRequestCacheTtl);
 
             return joinRequests;
         }
@@ -1084,6 +1422,17 @@ DELETE r";
 
     public async Task<int> GetPendingJoinRequestsCount(string groupId)
     {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return 0;
+        }
+
+        var cacheKey = $"studygroup:joinrequests:count:{gid}";
+        if (_cache.TryGetValue<int>(cacheKey, out var cachedCount))
+        {
+            return cachedCount;
+        }
+
         if (!await IsGroupApprovedAsync(groupId))
             return 0;
         using (var session = _neo4jDriver.AsyncSession())
@@ -1101,19 +1450,38 @@ DELETE r";
                 return record["pendingCount"].As<int>();  // Return the count of pending join requests
             });
 
+            _cache.Set(cacheKey, result, JoinRequestCacheTtl);
             return result;
         }
     }
 
     public async Task<IEnumerable<ActivityLog>> GetActivityLogs(string groupId)
     {
+        if (!Guid.TryParse(groupId, out var gid))
+        {
+            return Enumerable.Empty<ActivityLog>();
+        }
+
+        var cacheKey = $"studygroup:activitylogs:{gid}";
+        if (_cache.TryGetValue<List<ActivityLog>>(cacheKey, out var cachedLogs) && cachedLogs != null)
+        {
+            return cachedLogs.Select(x => new ActivityLog
+            {
+                Id = x.Id,
+                Message = x.Message,
+                Date = x.Date
+            }).ToList();
+        }
+
         using (var session = _neo4jDriver.AsyncSession())
         {
             var result = await session.ExecuteReadAsync(async tx =>
             {
                 var query = @"
                 MATCH (s:StudyGroup {id: $groupId})-[:HAS_LOG]->(l:ActivityLog)
-                RETURN l.message AS message, l.date AS date";
+                RETURN l.message AS message, l.date AS date
+                ORDER BY l.date DESC
+                LIMIT 100";
                 var parameters = new { groupId };
                 var cursor = await tx.RunAsync(query, parameters);
                 return await cursor.ToListAsync(record => new ActivityLog
@@ -1123,6 +1491,7 @@ DELETE r";
                 });
             });
 
+            _cache.Set(cacheKey, result.ToList(), ActivityLogCacheTtl);
             return result;
         }
     }

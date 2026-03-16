@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>34f44a5f-6970-4f39-aa6e-3c85054d875b</UserSecretsId>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\obj_temp*\**;**\bin_temp*\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

@@ -3,8 +3,11 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Sciencetopia.Models;
 using Sciencetopia.Services;
+using Sciencetopia.Services.Progress;
 using System.Security.Claims;
 using Sciencetopia.DTOs;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace Sciencetopia.Controllers.StudyPlan
 {
@@ -15,13 +18,19 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly StudyPlanService _studyPlanService;
         private readonly PermissionService _permissionService;
-        private readonly Sciencetopia.Services.Region.IRegionService _regionService;
+        private readonly IResourceProgressService _progressService;
+        private readonly ILogger<StudyPlanController> _logger;
 
-        public StudyPlanController(StudyPlanService studyPlanService, PermissionService permissionService, Sciencetopia.Services.Region.IRegionService regionService)
+        public StudyPlanController(
+            StudyPlanService studyPlanService,
+            PermissionService permissionService,
+            IResourceProgressService progressService,
+            ILogger<StudyPlanController> logger)
         {
             _studyPlanService = studyPlanService;
             _permissionService = permissionService;
-            _regionService = regionService;
+            _progressService = progressService;
+            _logger = logger;
         }
 
         [HttpPost("SaveStudyPlan")]
@@ -69,6 +78,7 @@ namespace Sciencetopia.Controllers.StudyPlan
         [HttpGet("GetStudyPlanById")]
         public async Task<IActionResult> GetStudyPlanById([FromQuery] string studyPlanId)
         {
+            var totalSw = Stopwatch.StartNew();
             // Fetch the current authenticated user's ID from claims
             var currentUserId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
             if (string.IsNullOrEmpty(currentUserId))
@@ -82,7 +92,9 @@ namespace Sciencetopia.Controllers.StudyPlan
                 return BadRequest(new { message = "Invalid studyPlanId." });
             }
 
+            var permSw = Stopwatch.StartNew();
             var canRead = await _permissionService.CanReadAsync(currentUserId, planGuid);
+            permSw.Stop();
             if (!canRead)
             {
                 return Forbid();
@@ -91,37 +103,30 @@ namespace Sciencetopia.Controllers.StudyPlan
             try
             {
                 // Fetch the study plan using the service
+                var detailSw = Stopwatch.StartNew();
                 var studyPlan = await _studyPlanService.GetStudyPlanByIdAsync(studyPlanId, currentUserId);
+                detailSw.Stop();
 
                 if (studyPlan == null)
                 {
                     return NotFound(new { message = "Study plan not found." });
                 }
 
-                // Region-based filtering: if Mainland China, hide blocked resources
-                try
+                var detail = studyPlan.StudyPlan;
+                if (detail != null)
                 {
-                    var isCn = await _regionService.IsMainlandChinaAsync(HttpContext);
-                    if (isCn && studyPlan.StudyPlan != null)
-                    {
-                        void FilterLessons(List<Lesson>? list)
-                        {
-                            if (list == null) return;
-                            foreach (var les in list)
-                            {
-                                if (les.Resources != null)
-                                {
-                                    les.Resources = Sciencetopia.Utils.ChinaAccessFilter.FilterResourcesForChina(les.Resources).ToList();
-                                }
-                            }
-                        }
-
-                        FilterLessons(studyPlan.StudyPlan.Prerequisite);
-                        FilterLessons(studyPlan.StudyPlan.MainCurriculum);
-                        FilterLessons(studyPlan.StudyPlan.AdvancedTopics);
-                    }
+                    var enrichSw = Stopwatch.StartNew();
+                    await ApplyComputedProgressAsync(currentUserId, detail);
+                    enrichSw.Stop();
+                    totalSw.Stop();
+                    _logger.LogInformation(
+                        "StudyPlanController.GetStudyPlanById completed. planId={PlanId} permissionMs={PermissionMs} detailMs={DetailMs} enrichMs={EnrichMs} totalMs={TotalMs}",
+                        studyPlanId,
+                        permSw.ElapsedMilliseconds,
+                        detailSw.ElapsedMilliseconds,
+                        enrichSw.ElapsedMilliseconds,
+                        totalSw.ElapsedMilliseconds);
                 }
-                catch { /* ignore region failures */ }
 
                 return Ok(studyPlan);
             }
@@ -134,6 +139,100 @@ namespace Sciencetopia.Controllers.StudyPlan
             {
                 // Neo4j read timed out — return 504 so clients can retry
                 return StatusCode(504, new { message = "Graph database request timed out. Please try again." });
+            }
+        }
+
+        private async Task ApplyComputedProgressAsync(string userId, StudyPlanDetail detail)
+        {
+            var allLessons = EnumerateLessons(detail).ToList();
+            HashSet<Guid> completedResourceIds;
+            if (Guid.TryParse(detail.StableId, out var planStableId) && planStableId != Guid.Empty)
+            {
+                completedResourceIds = await _progressService.GetCompletedResourceIdsForPlanAsync(userId, planStableId);
+            }
+            else
+            {
+                var resourceIds = allLessons
+                    .SelectMany(lesson => lesson.Resources ?? Enumerable.Empty<ResourceDTO>())
+                    .Select(resource => Guid.TryParse(resource.Id, out var resourceId) ? resourceId : Guid.Empty)
+                    .Where(resourceId => resourceId != Guid.Empty)
+                    .Distinct()
+                    .ToList();
+
+                if (resourceIds.Count == 0)
+                {
+                    completedResourceIds = new HashSet<Guid>();
+                }
+                else
+                {
+                    var completedStatuses = await _progressService.GetCompletedStatusAsync(userId, resourceIds);
+                    completedResourceIds = completedStatuses
+                        .Where(x => x.completed)
+                        .Select(x => x.resourceId)
+                        .ToHashSet();
+                }
+            }
+
+            var totalResources = 0;
+            var completedResources = 0;
+            var advancedResources = 0;
+            var advancedCompletedResources = 0;
+            foreach (var lesson in allLessons)
+            {
+                if (lesson.Resources == null || lesson.Resources.Count == 0)
+                {
+                    lesson.ProgressPercentage = 0;
+                    lesson.FinishedResourcesCount = 0;
+                    continue;
+                }
+
+                var finishedCount = 0;
+                foreach (var resource in lesson.Resources)
+                {
+                    resource.Learned = Guid.TryParse(resource.Id, out var resourceId)
+                        && completedResourceIds.Contains(resourceId);
+                    if (resource.Learned)
+                    {
+                        finishedCount++;
+                    }
+                }
+
+                lesson.FinishedResourcesCount = finishedCount;
+                lesson.ProgressPercentage = lesson.Resources.Count == 0
+                    ? 0
+                    : (float)finishedCount / lesson.Resources.Count * 100f;
+
+                totalResources += lesson.Resources.Count;
+                completedResources += finishedCount;
+            }
+
+            foreach (var lesson in detail.AdvancedTopics ?? Enumerable.Empty<Lesson>())
+            {
+                var count = lesson.Resources?.Count ?? 0;
+                var finished = lesson.FinishedResourcesCount;
+                advancedResources += count;
+                advancedCompletedResources += finished;
+            }
+
+            detail.ProgressPercentage = totalResources == 0 ? 0 : (float)completedResources / totalResources * 100f;
+            detail.AdvancedTopicProgressPercentage = advancedResources == 0 ? 0 : (float)advancedCompletedResources / advancedResources * 100f;
+        }
+
+        private static IEnumerable<Lesson> EnumerateLessons(StudyPlanDetail detail)
+        {
+            foreach (var lesson in detail.Prerequisite ?? Enumerable.Empty<Lesson>())
+            {
+                yield return lesson;
+            }
+
+            foreach (var lesson in detail.MainCurriculum ?? Enumerable.Empty<Lesson>())
+            {
+                yield return lesson;
+            }
+
+            foreach (var lesson in detail.AdvancedTopics ?? Enumerable.Empty<Lesson>())
+            {
+                yield return lesson;
             }
         }
 

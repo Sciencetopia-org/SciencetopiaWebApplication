@@ -12,6 +12,7 @@ public interface ITagRepository
     Task<List<string>> SearchTagNamesAsync(string query);
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
     Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids, string language = "zh");
+    Task<Dictionary<Guid, Guid>> GetRepresentativeNodeIdsAsync(IEnumerable<Guid> tagIds);
     // Fully replace legacy name-based approach: now from TagRepresentativeNode table
     Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds, string language = "zh");
     Task<Guid> CreateIfNotExistsAsync(string tagName);
@@ -252,12 +253,26 @@ public class TagRepository : ITagRepository
         var idSet = ids?.ToHashSet() ?? new HashSet<Guid>();
         if (idSet.Count == 0) return new Dictionary<Guid, string>();
 
-        // Base tag names once
-        var baseRows = await ActiveTags
-                              .Where(t => t.Id.HasValue && idSet.Contains(t.Id.Value))
-                              .Select(t => new { Id = t.Id!.Value, Name = t.Name })
-                              .ToListAsync();
-        var baseMap = baseRows.ToDictionary(r => r.Id, r => r.Name ?? string.Empty);
+        var tagRows = await ActiveTags
+            .AsNoTracking()
+            .Where(t => t.Id.HasValue && (idSet.Contains(t.Id.Value) || idSet.Contains(t.StableId)))
+            .Select(t => new { VersionId = t.Id!.Value, t.StableId, t.Name })
+            .ToListAsync();
+
+        var baseMap = new Dictionary<Guid, string>();
+        foreach (var row in tagRows)
+        {
+            var name = row.Name ?? string.Empty;
+            if (idSet.Contains(row.VersionId))
+            {
+                baseMap[row.VersionId] = name;
+            }
+
+            if (idSet.Contains(row.StableId))
+            {
+                baseMap[row.StableId] = name;
+            }
+        }
 
         // Overlay L10n if enabled
         if (_l10nOptions.Value.Enabled)
@@ -270,6 +285,31 @@ public class TagRepository : ITagRepository
             }
         }
         return baseMap;
+    }
+
+    public async Task<Dictionary<Guid, Guid>> GetRepresentativeNodeIdsAsync(IEnumerable<Guid> tagIds)
+    {
+        var idSet = tagIds?.ToHashSet() ?? new HashSet<Guid>();
+        if (idSet.Count == 0) return new Dictionary<Guid, Guid>();
+
+        var rows = await (
+            from t in _context.Tags.AsNoTracking()
+            where t.Id.HasValue
+                  && t.IsCurrent
+                  && t.Status == "Current"
+                  && idSet.Contains(t.StableId)
+            join tr in _context.TagRepresentativeNodes.AsNoTracking() on t.Id!.Value equals tr.TagId
+            join n in _context.KnowledgeNodes.AsNoTracking() on tr.NodeId equals n.Id!.Value
+            select new
+            {
+                TagStableId = t.StableId,
+                NodeStableId = n.StableId
+            })
+            .ToListAsync();
+
+        return rows
+            .GroupBy(x => x.TagStableId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.NodeStableId).First());
     }
 
 

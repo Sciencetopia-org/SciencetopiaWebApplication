@@ -8,6 +8,7 @@ public interface IKnowledgeNodeRepository
     Task<(string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)?> GetNodeDetailsByIdAsync(Guid id, string language = "zh");
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetNodesDetailsAsync(IEnumerable<Guid> ids, string language = "zh");
     Task<Dictionary<Guid, string>> GetNodesNamesAsync(IEnumerable<Guid> ids, string language = "zh");
+    Task<Dictionary<Guid, string>> GetCurrentNodeNamesByStableIdsAsync(IEnumerable<Guid> stableIds, string language = "zh");
     Task<List<KnowledgeNode>> SearchKnowledgeNodesAsync(string query, int skip, int take);
 }
 
@@ -120,6 +121,68 @@ public class KnowledgeNodeRepository : IKnowledgeNodeRepository
                     baseMap[id] = title;
             }
         }
+        return baseMap;
+    }
+
+    public async Task<Dictionary<Guid, string>> GetCurrentNodeNamesByStableIdsAsync(IEnumerable<Guid> stableIds, string language = "zh")
+    {
+        var idSet = stableIds?.ToHashSet() ?? new HashSet<Guid>();
+        if (idSet.Count == 0) return new Dictionary<Guid, string>();
+
+        var baseRows = await _context.KnowledgeNodes
+            .AsNoTracking()
+            .Where(n => n.IsCurrent && n.Status == "Current" && idSet.Contains(n.StableId))
+            .Select(n => new { n.StableId, Name = n.Name ?? string.Empty, n.DefaultL10nSetId })
+            .ToListAsync();
+
+        var baseMap = baseRows.ToDictionary(x => x.StableId, x => x.Name);
+
+        var opts = _context.GetService<Microsoft.Extensions.Options.IOptions<Sciencetopia.Services.L10n.L10nOptions>>();
+        if (opts.Value.Enabled)
+        {
+            var lang = string.IsNullOrWhiteSpace(language) ? _langCtx.EffectiveLang : language;
+            var setIdByStableId = baseRows
+                .Where(x => x.DefaultL10nSetId.HasValue)
+                .ToDictionary(x => x.StableId, x => x.DefaultL10nSetId!.Value);
+
+            var setIds = setIdByStableId.Values.Distinct().ToList();
+            if (setIds.Count > 0)
+            {
+                var items = await (
+                    from si in _context.L10nSetItems.AsNoTracking()
+                    join i in _context.L10nItems.AsNoTracking() on si.L10nItemId equals i.L10nItemId
+                    where setIds.Contains(si.L10nSetId)
+                          && i.FieldKey == "name"
+                          && i.Kind == Sciencetopia.Models.L10n.L10nItemKind.Primary
+                          && (i.LangCode == lang || i.LangCode == null)
+                    select new
+                    {
+                        si.L10nSetId,
+                        i.LangCode,
+                        Text = i.Content ?? i.Text,
+                        i.SortOrder
+                    })
+                    .ToListAsync();
+
+                var bestBySetId = items
+                    .GroupBy(x => x.L10nSetId)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.OrderBy(x => x.LangCode == lang ? 0 : 1)
+                              .ThenBy(x => x.SortOrder)
+                              .Select(x => x.Text)
+                              .FirstOrDefault());
+
+                foreach (var (stableId, setId) in setIdByStableId)
+                {
+                    if (bestBySetId.TryGetValue(setId, out var title) && !string.IsNullOrWhiteSpace(title))
+                    {
+                        baseMap[stableId] = title!;
+                    }
+                }
+            }
+        }
+
         return baseMap;
     }
 

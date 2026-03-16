@@ -3,6 +3,7 @@ using Neo4j.Driver;
 using Microsoft.OpenApi.Models;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.ResponseCompression;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Services.KnowledgeGraph;
@@ -16,6 +17,8 @@ using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using System.IO.Compression;
+using Microsoft.Extensions.Caching.Memory;
 // Modular backend moved into its own project
 
 var builder = WebApplication.CreateBuilder(args);
@@ -31,6 +34,7 @@ builder.Services.AddScoped<StudyPlanService>(sp =>
         sp.GetRequiredService<IDriver>(),
         sp.GetRequiredService<ILogger<StudyPlanService>>(),
         sp.GetRequiredService<IStudyPlanRepository>(),
+        sp.GetRequiredService<IMemoryCache>(),
         sp.GetRequiredService<ITagRepository>(),
         sp.GetRequiredService<ITagResolutionService>()));
 builder.Services.AddScoped<StudyGroupService>();
@@ -60,6 +64,24 @@ builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>
 builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(new[]
+    {
+        "application/json"
+    });
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(options =>
+{
+    options.Level = CompressionLevel.Fastest;
+});
+builder.Services.Configure<GzipCompressionProviderOptions>(options =>
+{
+    options.Level = CompressionLevel.Fastest;
+});
 builder.Services.AddScoped<Sciencetopia.Services.PermissionService>();
 builder.Services.AddScoped<Sciencetopia.Services.Cohorts.ICohortService, Sciencetopia.Services.Cohorts.CohortService>();
 builder.Services.AddScoped<IVersioningService, VersioningService>();
@@ -81,6 +103,8 @@ builder.Services.AddSignalR();
 
 // Register the hosted service
 builder.Services.AddHostedService<DailySummaryHostedService>();
+builder.Services.AddHostedService<Sciencetopia.Services.KnowledgeGraph.Neo4jSchemaHostedService>();
+builder.Services.AddHostedService<Sciencetopia.Services.KnowledgeGraph.KnowledgeGraphWarmupHostedService>();
 
 // Configure JWT Authentication
 builder.Services.AddAuthentication(options =>
@@ -265,6 +289,10 @@ var app = builder.Build();
 
 // Apply CORS dynamically based on request path or origin
 app.UseCors("VueCorsPolicy");
+if (!app.Environment.IsDevelopment())
+{
+    app.UseResponseCompression();
+}
 app.UseMiddleware<Sciencetopia.Middleware.LanguageResolutionMiddleware>();
 
 app.Use(async (context, next) =>
