@@ -51,21 +51,44 @@ WITH u, p, collect(r) AS rels
 WHERE size(rels) > 1
 FOREACH (rel IN rels[1..] | DELETE rel);
 
-// 3) For each (user, cohort), ensure ENROLLED_IN to cohort's OF_VERSION
-MATCH (u:User)-[:IN_COHORT]->(c:Cohort)-[:OF_VERSION]->(pv:PlanVersion)
-MERGE (u)-[:ENROLLED_IN]->(pv);
+// 3) For each (user, cohort), ensure the user's PersonalGroup enrolls in cohort's OF_VERSION
+MATCH (u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+MATCH (u)-[:IN_COHORT]->(c:Cohort)-[:OF_VERSION]->(pv:PlanVersion)
+MERGE (pg)-[:ENROLLED_IN]->(pv);
 
-// Deduplicate ENROLLED_IN per (user, PlanVersion)
-MATCH (u:User)-[r:ENROLLED_IN]->(pv:PlanVersion)
-WITH u, pv, collect(r) AS rels
+// Move old direct User enrollment edges to PersonalGroup when possible.
+MATCH (u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+MATCH (u)-[r:ENROLLED_IN]->(pv:PlanVersion)
+MERGE (pg)-[:ENROLLED_IN]->(pv)
+DELETE r;
+
+// Deduplicate ENROLLED_IN per (PersonalGroup, PlanVersion)
+MATCH (pg:Group {kind:'PersonalGroup'})-[r:ENROLLED_IN]->(pv:PlanVersion)
+WITH pg, pv, collect(r) AS rels
 WHERE size(rels) > 1
 FOREACH (rel IN rels[1..] | DELETE rel);
 
-// 4) Remove legacy ACTIVE_IN/PlanEnrollment structures (optional, comment out for dry run)
+// Move old direct User completion edges to PersonalGroup when possible.
+MATCH (u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+MATCH (u)-[r:COMPLETED]->(res:Resource)
+MERGE (pg)-[c:COMPLETED]->(res)
+SET c.completedAt = coalesce(c.completedAt, r.completedAt),
+    c.source = coalesce(c.source, r.source),
+    c.device = coalesce(c.device, r.device),
+    c.spentSeconds = coalesce(c.spentSeconds, 0) + coalesce(r.spentSeconds, 0)
+DELETE r;
+
+// Move old direct User favorite boxes to PersonalGroup when possible.
+MATCH (u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+MATCH (u)-[r:OWNS]->(f:Favorite)
+MERGE (pg)-[:OWNS]->(f)
+DELETE r;
+
+// 4) Remove retired ACTIVE_IN/PlanEnrollment structures (optional, comment out for dry run)
 MATCH (e:PlanEnrollment)-[r:ACTIVE_IN]->(:Cohort)
 DELETE r;
 DETACH DELETE e;
 
-// 5) Remove legacy PINNED_TO edges (now using OF_VERSION)
+// 5) Remove retired PINNED_TO edges (now using OF_VERSION)
 MATCH (:Cohort)-[r:PINNED_TO]->(:PlanVersion)
 DELETE r;

@@ -14,6 +14,13 @@
 
 权限模型摘要
 - 学习计划 Plan 角色：Viewer / Commenter / Editor / Owner
+- Plan 角色只决定计划内容权限：
+  - Editor/Owner 可编辑计划内容。
+  - Owner 可给用户分配计划角色。
+- Cohort 采用/共享权限与计划内容编辑权限分离：
+  - 计划编辑团队通过 `allowCohortSharing` 开关决定普通使用者是否可将计划采用到小组 Cohort。
+  - 当开关开启时，具备计划可读权限且为目标小组 Owner/Admin 的用户可将计划分享到该小组。
+  - 小组计划关系上的 `permission` 是 Cohort/组域协作权限，不反向授予计划内容编辑权。
 - Cohort 强耦合到学习小组：
   - 组域 Cohort：该组 Owner/Admin 具备 Cohort 管理/邀请权限；组成员才可加入/切换
   - 非组域 Cohort：不作为管理目标（当前模型）
@@ -57,8 +64,15 @@ Study Plans（学习计划）
   - 响应：`{ lessonId, title, description, associatedKnowledgeNodes?, resources: [{ id, name, link, learned }] }`
 
 - GET `api/StudyPlans/{id}/Permissions/Effective`
-  - 功能：获取当前用户在该计划上的有效 PlanRole
-  - 响应：`{ role }`
+  - 功能：获取当前用户在该计划/Cohort 上的聚合权限
+  - 查询参数：`cohortId?`
+  - 响应：`{ role, canView, canComment, canEdit, canPublish, allowCohortSharing, canAdoptPlanToCohort, cohortManage, cohortInvite, cohortPermission }`
+
+- POST `api/StudyPlans/{id}/SharingSettings`
+  - 功能：计划编辑团队设置该计划是否允许普通使用者采用到 Cohort
+  - 权限：计划 Editor/Owner
+  - 请求体：`{ allowCohortSharing: bool }`
+  - 响应：`{ allowCohortSharing }`
 
 - POST `api/StudyPlans/{id}/Share/User`
   - 功能：为指定用户设置该计划的角色
@@ -76,6 +90,7 @@ Study Plans（学习计划）
 Study Group ↔ Plan 分享
 - POST `api/StudyGroups/{StudyGroupId}/Plans/{PlanId}/Share`
   - 功能：将计划分享给学习小组，可选择自动为组成员入学
+  - 权限：调用者必须为该组 Owner/Admin，且对该计划具备采用权限（计划可读 + `allowCohortSharing`，或计划 Editor/Owner）
   - 请求体：`{ permission: string, autoEnroll: bool, useDraftFlow: bool }`
     - `permission` 建议值：`view|comment|edit|admin`（用于后续策略映射）
   - 响应：返回数据库记录对象（含分享配置）
@@ -89,7 +104,7 @@ Study Group ↔ Plan 分享
 Group‑Scoped Cohorts（组域 Cohort 管理）
 - POST `api/Groups/{groupId}/Plans/{planId}/Cohorts`
   - 功能：在小组下为某计划创建 Cohort
-  - 权限：调用者必须为该组 Owner/Admin；且具备计划编辑策略（Plan.Edit）
+  - 权限：调用者必须为该组 Owner/Admin；该计划须已被该小组采用/共享
   - 请求体：`{ title?: string, visibility?: "group"|"public"|"private", enrollMode?: "OptIn"|"Auto" }`
   - 响应：`{ cohortId }`
 

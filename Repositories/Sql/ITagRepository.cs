@@ -13,7 +13,6 @@ public interface ITagRepository
     Task<Dictionary<Guid, (string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetTagDetailsAsync(IEnumerable<Guid> ids);
     Task<Dictionary<Guid, string>> GetTagNamesAsync(IEnumerable<Guid> ids, string language = "zh");
     Task<Dictionary<Guid, Guid>> GetRepresentativeNodeIdsAsync(IEnumerable<Guid> tagIds);
-    // Fully replace legacy name-based approach: now from TagRepresentativeNode table
     Task<Dictionary<Guid, (Guid NodeId, string Name, string Description, DateTimeOffset CreatedDate, DateTimeOffset UpdatedDate)>> GetRepresentativeNodesAsync(IEnumerable<Guid> tagIds, string language = "zh");
     Task<Guid> CreateIfNotExistsAsync(string tagName);
 }

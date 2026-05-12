@@ -1,5 +1,5 @@
-// This version assumes: 
-// (1) each user has one or more Favorite nodes (with `type`, e.g. "favorite")
+// This version assumes:
+// (1) each PersonalGroup has one or more Favorite nodes (with `type`, e.g. "favorite")
 // (2) Favorite node connects to KnowledgeNode via [:INCLUDES] relationship
 // (3) name is stored only in SQL
 
@@ -8,6 +8,7 @@ using Neo4j.Driver;
 using Microsoft.AspNetCore.Authorization;
 using System;
 using System.Security.Claims;
+using Sciencetopia.Services.Plans;
 
 namespace Sciencetopia.Controllers.KnowledgeNetwork;
 
@@ -17,10 +18,20 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork;
 public class FavoritesController : ControllerBase
 {
     private readonly IAsyncSession _session;
+    private readonly IPersonalPlanEnrollmentService _personalGroups;
 
-    public FavoritesController(IAsyncSession session)
+    public FavoritesController(IAsyncSession session, IPersonalPlanEnrollmentService personalGroups)
     {
         _session = session;
+        _personalGroups = personalGroups;
+    }
+
+    private async Task<string?> GetPersonalGroupIdAsync()
+    {
+        var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (string.IsNullOrWhiteSpace(userId)) return null;
+        var groupId = await _personalGroups.EnsurePersonalGroupProjectionAsync(userId);
+        return groupId == Guid.Empty ? null : groupId.ToString();
     }
 
     [HttpPost("{nodeId}")]
@@ -32,12 +43,14 @@ public class FavoritesController : ControllerBase
             {
                 return BadRequest(new { success = false, message = "Invalid node ID format." });
             }
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
                 MATCH (n:KnowledgeNode {stableId: $nodeId})
-                MERGE (u:User {id: $userId})
-                MERGE (u)-[:OWNS]->(f:Favorite {type: 'favorite'})
+                MERGE (g:Group {id: $groupId})
+                SET g.kind = 'PersonalGroup'
+                MERGE (g)-[:OWNS]->(f:Favorite {type: 'favorite'})
                 WITH f, n
                 OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
                 WITH f, n, r
@@ -50,7 +63,7 @@ public class FavoritesController : ControllerBase
                 RETURN value.favorited AS favorited
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             var peek = await result.PeekAsync();
             if (peek == null)
             {
@@ -78,12 +91,14 @@ public class FavoritesController : ControllerBase
             {
                 return BadRequest(new { success = false, message = "Invalid node ID format." });
             }
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
                 MATCH (n:KnowledgeNode {stableId: $nodeId})
-                MERGE (u:User {id: $userId})
-                MERGE (u)-[:OWNS]->(f:Favorite {type: 'learned'})
+                MERGE (g:Group {id: $groupId})
+                SET g.kind = 'PersonalGroup'
+                MERGE (g)-[:OWNS]->(f:Favorite {type: 'learned'})
                 WITH f, n
                 OPTIONAL MATCH (f)-[r:INCLUDES]->(n)
                 WITH f, n, r
@@ -96,7 +111,7 @@ public class FavoritesController : ControllerBase
                 RETURN value.learned AS learned
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             var peek = await result.PeekAsync();
             if (peek == null)
             {
@@ -120,8 +135,8 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (string.IsNullOrEmpty(userId))
+            var groupId = await GetPersonalGroupIdAsync();
+            if (string.IsNullOrEmpty(groupId))
             {
                 return Ok(new { success = true, favorited = false });
             }
@@ -133,11 +148,11 @@ public class FavoritesController : ControllerBase
 
             var query = @"
                 MATCH (n:KnowledgeNode {stableId: $nodeId})
-                OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
+                OPTIONAL MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
                 RETURN CASE WHEN f IS NULL THEN false ELSE true END AS favorited
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             var record = await result.SingleAsync();
 
             bool isFavorited = record?["favorited"].As<bool>() ?? false;
@@ -154,8 +169,8 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (string.IsNullOrEmpty(userId))
+            var groupId = await GetPersonalGroupIdAsync();
+            if (string.IsNullOrEmpty(groupId))
             {
                 return Ok(new { success = true, learned = false });
             }
@@ -167,11 +182,11 @@ public class FavoritesController : ControllerBase
 
             var query = @"
                 MATCH (n:KnowledgeNode {stableId: $nodeId})
-                OPTIONAL MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
+                OPTIONAL MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
                 RETURN CASE WHEN f IS NULL THEN false ELSE true END AS learned
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             var record = await result.SingleAsync();
 
             bool isLearned = record?["learned"].As<bool>() ?? false;
@@ -188,15 +203,16 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n:KnowledgeNode)
+                MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[:INCLUDES]->(n:KnowledgeNode)
                 OPTIONAL MATCH (n)<-[:TAGGED_WITH]-(l:TagLevel)
                 RETURN n, l.name AS tagLevel
             ";
 
-            var result = await _session.RunAsync(query, new { userId });
+            var result = await _session.RunAsync(query, new { groupId });
             var data = await result.ToListAsync();
 
             var response = data.Select(record =>
@@ -225,14 +241,15 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
+                MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'learned'})-[:INCLUDES]->(n)
                 RETURN n
             ";
 
-            var result = await _session.RunAsync(query, new { userId });
+            var result = await _session.RunAsync(query, new { groupId });
             var data = await result.ToListAsync();
 
             var response = data.Select(record => new
@@ -255,8 +272,8 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (string.IsNullOrWhiteSpace(userId))
+            var groupId = await GetPersonalGroupIdAsync();
+            if (string.IsNullOrWhiteSpace(groupId))
             {
                 return Ok(new List<KnowledgeNodeUserStateDTO>());
             }
@@ -277,15 +294,15 @@ public class FavoritesController : ControllerBase
                 UNWIND $nodeIds AS nodeId
                 MATCH (n:KnowledgeNode {stableId: nodeId})
                 CALL {
-                    WITH n, $userId AS userId
-                    OPTIONAL MATCH (:User {id: userId})-[:OWNS]->(:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
+                    WITH n, $groupId AS groupId
+                    OPTIONAL MATCH (:Group {id: groupId})-[:OWNS]->(:Favorite {type: 'favorite'})-[:INCLUDES]->(n)
                     RETURN COUNT(*) > 0 AS isFavorited
                 }
                 CALL {
-                    WITH n, $userId AS userId
+                    WITH n, $groupId AS groupId
                     OPTIONAL MATCH (n)-[:HAS_RESOURCE]->(r:Resource)
-                    WITH collect(DISTINCT r.id) AS resourceIds, userId
-                    OPTIONAL MATCH (:User {id: userId})-[:COMPLETED]->(cr:Resource)
+                    WITH collect(DISTINCT r.id) AS resourceIds, groupId
+                    OPTIONAL MATCH (:Group {id: groupId})-[:COMPLETED]->(cr:Resource)
                     WHERE cr.id IN resourceIds
                     RETURN size(resourceIds) AS totalResourceCount,
                            COUNT(DISTINCT cr) AS completedResourceCount
@@ -304,7 +321,7 @@ public class FavoritesController : ControllerBase
                        END AS isPartiallyLearned
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeIds });
+            var result = await _session.RunAsync(query, new { groupId, nodeIds });
             var data = await result.ToListAsync(record => new KnowledgeNodeUserStateDTO
             {
                 NodeId = record["nodeId"].As<string>(),
@@ -328,14 +345,14 @@ public class FavoritesController : ControllerBase
     {
         try
         {
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (string.IsNullOrWhiteSpace(userId))
+            var groupId = await GetPersonalGroupIdAsync();
+            if (string.IsNullOrWhiteSpace(groupId))
             {
                 return Ok(new List<object>());
             }
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:COMPLETED]->(completed:Resource)<-[:HAS_RESOURCE]-(n:KnowledgeNode)
+                MATCH (g:Group {id: $groupId})-[:COMPLETED]->(completed:Resource)<-[:HAS_RESOURCE]-(n:KnowledgeNode)
                 WITH n, COUNT(DISTINCT completed) AS completedResourceCount
                 MATCH (n)-[:HAS_RESOURCE]->(resource:Resource)
                 WITH n, completedResourceCount, COUNT(DISTINCT resource) AS totalResourceCount
@@ -347,7 +364,7 @@ public class FavoritesController : ControllerBase
                        HEAD(COLLECT(DISTINCT l.name)) AS tagLevel
             ";
 
-            var result = await _session.RunAsync(query, new { userId });
+            var result = await _session.RunAsync(query, new { groupId });
             var data = await result.ToListAsync(record =>
             {
                 var node = record["n"].As<INode>();
@@ -379,15 +396,16 @@ public class FavoritesController : ControllerBase
             {
                 return BadRequest(new { success = false, message = "Invalid node ID format." });
             }
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
+                MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'favorite'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
                 DELETE r
                 RETURN n
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             if (await result.FetchAsync())
             {
                 return Ok(new { success = true, message = "Node removed from favorites." });
@@ -416,15 +434,16 @@ public class FavoritesController : ControllerBase
             {
                 return BadRequest(new { success = false, message = "Invalid node ID format." });
             }
-            var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            var groupId = await GetPersonalGroupIdAsync();
+            if (groupId == null) return Unauthorized();
 
             var query = @"
-                MATCH (u:User {id: $userId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
+                MATCH (g:Group {id: $groupId})-[:OWNS]->(f:Favorite {type: 'learned'})-[r:INCLUDES]->(n:KnowledgeNode {stableId: $nodeId})
                 DELETE r
                 RETURN n
             ";
 
-            var result = await _session.RunAsync(query, new { userId, nodeId = parsedNodeId.ToString() });
+            var result = await _session.RunAsync(query, new { groupId, nodeId = parsedNodeId.ToString() });
             if (await result.FetchAsync())
             {
                 return Ok(new { success = true, message = "Node removed from learned list." });

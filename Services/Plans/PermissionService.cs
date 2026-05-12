@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Data.SqlClient;
+using System.Text.Json;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
@@ -8,10 +8,14 @@ using Sciencetopia.DTOs;
 
 namespace Sciencetopia.Services;
 
-    public class PermissionService
-    {
-        private readonly ApplicationDbContext _db;
-        private readonly IMemoryCache _cache;
+public class PermissionService
+{
+    private readonly ApplicationDbContext _db;
+    private readonly IMemoryCache _cache;
+    private const string AllowCohortSharingMetadataKey = "allowCohortSharing";
+
+    private sealed record PlanMetadata(Guid StableId, Guid? CreatorId, string? Privacy, bool AllowCohortSharing);
+    private sealed record PlanAccess(PlanRole Role, bool CanView, Guid StableId, bool AllowCohortSharing);
 
     public PermissionService(ApplicationDbContext db, IMemoryCache cache)
     {
@@ -19,18 +23,46 @@ namespace Sciencetopia.Services;
         _cache = cache;
     }
 
-    private static bool IsMissingObjectException(Exception ex, params string[] objectNames)
+    private static bool ReadAllowCohortSharing(string? metadataJson)
     {
-        if (ex is not SqlException sqlEx || sqlEx.Number != 208) return false;
-        if (objectNames == null || objectNames.Length == 0) return true;
-        return objectNames.Any(n => sqlEx.Message.Contains(n, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(metadataJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (doc.RootElement.TryGetProperty(AllowCohortSharingMetadataKey, out var allow)
+                || doc.RootElement.TryGetProperty("AllowCohortSharing", out allow))
+            {
+                return allow.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String => bool.TryParse(allow.GetString(), out var parsed) && parsed,
+                    _ => false
+                };
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return false;
     }
 
-    private async Task<(Guid stableId, Guid? creatorId, string? privacy)> ResolvePlanMetadataAsync(Guid identifier, CancellationToken ct)
+    private async Task<PlanMetadata> ResolvePlanMetadataAsync(Guid identifier, CancellationToken ct)
     {
         var cacheKey = $"perm:plan-meta:{identifier}";
-        if (_cache.TryGetValue<(Guid stableId, Guid? creatorId, string? privacy)>(cacheKey, out var cachedMetadata)
-            && cachedMetadata.stableId != Guid.Empty)
+        if (_cache.TryGetValue<PlanMetadata>(cacheKey, out var cachedMetadata)
+            && cachedMetadata != null
+            && cachedMetadata.StableId != Guid.Empty)
         {
             return cachedMetadata;
         }
@@ -41,15 +73,16 @@ namespace Sciencetopia.Services;
             {
                 StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
                 p.CreatorId,
-                Privacy = (string?)EF.Property<string>(p, "Privacy")
+                Privacy = (string?)EF.Property<string>(p, "Privacy"),
+                p.MetadataJson
             })
             .FirstOrDefaultAsync(ct);
 
         if (plan != null)
         {
-            var resolved = (plan.StableId, plan.CreatorId, plan.Privacy);
+            var resolved = new PlanMetadata(plan.StableId, plan.CreatorId, plan.Privacy, ReadAllowCohortSharing(plan.MetadataJson));
             _cache.Set(cacheKey, resolved, TimeSpan.FromMinutes(5));
-            _cache.Set($"perm:plan-meta:{plan.StableId}", resolved, TimeSpan.FromMinutes(5));
+            _cache.Set($"perm:plan-meta:{resolved.StableId}", resolved, TimeSpan.FromMinutes(5));
             return resolved;
         }
 
@@ -61,18 +94,19 @@ namespace Sciencetopia.Services;
             {
                 StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
                 p.CreatorId,
-                Privacy = (string?)EF.Property<string>(p, "Privacy")
+                Privacy = (string?)EF.Property<string>(p, "Privacy"),
+                p.MetadataJson
             })
             .FirstOrDefaultAsync(ct);
 
         if (fallback == null)
         {
-            return (Guid.Empty, null, null);
+            return new PlanMetadata(Guid.Empty, null, null, false);
         }
 
-        var fallbackResolved = (fallback.StableId, fallback.CreatorId, fallback.Privacy);
+        var fallbackResolved = new PlanMetadata(fallback.StableId, fallback.CreatorId, fallback.Privacy, ReadAllowCohortSharing(fallback.MetadataJson));
         _cache.Set(cacheKey, fallbackResolved, TimeSpan.FromMinutes(5));
-        _cache.Set($"perm:plan-meta:{fallback.StableId}", fallbackResolved, TimeSpan.FromMinutes(5));
+        _cache.Set($"perm:plan-meta:{fallbackResolved.StableId}", fallbackResolved, TimeSpan.FromMinutes(5));
         return fallbackResolved;
     }
 
@@ -126,65 +160,72 @@ namespace Sciencetopia.Services;
         var stableIds = pendingRows.Select(x => x.StableId).Distinct().ToList();
         var userGuid = Guid.TryParse(userId, out var ug) ? ug : Guid.Empty;
 
-        Dictionary<Guid, PlanRole> directRoleByStableId;
-        try
-        {
-            directRoleByStableId = await _db.StudyPlanUserRoles.AsNoTracking()
-                .Where(r => r.UserId == userId && stableIds.Contains(r.PlanStableId))
-                .GroupBy(r => r.PlanStableId)
-                .Select(g => new
-                {
-                    StableId = g.Key,
-                    Role = g.Max(x => x.Role)
-                })
-                .ToDictionaryAsync(x => x.StableId, x => x.Role, ct);
-        }
-        catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanUserRoles"))
-        {
-            directRoleByStableId = new Dictionary<Guid, PlanRole>();
-        }
+        var directRoleByStableId = await _db.UserGroups.AsNoTracking()
+            .Where(ug => ug.UserId == userId && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"),
+                ug => ug.GroupId,
+                e => e.GroupId,
+                (ug, e) => new { e.StudyPlanStableId, e.Role })
+            .Where(x => stableIds.Contains(x.StudyPlanStableId))
+            .GroupBy(x => x.StudyPlanStableId)
+            .Select(g => new
+            {
+                StableId = g.Key,
+                Role = g.Max(x => x.Role)
+            })
+            .ToDictionaryAsync(x => x.StableId, x => x.Role, ct);
 
-        HashSet<Guid> groupLinkedStableIds;
-        try
-        {
-            var groupLinkedRows = await _db.UserGroups.AsNoTracking()
-                .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
-                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
-                    gr => gr.GroupId,
-                    gp => gp.StudyGroupId,
-                    (gr, gp) => gp.StudyPlanStableId)
-                .Where(stableId => stableIds.Contains(stableId))
-                .Distinct()
-                .ToListAsync(ct);
-            groupLinkedStableIds = groupLinkedRows.ToHashSet();
-        }
-        catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups", "StudyGroupStudyPlans"))
-        {
-            groupLinkedStableIds = new HashSet<Guid>();
-        }
+        var groupLinkedRows = await _db.UserGroups.AsNoTracking()
+            .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                gr => gr.GroupId,
+                gp => gp.StudyGroupId,
+                (gr, gp) => gp.StudyPlanStableId)
+            .Where(stableId => stableIds.Contains(stableId))
+            .Distinct()
+            .ToListAsync(ct);
+        var enrolledRows = await _db.UserGroups.AsNoTracking()
+            .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
+            .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"),
+                gr => gr.GroupId,
+                e => e.GroupId,
+                (gr, e) => e.StudyPlanStableId)
+            .Where(stableId => stableIds.Contains(stableId))
+            .Distinct()
+            .ToListAsync(ct);
+        groupLinkedRows.AddRange(enrolledRows);
+        var groupLinkedStableIds = groupLinkedRows.ToHashSet();
 
         foreach (var row in pendingRows)
         {
             var role = PlanRole.Viewer;
+            var canView = false;
 
             if (row.CreatorId.HasValue && row.CreatorId.Value == userGuid)
             {
                 role = PlanRole.Owner;
+                canView = true;
             }
             else if (directRoleByStableId.TryGetValue(row.StableId, out var directRole))
             {
                 role = directRole;
+                canView = true;
             }
             else if (groupLinkedStableIds.Contains(row.StableId))
             {
                 role = PlanRole.Viewer;
+                canView = true;
             }
             else if (string.Equals(row.Privacy, "public", StringComparison.OrdinalIgnoreCase))
             {
                 role = PlanRole.Viewer;
+                canView = true;
             }
 
-            result[row.PlanId] = SetCache($"perm:plan:{row.StableId}:user:{userId}", role);
+            if (canView)
+            {
+                result[row.PlanId] = SetCache($"perm:plan:{row.StableId}:user:{userId}", role);
+            }
         }
 
         return requestedIds.ToDictionary(id => id, id => result.TryGetValue(id, out var role) ? role : PlanRole.Viewer);
@@ -192,64 +233,68 @@ namespace Sciencetopia.Services;
 
     public async Task<PlanRole> GetEffectivePlanRoleAsync(string userId, Guid planId, CancellationToken ct = default)
     {
-        var (stableId, creatorId, privacy) = await ResolvePlanMetadataAsync(planId, ct);
-        if (stableId == Guid.Empty)
+        var access = await GetEffectivePlanAccessAsync(userId, planId, ct);
+        return access.Role;
+    }
+
+    private async Task<PlanAccess> GetEffectivePlanAccessAsync(string userId, Guid planId, CancellationToken ct = default)
+    {
+        var metadata = await ResolvePlanMetadataAsync(planId, ct);
+        if (metadata.StableId == Guid.Empty)
         {
-            return PlanRole.Viewer;
+            return new PlanAccess(PlanRole.Viewer, false, Guid.Empty, false);
         }
 
-        var cacheKey = $"perm:plan:{stableId}:user:{userId}";
+        var cacheKey = $"perm:plan:{metadata.StableId}:user:{userId}";
         if (_cache.TryGetValue(cacheKey, out PlanRole cached))
-            return cached;
+        {
+            return new PlanAccess(cached, true, metadata.StableId, metadata.AllowCohortSharing);
+        }
 
-        // Owner via StudyPlans.CreatorId (GUID stored)
         var userGuid = Guid.TryParse(userId, out var ug) ? ug : Guid.Empty;
 
-        // a) Owner
-        if (creatorId.HasValue && creatorId.Value == userGuid)
+        if (metadata.CreatorId.HasValue && metadata.CreatorId.Value == userGuid)
         {
-            return SetCache(cacheKey, PlanRole.Owner);
+            return new PlanAccess(SetCache(cacheKey, PlanRole.Owner), true, metadata.StableId, metadata.AllowCohortSharing);
         }
 
-        PlanRole best = PlanRole.Viewer;
+        var direct = await _db.UserGroups.AsNoTracking()
+            .Where(ug => ug.UserId == userId && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active" && e.StudyPlanStableId == metadata.StableId),
+                ug => ug.GroupId,
+                e => e.GroupId,
+                (ug, e) => (PlanRole?)e.Role)
+            .OrderByDescending(role => role)
+            .FirstOrDefaultAsync(ct);
 
-        // b) Direct user role
-        var direct = PlanRole.Viewer;
-        try
+        if (direct.HasValue)
         {
-            direct = await _db.StudyPlanUserRoles
-                .Where(r => r.PlanStableId == stableId && r.UserId == userId)
-                .Select(r => r.Role)
-                .FirstOrDefaultAsync(ct);
+            return new PlanAccess(SetCache(cacheKey, direct.Value), true, metadata.StableId, metadata.AllowCohortSharing);
         }
-        catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanUserRoles"))
-        {
-            direct = PlanRole.Viewer;
-        }
-        if (direct > best) best = direct;
 
-        // c) Group visibility: user is member of groups with roles; plan linked to those groups
-        var hasGroupLink = false;
-        try
+        var hasGroupLink = await _db.UserGroups.AsNoTracking()
+            .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(), gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => gp.StudyPlanStableId)
+            .AnyAsync(stable => stable == metadata.StableId, ct);
+        if (!hasGroupLink)
         {
             hasGroupLink = await _db.UserGroups.AsNoTracking()
                 .Where(gr => gr.UserId == userId && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"))
-                .Join(_db.StudyGroupStudyPlans.AsNoTracking(), gr => gr.GroupId, gp => gp.StudyGroupId, (gr, gp) => gp.StudyPlanStableId)
-                .AnyAsync(stable => stable == stableId, ct);
+                .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"), gr => gr.GroupId, e => e.GroupId, (gr, e) => e.StudyPlanStableId)
+                .AnyAsync(stable => stable == metadata.StableId, ct);
         }
-        catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups", "StudyGroupStudyPlans"))
+
+        if (hasGroupLink)
         {
-            hasGroupLink = false;
+            return new PlanAccess(SetCache(cacheKey, PlanRole.Viewer), true, metadata.StableId, metadata.AllowCohortSharing);
         }
-        if (hasGroupLink && best < PlanRole.Viewer)
-            best = PlanRole.Viewer; // default visibility level from group
 
-        // d) Privacy fallback (Public → Viewer)
-        var privacyLevel = privacy?.ToLowerInvariant();
-        if (privacyLevel == "public" && best < PlanRole.Viewer)
-            best = PlanRole.Viewer;
+        if (string.Equals(metadata.Privacy, "public", StringComparison.OrdinalIgnoreCase))
+        {
+            return new PlanAccess(SetCache(cacheKey, PlanRole.Viewer), true, metadata.StableId, metadata.AllowCohortSharing);
+        }
 
-        return SetCache(cacheKey, best);
+        return new PlanAccess(PlanRole.Viewer, false, metadata.StableId, metadata.AllowCohortSharing);
     }
 
     private PlanRole SetCache(string key, PlanRole role)
@@ -275,18 +320,59 @@ namespace Sciencetopia.Services;
 
     private async Task<bool> CheckAsync(string userId, Guid planId, Func<PlanRole, bool> predicate, CancellationToken ct)
     {
-        var role = await GetEffectivePlanRoleAsync(userId, planId, ct);
-        return predicate(role);
+        var access = await GetEffectivePlanAccessAsync(userId, planId, ct);
+        return access.CanView && predicate(access.Role);
+    }
+
+    public async Task<bool> CanAdoptPlanAsync(string userId, Guid planId, CancellationToken ct = default)
+    {
+        var access = await GetEffectivePlanAccessAsync(userId, planId, ct);
+        if (!access.CanView)
+        {
+            return false;
+        }
+
+        return access.AllowCohortSharing || access.Role >= PlanRole.Editor || access.Role == PlanRole.Owner;
+    }
+
+    public async Task<bool> CanAdoptPlanToGroupAsync(string userId, Guid planId, Guid groupId, CancellationToken ct = default)
+    {
+        if (!await CanAdoptPlanAsync(userId, planId, ct))
+        {
+            return false;
+        }
+
+        return await IsGroupManagerAsync(userId, groupId, ct);
     }
 
     public async Task InvalidateAsync(string userId, Guid planId, CancellationToken ct = default)
     {
         _cache.Remove($"perm:plan:{planId}:user:{userId}");
-        var (stableId, _, _) = await ResolvePlanMetadataAsync(planId, ct);
-        if (stableId != Guid.Empty)
+        var metadata = await ResolvePlanMetadataAsync(planId, ct);
+        if (metadata.StableId != Guid.Empty)
         {
-            _cache.Remove($"perm:plan:{stableId}:user:{userId}");
+            _cache.Remove($"perm:plan:{metadata.StableId}:user:{userId}");
         }
+    }
+
+    public async Task InvalidatePlanMetadataAsync(Guid planId, CancellationToken ct = default)
+    {
+        _cache.Remove($"perm:plan-meta:{planId}");
+        var metadata = await ResolvePlanMetadataAsync(planId, ct);
+        if (metadata.StableId != Guid.Empty)
+        {
+            _cache.Remove($"perm:plan-meta:{metadata.StableId}");
+        }
+    }
+
+    private async Task<bool> IsGroupManagerAsync(string userId, Guid groupId, CancellationToken ct)
+    {
+        return await _db.UserGroups.AsNoTracking()
+            .AnyAsync(x =>
+                x.GroupId == groupId
+                && x.UserId == userId
+                && (string.IsNullOrEmpty(x.Status) || x.Status == "Active" || x.Status == "active")
+                && x.Role >= GroupRole.Admin, ct);
     }
 
     // Returns an aggregated boolean permissions view for a given user/plan/cohort.
@@ -295,42 +381,43 @@ namespace Sciencetopia.Services;
     public async Task<EffectivePermissionsDto> GetEffectivePermissionsAsync(string userId, Guid planId, Guid? cohortId = null, CancellationToken ct = default)
     {
         // Plan-level permissions
-        var role = await GetEffectivePlanRoleAsync(userId, planId, ct);
-        var canView = role >= PlanRole.Viewer;
+        var access = await GetEffectivePlanAccessAsync(userId, planId, ct);
+        var role = access.Role;
+        var canView = access.CanView;
         var canComment = role >= PlanRole.Commenter;
         var canEdit = role >= PlanRole.Editor || role == PlanRole.Owner;
         var canPublish = role == PlanRole.Owner;
+        var canAdoptPlanToCohort = canView && (access.AllowCohortSharing || canEdit);
 
         // Cohort-level permissions (decoupled from plan role)
         bool cohortManage = false, cohortInvite = false;
+        string? cohortPermission = null;
         if (cohortId.HasValue)
         {
             // Load cohort scope
             var info = await _db.Cohorts.AsNoTracking()
                 .Where(c => c.Id == cohortId.Value)
-                .Select(c => new { c.StudyGroupId, c.CreatedBy })
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    c => c.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (c, sgsp) => new
+                    {
+                        StudyGroupId = (Guid?)sgsp.StudyGroupId,
+                        c.CreatedBy,
+                        sgsp.Permission
+                    })
                 .FirstOrDefaultAsync(ct);
 
             if (info != null)
             {
+                cohortPermission = NormalizeCohortPermission(info.Permission);
                 if (info.StudyGroupId.HasValue && info.StudyGroupId.Value != Guid.Empty)
                 {
-                    // Group-scoped cohort: group managers manage/invite
-                    var isManager = false;
-                    try
-                    {
-                        isManager = await _db.UserGroups.AsNoTracking()
-                            .AnyAsync(x =>
-                                x.GroupId == info.StudyGroupId.Value
-                                && x.UserId == userId
-                                && (string.IsNullOrEmpty(x.Status) || x.Status == "Active" || x.Status == "active")
-                                && x.Role >= Models.Enums.GroupRole.Admin, ct);
-                    }
-                    catch (Exception ex) when (IsMissingObjectException(ex, "UserGroups"))
-                    {
-                        isManager = false;
-                    }
-                    if (isManager)
+                    // Group managers can administer cohorts. A group-plan "admin" permission
+                    // grants the same cohort-management capability to active group members.
+                    var isMember = await IsGroupMemberAsync(userId, info.StudyGroupId.Value, ct);
+                    var isManager = isMember && await IsGroupManagerAsync(userId, info.StudyGroupId.Value, ct);
+                    if (isManager || (isMember && cohortPermission == "admin"))
                     {
                         cohortManage = true;
                         cohortInvite = true;
@@ -347,12 +434,37 @@ namespace Sciencetopia.Services;
 
         return new EffectivePermissionsDto
         {
+            Role = role.ToString(),
             CanView = canView,
-            CanComment = canComment,
-            CanEdit = canEdit,
-            CanPublish = canPublish,
+            CanComment = canView && canComment,
+            CanEdit = canView && canEdit,
+            CanPublish = canView && canPublish,
+            AllowCohortSharing = access.AllowCohortSharing,
+            CanAdoptPlanToCohort = canAdoptPlanToCohort,
             CohortManage = cohortManage,
-            CohortInvite = cohortInvite
+            CohortInvite = cohortInvite,
+            CohortPermission = cohortPermission
         };
+    }
+
+    private static string NormalizeCohortPermission(string? permission)
+    {
+        var value = (permission ?? "view").Trim().ToLowerInvariant();
+        return value switch
+        {
+            "admin" => "admin",
+            "edit" or "editable" => "edit",
+            "comment" => "comment",
+            _ => "view"
+        };
+    }
+
+    private async Task<bool> IsGroupMemberAsync(string userId, Guid groupId, CancellationToken ct)
+    {
+        return await _db.UserGroups.AsNoTracking()
+            .AnyAsync(x =>
+                x.GroupId == groupId
+                && x.UserId == userId
+                && (string.IsNullOrEmpty(x.Status) || x.Status == "Active" || x.Status == "active"), ct);
     }
 }

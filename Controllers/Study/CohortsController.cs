@@ -60,9 +60,8 @@ public class CohortsController : ControllerBase
         return NoContent();
     }
 
-    // Back-compat: Enroll endpoints
     [HttpPost("Cohorts/{cohortId:guid}/Enroll")]
-    public async Task<IActionResult> EnrollCompat(Guid cohortId, [FromBody] JoinCohortRequest body)
+    public async Task<IActionResult> Enroll(Guid cohortId, [FromBody] JoinCohortRequest body)
     {
         var userId = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
@@ -72,7 +71,7 @@ public class CohortsController : ControllerBase
     }
 
     [HttpDelete("Cohorts/{cohortId:guid}/Enroll")]
-    public async Task<IActionResult> UnenrollCompat(Guid cohortId)
+    public async Task<IActionResult> UnenrollFromEnrollmentRoute(Guid cohortId)
     {
         var userId = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();

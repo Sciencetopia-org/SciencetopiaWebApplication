@@ -14,11 +14,11 @@ public class CohortEntity
     [ForeignKey(nameof(Group))]
     public Guid Id { get; set; }
 
-    // Owning study group (nullable when unknown during migration)
-    public Guid? StudyGroupId { get; set; }
+    [Required]
+    public Guid StudyGroupStudyPlanId { get; set; }
 
-    // Current delivery offering (nullable before backfill)
-    public Guid? CurrentOfferingId { get; set; }
+    [Required]
+    public Guid StudyPlanVersionId { get; set; }
 
     [MaxLength(200)]
     public string? Title { get; set; }
@@ -36,11 +36,15 @@ public class CohortEntity
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    public DateTime StartAt { get; set; } = DateTime.UtcNow;
+
+    public DateTime? EndAt { get; set; }
+
     // Enrollment policy: OptIn or Auto
     public CohortEnrollMode EnrollmentPolicy { get; set; } = CohortEnrollMode.OptIn;
 
     public string? SettingsJson { get; set; }
 
     public GroupEntity? Group { get; set; }
-    public CohortOffering? CurrentOffering { get; set; }
+    public StudyGroupStudyPlan? StudyGroupStudyPlan { get; set; }
 }

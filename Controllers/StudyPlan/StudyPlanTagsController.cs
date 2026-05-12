@@ -10,18 +10,15 @@ namespace SciencetopiaWebApplication.Controllers.StudyPlan
     {
         private readonly StudyPlanService _service;
         private readonly ITagRepository _tagRepo;
-        private readonly ITagResolutionService _tagResolution;
         private readonly ILogger<StudyPlanTagsController> _logger;
 
         public StudyPlanTagsController(
             StudyPlanService service,
             ITagRepository tagRepo,
-            ITagResolutionService tagResolution,
             ILogger<StudyPlanTagsController> logger)
         {
             _service = service;
             _tagRepo = tagRepo;
-            _tagResolution = tagResolution;
             _logger = logger;
         }
 
@@ -48,12 +45,6 @@ namespace SciencetopiaWebApplication.Controllers.StudyPlan
         {
             var uid = User?.Identity?.Name ?? string.Empty;
             var tagIds = (req.TagIds ?? new List<Guid>()).Where(x => x != Guid.Empty).ToList();
-            var newNames = (req.NewTagNames ?? new List<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
-            if (newNames.Count > 0)
-            {
-                var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newNames, uid);
-                tagIds.AddRange(resolved);
-            }
             tagIds = tagIds.Distinct().ToList();
             var ok = await _service.UpdatePlanTagsAsync(planId, tagIds, req.NewTagNames, uid);
             return ok ? Ok() : BadRequest();
@@ -75,12 +66,6 @@ namespace SciencetopiaWebApplication.Controllers.StudyPlan
         {
             var uid = User?.Identity?.Name ?? string.Empty;
             var tagIds = (req.TagIds ?? new List<Guid>()).Where(x => x != Guid.Empty).ToList();
-            var newNames = (req.NewTagNames ?? new List<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
-            if (newNames.Count > 0)
-            {
-                var (resolved, _) = await _tagResolution.ResolveOrCreateAsync(newNames, uid);
-                tagIds.AddRange(resolved);
-            }
             tagIds = tagIds.Distinct().ToList();
             var ok = await _service.UpdateLessonTagsAsync(planId, lessonId, tagIds, req.NewTagNames, uid);
             return ok ? Ok() : BadRequest();

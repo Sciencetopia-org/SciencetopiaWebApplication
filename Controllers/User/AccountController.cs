@@ -10,7 +10,9 @@ using Sciencetopia.Extensions;
 using Azure.Storage.Blobs;
 using Azure.Storage.Sas;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Sciencetopia.Data;
+using Sciencetopia.Services.Plans;
 
 namespace Sciencetopia.Controllers.Users
 {
@@ -24,6 +26,7 @@ namespace Sciencetopia.Controllers.Users
         private readonly ISmsSender _smsSender;
         private readonly string _weChatAppId;
         private readonly string _weChatAppSecret;
+        private readonly string? _frontendBaseUrl;
         private readonly BlobServiceClient _blobServiceClient;
         private readonly IDriver _driver;
         private readonly ApplicationDbContext _dbContext;
@@ -31,8 +34,9 @@ namespace Sciencetopia.Controllers.Users
         private readonly UserService _userService;
         private readonly EmailTemplateService _emailTemplateService;
         private readonly IWebHostEnvironment _env;
+        private readonly IPersonalPlanEnrollmentService _personalGroups;
 
-        public AccountController(IConfiguration configuration, IHttpClientFactory httpClientFactory, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver, ApplicationDbContext dbContext, UserService userService, EmailTemplateService emailTemplateService, IWebHostEnvironment env)
+        public AccountController(IConfiguration configuration, IHttpClientFactory httpClientFactory, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver, ApplicationDbContext dbContext, UserService userService, EmailTemplateService emailTemplateService, IWebHostEnvironment env, IPersonalPlanEnrollmentService personalGroups)
         {
             _userManager = userManager;
             _signInManager = signInManager;
@@ -45,10 +49,12 @@ namespace Sciencetopia.Controllers.Users
 
             _httpClientFactory = httpClientFactory;
             _emailTemplateService = emailTemplateService;
+            _personalGroups = personalGroups;
 
             // 从配置文件中加载微信 AppId 和 AppSecret
             _weChatAppId = configuration["WeChat:AppId"];
             _weChatAppSecret = configuration["WeChat:AppSecret"];
+            _frontendBaseUrl = configuration["Frontend:BaseUrl"];
             _env = env;
         }
 
@@ -327,12 +333,46 @@ namespace Sciencetopia.Controllers.Users
             return BadRequest(new { message = "电话号码更改失败。", errors = errorMessages });
         }
 
+        [HttpGet("WeChatBindUrl")]
+        public IActionResult GetWeChatBindUrl()
+        {
+            if (!User.Identity?.IsAuthenticated ?? true)
+            {
+                return Unauthorized(new { message = "请先登录后再绑定微信。" });
+            }
+
+            if (!IsWeChatConfigured())
+            {
+                return BadRequest(new { message = "微信绑定尚未配置 AppId 或 AppSecret。" });
+            }
+
+            var redirectUri = Url.Action(nameof(BindWeChat), "Account", values: null, protocol: Request.Scheme);
+            if (string.IsNullOrWhiteSpace(redirectUri))
+            {
+                return BadRequest(new { message = "无法生成微信回调地址。" });
+            }
+
+            var isWeChatClient = Request.Headers.UserAgent.ToString().Contains("MicroMessenger", StringComparison.OrdinalIgnoreCase);
+            var authEndpoint = isWeChatClient
+                ? "https://open.weixin.qq.com/connect/oauth2/authorize"
+                : "https://open.weixin.qq.com/connect/qrconnect";
+            var scope = isWeChatClient ? "snsapi_userinfo" : "snsapi_login";
+            var authUrl = $"{authEndpoint}?appid={Uri.EscapeDataString(_weChatAppId)}&redirect_uri={Uri.EscapeDataString(redirectUri)}&response_type=code&scope={scope}&state=bindWeChat#wechat_redirect";
+
+            return Ok(new { url = authUrl });
+        }
+
         [HttpGet("BindWeChat")]
         public async Task<IActionResult> BindWeChat(string code)
         {
             if (string.IsNullOrEmpty(code))
             {
-                return BadRequest("授权码不能为空。");
+                return RedirectToWeChatResult(null, false, "授权码不能为空。");
+            }
+
+            if (!IsWeChatConfigured())
+            {
+                return RedirectToWeChatResult(null, false, "微信绑定尚未配置 AppId 或 AppSecret。");
             }
 
             // 创建 HttpClient 实例
@@ -340,29 +380,45 @@ namespace Sciencetopia.Controllers.Users
 
             // Step 1: 使用 code 换取 access_token 和 openid
             var tokenUrl = $"https://api.weixin.qq.com/sns/oauth2/access_token?appid={_weChatAppId}&secret={_weChatAppSecret}&code={code}&grant_type=authorization_code";
-            var tokenResponse = await client.GetStringAsync(tokenUrl);
+            string tokenResponse;
+            try
+            {
+                tokenResponse = await client.GetStringAsync(tokenUrl);
+            }
+            catch
+            {
+                return RedirectToWeChatResult(null, false, "获取微信授权信息失败。");
+            }
 
             var tokenData = JsonConvert.DeserializeObject<WeChatTokenResponse>(tokenResponse);
             if (tokenData == null || string.IsNullOrEmpty(tokenData.OpenId))
             {
-                return BadRequest("获取微信用户信息失败。");
+                return RedirectToWeChatResult(null, false, GetWeChatErrorMessage(tokenResponse, "获取微信用户信息失败。"));
             }
 
             // Step 2: 使用 access_token 和 openid 获取用户信息
             var userInfoUrl = $"https://api.weixin.qq.com/sns/userinfo?access_token={tokenData.AccessToken}&openid={tokenData.OpenId}";
-            var userInfoResponse = await client.GetStringAsync(userInfoUrl);
+            string userInfoResponse;
+            try
+            {
+                userInfoResponse = await client.GetStringAsync(userInfoUrl);
+            }
+            catch
+            {
+                return RedirectToWeChatResult(null, false, "获取微信用户信息失败。");
+            }
 
             var weChatUser = JsonConvert.DeserializeObject<WeChatUserInfo>(userInfoResponse);
-            if (weChatUser == null)
+            if (weChatUser == null || string.IsNullOrEmpty(weChatUser.OpenId))
             {
-                return BadRequest("获取微信用户信息失败。");
+                return RedirectToWeChatResult(null, false, GetWeChatErrorMessage(userInfoResponse, "获取微信用户信息失败。"));
             }
 
             // Step 3: 将微信用户信息与当前账号绑定
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
             {
-                return NotFound("用户不存在。");
+                return RedirectToWeChatResult(null, false, "请先登录后再绑定微信。");
             }
 
             // 假设 ApplicationUser 有 WeChatOpenId 字段
@@ -371,10 +427,51 @@ namespace Sciencetopia.Controllers.Users
 
             if (!result.Succeeded)
             {
-                return BadRequest("绑定微信账号失败。");
+                return RedirectToWeChatResult(user.Id, false, "绑定微信账号失败。");
             }
 
-            return Ok("微信账号绑定成功！");
+            return RedirectToWeChatResult(user.Id, true);
+        }
+
+        private bool IsWeChatConfigured()
+        {
+            return !string.IsNullOrWhiteSpace(_weChatAppId)
+                && !string.IsNullOrWhiteSpace(_weChatAppSecret)
+                && !_weChatAppId.StartsWith("your-", StringComparison.OrdinalIgnoreCase)
+                && !_weChatAppSecret.StartsWith("your-", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string GetWeChatErrorMessage(string response, string fallback)
+        {
+            try
+            {
+                var data = JObject.Parse(response);
+                var errorCode = data.Value<int?>("errcode");
+                var errorMessage = data.Value<string>("errmsg");
+                if (errorCode.HasValue || !string.IsNullOrWhiteSpace(errorMessage))
+                {
+                    return $"微信接口错误：{errorCode} {errorMessage}".Trim();
+                }
+            }
+            catch
+            {
+                // Ignore malformed error payloads and use the caller's fallback.
+            }
+
+            return fallback;
+        }
+
+        private IActionResult RedirectToWeChatResult(string? userId, bool success, string? message = null)
+        {
+            var baseUrl = !string.IsNullOrWhiteSpace(_frontendBaseUrl)
+                ? _frontendBaseUrl.TrimEnd('/')
+                : (_env.IsDevelopment() ? "http://localhost:8088" : $"{Request.Scheme}://{Request.Host}");
+            var accountPath = !string.IsNullOrWhiteSpace(userId) ? $"/{Uri.EscapeDataString(userId)}/account" : "/";
+            var query = success
+                ? "?wechatBind=success"
+                : $"?wechatBind=failed&message={Uri.EscapeDataString(message ?? "微信账号绑定失败。")}";
+
+            return Redirect($"{baseUrl}{accountPath}{query}");
         }
 
         // [HttpPost("RetrievePassword")]
@@ -623,10 +720,10 @@ namespace Sciencetopia.Controllers.Users
 
         private async Task<bool> AddUserNodeToNeo4jAndCreateDefaultFavorite(ApplicationUser user)
         {
-            // 1. 在 SQL 中插入默认收藏夹
+            var personalGroupId = await _personalGroups.EnsurePersonalGroupProjectionAsync(user.Id);
             var favorite = new Favorite
             {
-                UserId = user.Id,
+                GroupId = personalGroupId,
                 Name = "默认收藏夹",
                 Type = "favorite",
                 CreatedAt = DateTime.UtcNow
@@ -634,7 +731,7 @@ namespace Sciencetopia.Controllers.Users
 
             var learnedBox = new Favorite
             {
-                UserId = user.Id,
+                GroupId = personalGroupId,
                 Name = "已学过的知识点",
                 Type = "learned",
                 CreatedAt = DateTime.UtcNow
@@ -643,26 +740,26 @@ namespace Sciencetopia.Controllers.Users
             _dbContext.Favorites.AddRange(favorite, learnedBox);
             await _dbContext.SaveChangesAsync();
 
-            // 2. 在 Neo4j 中添加 User 和 Favorite 节点及其关系
             using var session = _driver.AsyncSession();
 
             var result = await session.ExecuteWriteAsync(async tx =>
             {
-                // 创建 User 节点（如果不存在）
                 await tx.RunAsync(@"
-            MERGE (u:User {id: $userId})
-            ", new { userId = user.Id });
+                    MERGE (u:User {id: $userId})
+                    MERGE (g:Group {id: $groupId})
+                    SET g.kind = 'PersonalGroup'
+                    MERGE (u)-[:MEMBER_OF]->(g)
+                    ", new { userId = user.Id, groupId = personalGroupId.ToString() });
 
-                // 创建 Favorite 节点并建立关系
                 await tx.RunAsync(@"
                     CREATE (f:Favorite {id: $favoriteId, type: $type})
                     WITH f
-                    MATCH (u:User {id: $userId})
-                    CREATE (u)-[:OWNS]->(f)
+                    MATCH (g:Group {id: $groupId})
+                    CREATE (g)-[:OWNS]->(f)
                     ",
                     new
                     {
-                        userId = user.Id,
+                        groupId = personalGroupId.ToString(),
                         favoriteId = favorite.Id,
                         type = favorite.Type
                     });
@@ -671,11 +768,11 @@ namespace Sciencetopia.Controllers.Users
                 await tx.RunAsync(@"
                     CREATE (f:Favorite {id: $favoriteId, type: $type})
                     WITH f
-                    MATCH (u:User {id: $userId})
-                    CREATE (u)-[:OWNS]->(f)
+                    MATCH (g:Group {id: $groupId})
+                    CREATE (g)-[:OWNS]->(f)
                 ", new
                 {
-                    userId = user.Id,
+                    groupId = personalGroupId.ToString(),
                     favoriteId = learnedBox.Id,
                     type = learnedBox.Type
                 });

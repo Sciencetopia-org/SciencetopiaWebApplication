@@ -5,14 +5,13 @@ using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
 using Sciencetopia.Services;
-using Neo4j.Driver;
 using System.Security.Claims;
-using Microsoft.Data.SqlClient;
-using System.Data;
 using Sciencetopia.Services.Progress;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using System.Text.Json;
+using Sciencetopia.Services.Plans;
 
 namespace Sciencetopia.Controllers.StudyPlan
 {
@@ -22,322 +21,108 @@ namespace Sciencetopia.Controllers.StudyPlan
     {
         private readonly ApplicationDbContext _db;
         private readonly PermissionService _perm;
-        private readonly Neo4j.Driver.IDriver _driver;
         private readonly IResourceProgressService _progress;
         private readonly IMemoryCache _cache;
         private readonly ILogger<StudyPlansController> _logger;
+        private readonly IPersonalPlanEnrollmentService _personalGroups;
         private static readonly TimeSpan StudyPlansVisibilityCacheTtl = TimeSpan.FromMinutes(1);
-        private static readonly TimeSpan StudyPlansCompatCacheTtl = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan StudyPlansResponseCacheTtl = TimeSpan.FromSeconds(30);
 
         public StudyPlansController(
             ApplicationDbContext db,
             PermissionService perm,
-            Neo4j.Driver.IDriver driver,
             IResourceProgressService progress,
             IMemoryCache cache,
-            ILogger<StudyPlansController> logger)
+            ILogger<StudyPlansController> logger,
+            IPersonalPlanEnrollmentService personalGroups)
         {
             _db = db;
             _perm = perm;
-            _driver = driver;
             _progress = progress;
             _cache = cache;
             _logger = logger;
+            _personalGroups = personalGroups;
         }
 
-        private static bool IsMissingObjectException(Exception ex, params string[] objectNames)
+        private static string SetAllowCohortSharing(string? metadataJson, bool allow)
         {
-            if (ex is not SqlException sqlEx || sqlEx.Number != 208) return false;
-            if (objectNames == null || objectNames.Length == 0) return true;
-            return objectNames.Any(n => sqlEx.Message.Contains(n, StringComparison.OrdinalIgnoreCase));
-        }
-
-        private async Task<bool> TableExistsAsync(string schema, string tableName)
-        {
-            var cacheKey = $"studyplans:table-exists:{schema}:{tableName}";
-            if (_cache.TryGetValue(cacheKey, out bool cached))
-            {
-                return cached;
-            }
-
-            var conn = _db.Database.GetDbConnection();
-            var shouldClose = conn.State != ConnectionState.Open;
-            try
-            {
-                if (shouldClose) await conn.OpenAsync();
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT CASE WHEN OBJECT_ID(@obj, N'U') IS NULL THEN 0 ELSE 1 END";
-
-                var p = cmd.CreateParameter();
-                p.ParameterName = "@obj";
-                p.Value = $"[{schema}].[{tableName}]";
-                cmd.Parameters.Add(p);
-
-                var scalar = await cmd.ExecuteScalarAsync();
-                if (scalar == null || scalar == DBNull.Value) return false;
-                var exists = Convert.ToInt32(scalar) == 1;
-                _cache.Set(cacheKey, exists, StudyPlansCompatCacheTtl);
-                return exists;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (shouldClose) await conn.CloseAsync();
-            }
-        }
-
-        private async Task<List<Guid>> QueryStableIdsFromLegacyEnrollmentTableAsync(string tableName, string userId)
-        {
-            var result = new List<Guid>();
-            var conn = _db.Database.GetDbConnection();
-            var shouldClose = conn.State != ConnectionState.Open;
-            try
-            {
-                if (shouldClose) await conn.OpenAsync();
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $@"
-SELECT DISTINCT [StudyPlanStableId]
-FROM [StudyPlans].[{tableName}]
-WHERE [UserId] = @uid
-  AND ([Status] IS NULL OR [Status] IN (N'Active', N'active', N'Learning', N'learning', N'Completed', N'completed'))
-  AND [StudyPlanStableId] IS NOT NULL";
-
-                var p = cmd.CreateParameter();
-                p.ParameterName = "@uid";
-                p.Value = userId;
-                cmd.Parameters.Add(p);
-
-                await using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    var sidObj = reader["StudyPlanStableId"];
-                    if (sidObj == DBNull.Value) continue;
-                    if (Guid.TryParse(sidObj.ToString(), out var sid)) result.Add(sid);
-                }
-            }
-            catch
-            {
-                return new List<Guid>();
-            }
-            finally
-            {
-                if (shouldClose) await conn.CloseAsync();
-            }
-            return result.Distinct().ToList();
-        }
-
-        private async Task<bool> HasActiveEnrollmentInLegacyTableAsync(string tableName, string userId, Guid stableId)
-        {
-            var conn = _db.Database.GetDbConnection();
-            var shouldClose = conn.State != ConnectionState.Open;
-            try
-            {
-                if (shouldClose) await conn.OpenAsync();
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $@"
-SELECT TOP 1 1
-FROM [StudyPlans].[{tableName}]
-WHERE [UserId] = @uid
-  AND [StudyPlanStableId] = @sid
-  AND ([Status] IS NULL OR [Status] IN (N'Active', N'active', N'Learning', N'learning', N'Completed', N'completed'))";
-
-                var p1 = cmd.CreateParameter();
-                p1.ParameterName = "@uid";
-                p1.Value = userId;
-                cmd.Parameters.Add(p1);
-
-                var p2 = cmd.CreateParameter();
-                p2.ParameterName = "@sid";
-                p2.Value = stableId;
-                cmd.Parameters.Add(p2);
-
-                var scalar = await cmd.ExecuteScalarAsync();
-                return scalar != null && scalar != DBNull.Value;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (shouldClose) await conn.CloseAsync();
-            }
-        }
-
-        private async Task<List<Guid>> GetDirectRoleStableIdsCompatAsync(string userId)
-        {
-            try
-            {
-                return await _db.StudyPlanUserRoles.AsNoTracking()
-                    .Where(r => r.UserId == userId)
-                    .Select(r => r.PlanStableId)
-                    .Distinct()
-                    .ToListAsync();
-            }
-            catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanUserRoles"))
-            {
-                return new List<Guid>();
-            }
-        }
-
-        private async Task<List<Guid>> GetGroupSharedStableIdsCompatAsync(List<Guid> groupIds)
-        {
-            if (groupIds == null || groupIds.Count == 0) return new List<Guid>();
-            try
-            {
-                return await _db.StudyGroupStudyPlans.AsNoTracking()
-                    .Where(gp => groupIds.Contains(gp.StudyGroupId))
-                    .Select(gp => gp.StudyPlanStableId)
-                    .Distinct()
-                    .ToListAsync();
-            }
-            catch (Exception ex) when (IsMissingObjectException(ex, "StudyGroupStudyPlans"))
-            {
-                return new List<Guid>();
-            }
-        }
-
-        private async Task<List<Guid>> GetEnrolledStableIdsCompatAsync(string userId)
-        {
-            var result = new HashSet<Guid>();
-
-            if (await TableExistsAsync("StudyPlans", "UserStudyPlanEnrollments"))
-            {
-                var rows = await QueryStableIdsFromLegacyEnrollmentTableAsync("UserStudyPlanEnrollments", userId);
-                result.UnionWith(rows.Where(x => x != Guid.Empty));
-            }
-
-            if (await TableExistsAsync("StudyPlans", "_legacy_UserStudyPlanEnrollments"))
-            {
-                var rows = await QueryStableIdsFromLegacyEnrollmentTableAsync("_legacy_UserStudyPlanEnrollments", userId);
-                result.UnionWith(rows.Where(x => x != Guid.Empty));
-            }
-
-            if (await TableExistsAsync("StudyPlans", "StudyPlanEnrollments"))
+            var metadata = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(metadataJson))
             {
                 try
                 {
-                    var rows = await _db.StudyPlanEnrollments.AsNoTracking()
-                        .Where(e => e.UserId == userId
-                            && (string.IsNullOrEmpty(e.Status)
-                                || e.Status == "Active" || e.Status == "active"
-                                || e.Status == "Learning" || e.Status == "learning"
-                                || e.Status == "Completed" || e.Status == "completed"))
-                        .Join(_db.StudyPlans.AsNoTracking(),
-                            e => e.PlanVersionId,
-                            p => p.Id,
-                            (e, p) => p.StableId == Guid.Empty ? p.Id : p.StableId)
-                        .Distinct()
-                        .ToListAsync();
-                    result.UnionWith(rows.Where(x => x != Guid.Empty));
+                    var existing = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(metadataJson);
+                    if (existing != null)
+                    {
+                        foreach (var kv in existing)
+                        {
+                            metadata[kv.Key] = kv.Value.Clone();
+                        }
+                    }
                 }
-                catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanEnrollments"))
+                catch (JsonException)
                 {
                 }
             }
+
+            metadata["allowCohortSharing"] = allow;
+            return JsonSerializer.Serialize(metadata);
+        }
+
+        private async Task<List<Guid>> GetGroupSharedStableIdsAsync(List<Guid> groupIds)
+        {
+            if (groupIds == null || groupIds.Count == 0) return new List<Guid>();
+            return await _db.StudyGroupStudyPlans.AsNoTracking()
+                .Where(gp => groupIds.Contains(gp.StudyGroupId))
+                .Select(gp => gp.StudyPlanStableId)
+                .Distinct()
+                .ToListAsync();
+        }
+
+        private async Task<List<Guid>> GetEnrolledStableIdsAsync(string userId)
+        {
+            var result = new HashSet<Guid>();
+
+            var personalRows = await _db.UserGroups.AsNoTracking()
+                .Where(ug => ug.UserId == userId && ug.Status == "Active")
+                .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"),
+                    ug => ug.GroupId,
+                    e => e.GroupId,
+                    (ug, e) => e.StudyPlanStableId)
+                .Distinct()
+                .ToListAsync();
+            result.UnionWith(personalRows.Where(x => x != Guid.Empty));
+
+            var cohortRows = await _db.UserGroups.AsNoTracking()
+                .Where(ug => ug.UserId == userId && ug.Status == "Active")
+                .Join(_db.Cohorts.AsNoTracking().Where(c => c.Status == "Active"),
+                    ug => ug.GroupId,
+                    c => c.Id,
+                    (ug, c) => c)
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    c => c.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (c, sgsp) => sgsp.StudyPlanStableId)
+                .Distinct()
+                .ToListAsync();
+            result.UnionWith(cohortRows.Where(x => x != Guid.Empty));
 
             return result.ToList();
         }
 
-        private async Task<bool> HasActivePlanEnrollmentByStableIdCompatAsync(string userId, Guid stableId)
+        private async Task<bool> HasActivePlanEnrollmentByStableIdAsync(string userId, Guid stableId)
         {
-            if (await TableExistsAsync("StudyPlans", "UserStudyPlanEnrollments"))
-            {
-                var hit = await HasActiveEnrollmentInLegacyTableAsync("UserStudyPlanEnrollments", userId, stableId);
-                if (hit) return true;
-            }
-
-            if (await TableExistsAsync("StudyPlans", "_legacy_UserStudyPlanEnrollments"))
-            {
-                var hit = await HasActiveEnrollmentInLegacyTableAsync("_legacy_UserStudyPlanEnrollments", userId, stableId);
-                if (hit) return true;
-            }
-
-            if (await TableExistsAsync("StudyPlans", "StudyPlanEnrollments"))
-            {
-                try
-                {
-                    return await _db.StudyPlanEnrollments.AsNoTracking()
-                        .Where(x => x.UserId == userId && x.ScopeType == "Cohort" && x.Status == "Active")
-                        .Join(_db.StudyPlans.AsNoTracking(),
-                            e => e.PlanVersionId,
-                            p => p.Id,
-                            (e, p) => new
-                            {
-                                StableId = p.StableId == Guid.Empty ? p.Id : p.StableId
-                            })
-                        .AnyAsync(x => x.StableId == stableId);
-                }
-                catch (Exception ex) when (IsMissingObjectException(ex, "StudyPlanEnrollments"))
-                {
-                    return false;
-                }
-            }
-
-            return false;
-        }
-
-        private async Task<List<Guid>> GetGraphVisibleStableIdsCompatAsync(string userId)
-        {
-            var cacheKey = $"studyplans:graph-visible:{userId}";
-            if (_cache.TryGetValue(cacheKey, out List<Guid>? cached) && cached != null)
-            {
-                return cached;
-            }
-
-            var ids = new HashSet<Guid>();
-            try
-            {
-                await using var session = _driver.AsyncSession();
-                var rows = await session.ExecuteReadAsync(async tx =>
-                {
-                    var cypher = @"
-MATCH (u:User {id:$uid})
-CALL {
-    WITH u
-    MATCH (u)-[:CREATED]->(p:StudyPlan)
-    RETURN p.id AS id
-    UNION
-    WITH u
-    MATCH (u)-[:MEMBER_OF]->(:StudyGroup)-[:SHARES_PLAN]->(p:StudyPlan)
-    RETURN p.id AS id
-    UNION
-    WITH u
-    MATCH (u)-[:ENROLLED_IN]->(pv:PlanVersion)
-    RETURN pv.studyPlanId AS id
-    UNION
-    WITH u
-    MATCH (u)-[:ENROLLED_IN]->(p:StudyPlan)
-    RETURN p.id AS id
-}
-WITH DISTINCT id
-WHERE id IS NOT NULL
-RETURN id";
-                    var cursor = await tx.RunAsync(cypher, new { uid = userId });
-                    return await cursor.ToListAsync();
-                });
-
-                foreach (var row in rows)
-                {
-                    var idStr = row["id"].As<string?>();
-                    if (Guid.TryParse(idStr, out var id))
-                    {
-                        ids.Add(id);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "StudyPlans graph compatibility visibility read failed for user {UserId}", userId);
-            }
-
-            var list = ids.ToList();
-            _cache.Set(cacheKey, list, StudyPlansVisibilityCacheTtl);
-            return list;
+            return await _db.UserGroups.AsNoTracking()
+                .Where(ug => ug.UserId == userId && ug.Status == "Active")
+                .Join(_db.Cohorts.AsNoTracking().Where(c => c.Status == "Active"),
+                    ug => ug.GroupId,
+                    c => c.Id,
+                    (ug, c) => c)
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    c => c.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (c, sgsp) => sgsp.StudyPlanStableId)
+                .AnyAsync(planStableId => planStableId == stableId);
         }
 
         private async Task<List<Guid>> GetVisibleStableIdsAsync(string userId, Guid userGuid)
@@ -350,10 +135,6 @@ RETURN id";
 
             var visible = new HashSet<Guid>();
 
-            // Keep EF Core operations serialized on the scoped DbContext.
-            // The Neo4j compatibility read can still run in parallel because it uses a separate driver/session.
-            var graphTask = GetGraphVisibleStableIdsCompatAsync(userId);
-
             var createdStableIds = await _db.StudyPlans.AsNoTracking()
                 .Where(p => (userGuid != Guid.Empty && p.CreatorId == userGuid) || p.CreatedBy == userId)
                 .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
@@ -361,21 +142,15 @@ RETURN id";
                 .ToListAsync();
             visible.UnionWith(createdStableIds.Where(x => x != Guid.Empty));
 
-            var directRoleStableIds = await GetDirectRoleStableIdsCompatAsync(userId);
-            visible.UnionWith(directRoleStableIds.Where(x => x != Guid.Empty));
-
             var groupIds = await GetActiveGroupIdsForUserAsync(userId);
             if (groupIds.Count > 0)
             {
-                var groupSharedStableIds = await GetGroupSharedStableIdsCompatAsync(groupIds);
+                var groupSharedStableIds = await GetGroupSharedStableIdsAsync(groupIds);
                 visible.UnionWith(groupSharedStableIds.Where(x => x != Guid.Empty));
             }
 
-            var enrolledStableIds = await GetEnrolledStableIdsCompatAsync(userId);
+            var enrolledStableIds = await GetEnrolledStableIdsAsync(userId);
             visible.UnionWith(enrolledStableIds.Where(x => x != Guid.Empty));
-
-            var graphVisibleStableIds = await graphTask;
-            visible.UnionWith(graphVisibleStableIds.Where(x => x != Guid.Empty));
 
             var result = visible.ToList();
             _cache.Set(cacheKey, result, StudyPlansVisibilityCacheTtl);
@@ -400,36 +175,129 @@ RETURN id";
                     && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"));
         }
 
+        private async Task<object> BuildListFallbackAsync(string subjectUserId, int page, int pageSize, string? q, string? sort)
+        {
+            var subjectGuid = Guid.TryParse(subjectUserId, out var parsedSubjectId) ? parsedSubjectId : Guid.Empty;
+
+            var enrolledStableIds = await _db.UserGroups.AsNoTracking()
+                .Where(ug => ug.UserId == subjectUserId && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+                .Join(_db.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"),
+                    ug => ug.GroupId,
+                    e => e.GroupId,
+                    (ug, e) => e.StudyPlanStableId)
+                .Where(id => id != Guid.Empty)
+                .Distinct()
+                .ToListAsync();
+
+            var query = _db.StudyPlans.AsNoTracking()
+                .Where(p =>
+                    (subjectGuid != Guid.Empty && p.CreatorId == subjectGuid)
+                    || p.CreatedBy == subjectUserId
+                    || enrolledStableIds.Contains(p.StableId)
+                    || (p.StableId == Guid.Empty && enrolledStableIds.Contains(p.Id)));
+
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                query = query.Where(p => p.Title.Contains(q));
+            }
+
+            query = sort switch
+            {
+                "createdDesc" => query.OrderByDescending(p => p.CreatedDate),
+                "createdAsc" => query.OrderBy(p => p.CreatedDate),
+                _ => query.OrderByDescending(p => p.UpdatedDate)
+            };
+
+            var total = await query.CountAsync();
+            var slice = await query
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(p => new
+                {
+                    p.Id,
+                    StableId = p.StableId == Guid.Empty ? p.Id : p.StableId,
+                    p.VersionNumber,
+                    p.IsCurrent,
+                    p.Status,
+                    p.Title,
+                    p.Description,
+                    p.CreatedDate,
+                    p.UpdatedDate
+                })
+                .ToListAsync();
+
+            var items = slice.Select(p => new
+            {
+                id = p.Id,
+                stableId = p.StableId,
+                versionNumber = p.VersionNumber,
+                latestVersionNumber = p.VersionNumber,
+                currentVersionNumber = p.VersionNumber,
+                isCurrent = p.IsCurrent,
+                status = p.Status,
+                title = p.Title,
+                description = p.Description,
+                updatedAt = p.UpdatedDate,
+                createdAt = p.CreatedDate,
+                hasUpgrade = false,
+                role = PlanRole.Viewer.ToString(),
+                progress = 0.0,
+                advancedProgress = 0.0
+            }).ToList();
+
+            return new { total, page, pageSize, items };
+        }
+
         [HttpGet]
-        public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? q = null, [FromQuery] string? sort = null)
+        public async Task<IActionResult> List(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 20,
+            [FromQuery] string? q = null,
+            [FromQuery] string? sort = null,
+            [FromQuery] string? scope = null,
+            [FromQuery] string? targetUserId = null)
         {
             var totalSw = Stopwatch.StartNew();
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
 
-            var responseCacheKey = $"studyplans:list:{userId}:page:{page}:size:{pageSize}:q:{q ?? string.Empty}:sort:{sort ?? string.Empty}";
+            var subjectUserId = string.IsNullOrWhiteSpace(targetUserId) ? userId : targetUserId;
+            var normalizedScope = string.IsNullOrWhiteSpace(scope) ? "mine" : scope.Trim().ToLowerInvariant();
+
+            var responseCacheKey = $"studyplans:list:{userId}:subject:{subjectUserId}:scope:{normalizedScope}:page:{page}:size:{pageSize}:q:{q ?? string.Empty}:sort:{sort ?? string.Empty}";
             if (_cache.TryGetValue(responseCacheKey, out object? cachedPayload) && cachedPayload != null)
             {
                 totalSw.Stop();
                 _logger.LogInformation(
-                    "StudyPlans.List cache hit. userId={UserId} page={Page} pageSize={PageSize} totalMs={TotalMs}",
+                    "StudyPlans.List cache hit. userId={UserId} subjectUserId={SubjectUserId} scope={Scope} page={Page} pageSize={PageSize} totalMs={TotalMs}",
                     userId,
+                    subjectUserId,
+                    normalizedScope,
                     page,
                     pageSize,
                     totalSw.ElapsedMilliseconds);
                 return Ok(cachedPayload);
             }
 
-            var ug = Guid.TryParse(userId, out var parsed) ? parsed : Guid.Empty;
+            try
+            {
+            var ug = Guid.TryParse(subjectUserId, out var parsed) ? parsed : Guid.Empty;
             var visibilitySw = Stopwatch.StartNew();
-            var stableSet = await GetVisibleStableIdsAsync(userId, ug);
+            var stableSet = await GetVisibleStableIdsAsync(subjectUserId, ug);
             visibilitySw.Stop();
 
             var baseQ = _db.StudyPlans.AsNoTracking().Where(p =>
                 stableSet.Contains(p.StableId)
-                || (p.StableId == Guid.Empty && stableSet.Contains(p.Id))
-                || EF.Property<string>(p, "Privacy") == "public"
-                || EF.Property<string>(p, "Privacy") == "Public");
+                || (p.StableId == Guid.Empty && stableSet.Contains(p.Id)));
+
+            if (normalizedScope != "mine")
+            {
+                baseQ = baseQ.Where(p =>
+                    EF.Property<string>(p, "Privacy") == "public"
+                    || EF.Property<string>(p, "Privacy") == "Public"
+                    || stableSet.Contains(p.StableId)
+                    || (p.StableId == Guid.Empty && stableSet.Contains(p.Id)));
+            }
 
             if (!string.IsNullOrWhiteSpace(q))
             {
@@ -469,9 +337,6 @@ RETURN id";
 
             var stableIds = slice.Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId).Distinct().ToList();
 
-            var progressSw = Stopwatch.StartNew();
-            var progressTask = _progress.GetPlanProgressByPlanIdsAsync(userId, stableIds);
-
             var aggregatesSw = Stopwatch.StartNew();
             var aggregates = await _db.StudyPlans.AsNoTracking()
                 .Where(p => stableIds.Contains(p.StableId) || (p.StableId == Guid.Empty && stableIds.Contains(p.Id)))
@@ -486,10 +351,38 @@ RETURN id";
             aggregatesSw.Stop();
 
             var aggregatesDict = aggregates.ToDictionary(a => a.StableId, a => a);
-            var progressByStableId = await progressTask;
+            var progressSw = Stopwatch.StartNew();
+            var progressByStableId = new Dictionary<Guid, Sciencetopia.DTOs.UserPlanProgressDto>();
+            try
+            {
+                progressByStableId = await _progress.GetPlanProgressByPlanIdsAsync(subjectUserId, stableIds);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "StudyPlans.List progress fallback. userId={UserId} subjectUserId={SubjectUserId} planCount={PlanCount}",
+                    userId,
+                    subjectUserId,
+                    stableIds.Count);
+            }
             progressSw.Stop();
+
             var permSw = Stopwatch.StartNew();
-            var rolesByPlanId = await _perm.GetEffectivePlanRolesAsync(userId, slice.Select(p => p.Id));
+            var rolesByPlanId = new Dictionary<Guid, PlanRole>();
+            try
+            {
+                rolesByPlanId = await _perm.GetEffectivePlanRolesAsync(userId, slice.Select(p => p.Id));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "StudyPlans.List permission fallback. userId={UserId} subjectUserId={SubjectUserId} planCount={PlanCount}",
+                    userId,
+                    subjectUserId,
+                    slice.Count);
+            }
             permSw.Stop();
 
             var items = slice.Select(p =>
@@ -534,8 +427,10 @@ RETURN id";
 
             totalSw.Stop();
             _logger.LogInformation(
-                "StudyPlans.List completed. userId={UserId} visibleStableIds={VisibleCount} page={Page} pageSize={PageSize} total={Total} visibilityMs={VisibilityMs} countMs={CountMs} sliceMs={SliceMs} aggregatesMs={AggregatesMs} progressMs={ProgressMs} permMs={PermMs} totalMs={TotalMs}",
+                "StudyPlans.List completed. userId={UserId} subjectUserId={SubjectUserId} scope={Scope} visibleStableIds={VisibleCount} page={Page} pageSize={PageSize} total={Total} visibilityMs={VisibilityMs} countMs={CountMs} sliceMs={SliceMs} aggregatesMs={AggregatesMs} progressMs={ProgressMs} permMs={PermMs} totalMs={TotalMs}",
                 userId,
+                subjectUserId,
+                normalizedScope,
                 stableSet.Count,
                 page,
                 pageSize,
@@ -549,6 +444,21 @@ RETURN id";
                 totalSw.ElapsedMilliseconds);
 
             return Ok(payload);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "StudyPlans.List failed; returning minimal fallback. userId={UserId} subjectUserId={SubjectUserId} scope={Scope} page={Page} pageSize={PageSize}",
+                    userId,
+                    subjectUserId,
+                    normalizedScope,
+                    page,
+                    pageSize);
+
+                var fallbackPayload = await BuildListFallbackAsync(subjectUserId, page, pageSize, q, sort);
+                return Ok(fallbackPayload);
+            }
         }
 
         [HttpGet("{id}")]
@@ -614,36 +524,24 @@ RETURN id";
                 .FirstOrDefaultAsync();
             if (stableId == Guid.Empty) return NotFound();
 
-            List<dynamic> cohorts;
-            try
-            {
-                cohorts = await _db.Cohorts.AsNoTracking()
-                    .Join(_db.CohortOfferings.AsNoTracking(),
-                        c => c.CurrentOfferingId,
-                        o => o.Id,
-                        (c, o) => new { Cohort = c, Offering = o })
-                    .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
-                        co => co.Offering.StudyGroupStudyPlanId,
-                        sgsp => sgsp.Id,
-                        (co, sgsp) => new
-                        {
-                            co.Cohort.Id,
-                            co.Cohort.Title,
-                            co.Cohort.StudyGroupId,
-                            co.Cohort.Visibility,
-                            sgsp.StudyPlanStableId
-                        })
-                    .Where(x => x.StudyPlanStableId == stableId)
-                    .Select(x => new { x.Id, x.Title, x.StudyGroupId, x.Visibility })
-                    .Cast<dynamic>()
-                    .ToListAsync();
-            }
-            catch (Exception ex) when (IsMissingObjectException(ex, "StudyGroupStudyPlans"))
-            {
-                cohorts = new List<dynamic>();
-            }
+            var cohorts = await _db.Cohorts.AsNoTracking()
+                .Where(c => c.Status == "Active")
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    c => c.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (co, sgsp) => new
+                    {
+                        co.Id,
+                        co.Title,
+                        StudyGroupId = (Guid?)sgsp.StudyGroupId,
+                        co.Visibility,
+                        sgsp.StudyPlanStableId
+                    })
+                .Where(x => x.StudyPlanStableId == stableId)
+                .Select(x => new { x.Id, x.Title, x.StudyGroupId, x.Visibility })
+                .ToListAsync();
 
-            var alreadyActive = await HasActivePlanEnrollmentByStableIdCompatAsync(userId, stableId);
+            var alreadyActive = await HasActivePlanEnrollmentByStableIdAsync(userId, stableId);
 
             var groupScoped = new List<object>();
             var pub = new List<object>();
@@ -668,12 +566,41 @@ RETURN id";
         }
 
         [HttpGet("{id}/Permissions/Effective")]
-        public async Task<IActionResult> GetEffectivePermission([FromRoute] Guid id)
+        public async Task<IActionResult> GetEffectivePermission([FromRoute] Guid id, [FromQuery] Guid? cohortId)
         {
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
-            var role = await _perm.GetEffectivePlanRoleAsync(userId, id);
-            return Ok(new { role = role.ToString() });
+            var permissions = await _perm.GetEffectivePermissionsAsync(userId, id, cohortId, HttpContext.RequestAborted);
+            return Ok(permissions);
+        }
+
+        [HttpPost("{id}/SharingSettings")]
+        public async Task<IActionResult> SetSharingSettings([FromRoute] Guid id, [FromBody] SetCohortSharingRequest request)
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            if (string.IsNullOrEmpty(userId)) return Unauthorized();
+            if (!await _perm.CanEditAsync(userId, id, HttpContext.RequestAborted)) return Forbid();
+
+            var stableId = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.Id == id || p.StableId == id)
+                .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+                .FirstOrDefaultAsync(HttpContext.RequestAborted);
+            if (stableId == Guid.Empty) return NotFound();
+
+            var versions = await _db.StudyPlans
+                .Where(p => p.StableId == stableId || (p.StableId == Guid.Empty && p.Id == stableId))
+                .ToListAsync(HttpContext.RequestAborted);
+            if (versions.Count == 0) return NotFound();
+
+            foreach (var version in versions)
+            {
+                version.MetadataJson = SetAllowCohortSharing(version.MetadataJson, request.AllowCohortSharing);
+                version.UpdatedDate = DateTime.UtcNow;
+            }
+
+            await _db.SaveChangesAsync(HttpContext.RequestAborted);
+            await _perm.InvalidatePlanMetadataAsync(stableId, HttpContext.RequestAborted);
+            return Ok(new { allowCohortSharing = request.AllowCohortSharing });
         }
 
         
@@ -694,16 +621,15 @@ RETURN id";
                 .FirstOrDefaultAsync();
             if (stableId == Guid.Empty) return NotFound();
 
-            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanStableId == stableId && r.UserId == req.UserId);
-            if (existing == null)
-            {
-                _db.StudyPlanUserRoles.Add(new StudyPlanUserRole { PlanStableId = stableId, UserId = req.UserId!, Role = req.Role });
-            }
-            else
-            {
-                existing.Role = req.Role;
-            }
-            await _db.SaveChangesAsync();
+            var versionId = await _db.StudyPlans.AsNoTracking()
+                .Where(p => p.StableId == stableId || (p.StableId == Guid.Empty && p.Id == stableId))
+                .OrderByDescending(p => p.IsCurrent)
+                .ThenByDescending(p => p.VersionNumber)
+                .Select(p => p.Id)
+                .FirstOrDefaultAsync(HttpContext.RequestAborted);
+            if (versionId == Guid.Empty) return NotFound();
+
+            await _personalGroups.EnsureEnrollmentAsync(req.UserId!, stableId, versionId, req.Role, HttpContext.RequestAborted);
             await _perm.InvalidateAsync(req.UserId!, id, HttpContext.RequestAborted);
             return Ok();
         }
@@ -721,10 +647,15 @@ RETURN id";
                 .FirstOrDefaultAsync();
             if (stableId == Guid.Empty) return NotFound();
 
-            var existing = await _db.StudyPlanUserRoles.FirstOrDefaultAsync(r => r.PlanStableId == stableId && r.UserId == userId);
+            var personalGroupId = await _personalGroups.EnsurePersonalGroupAsync(userId, HttpContext.RequestAborted);
+            var existing = await _db.GroupPlanEnrollments.FirstOrDefaultAsync(r =>
+                r.StudyPlanStableId == stableId
+                && r.GroupId == personalGroupId
+                && r.Status == "Active", HttpContext.RequestAborted);
             if (existing != null)
             {
-                _db.StudyPlanUserRoles.Remove(existing);
+                existing.Status = "Archived";
+                existing.UpdatedAt = DateTimeOffset.UtcNow;
                 await _db.SaveChangesAsync();
                 await _perm.InvalidateAsync(userId, id, HttpContext.RequestAborted);
             }

@@ -1,7 +1,6 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Sciencetopia.Data;
@@ -24,15 +23,13 @@ public class StudyGroupController : ControllerBase
         public int? PinnedVersionNumber { get; set; }
     }
 
-    private sealed class SettingsEnrollmentRow
+    private sealed class SettingsMyCohortPlanRow
     {
-        public Guid ScopeId { get; set; }
-        public string? Status { get; set; }
-        public DateTimeOffset EnrolledAt { get; set; }
-        public DateTimeOffset? UpdatedAt { get; set; }
+        public Guid CohortId { get; set; }
+        public DateTimeOffset JoinedAt { get; set; }
         public Guid PlanVersionId { get; set; }
+        public Guid PlanStableId { get; set; }
         public string? CohortTitle { get; set; }
-        public Guid? StudyGroupId { get; set; }
     }
 
     // Dependency injection for database context
@@ -45,28 +42,6 @@ public class StudyGroupController : ControllerBase
         _studyGroupService = studyGroupService;
         _db = db;
         _cache = cache;
-    }
-
-    private static bool IsMissingColumnException(Exception ex, params string[] columnNames)
-    {
-        for (var current = ex; current != null; current = current.InnerException!)
-        {
-            if (current is SqlException sqlEx && sqlEx.Number == 207)
-            {
-                if (columnNames == null || columnNames.Length == 0)
-                {
-                    return true;
-                }
-
-                var message = sqlEx.Message ?? string.Empty;
-                if (columnNames.Any(name => message.Contains(name, StringComparison.OrdinalIgnoreCase)))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     [HttpGet("GetAllStudyGroups")]
@@ -246,33 +221,22 @@ public class StudyGroupController : ControllerBase
             };
         }).ToList();
 
-        List<SettingsCohortRow> cohorts;
-        try
-        {
-            cohorts = await _db.Cohorts.AsNoTracking()
-                .Where(c => c.StudyGroupId == gid)
-                .Join(_db.CohortOfferings.AsNoTracking(),
-                    c => c.CurrentOfferingId,
-                    o => o.Id,
-                    (c, o) => new { Cohort = c, Offering = o })
-                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
-                    co => co.Offering.StudyGroupStudyPlanId,
-                    sgsp => sgsp.Id,
-                    (co, sgsp) => new SettingsCohortRow
-                    {
-                        Id = co.Cohort.Id,
-                        Title = co.Cohort.Title,
-                        EnrollmentPolicy = co.Cohort.EnrollmentPolicy,
-                        StudyPlanVersionId = co.Offering.StudyPlanVersionId,
-                        StudyPlanStableId = sgsp.StudyPlanStableId,
-                        PinnedVersionNumber = sgsp.PinnedVersionNumber
-                    })
-                .ToListAsync();
-        }
-        catch (Exception ex) when (IsMissingColumnException(ex, "GroupId", "EnrollmentPolicy", "CurrentOfferingId"))
-        {
-            cohorts = new List<SettingsCohortRow>();
-        }
+        var cohorts = await _db.Cohorts.AsNoTracking()
+            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                c => c.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (c, sgsp) => new { Cohort = c, Adoption = sgsp })
+            .Where(x => x.Adoption.StudyGroupId == gid)
+            .Select(x => new SettingsCohortRow
+                {
+                    Id = x.Cohort.Id,
+                    Title = x.Cohort.Title,
+                    EnrollmentPolicy = x.Cohort.EnrollmentPolicy,
+                    StudyPlanVersionId = x.Cohort.StudyPlanVersionId,
+                    StudyPlanStableId = x.Adoption.StudyPlanStableId,
+                    PinnedVersionNumber = x.Adoption.PinnedVersionNumber
+                })
+            .ToListAsync();
 
         var cohortDtos = cohorts.Select(c =>
         {
@@ -310,35 +274,30 @@ public class StudyGroupController : ControllerBase
 
         if (!isManager)
         {
-            List<SettingsEnrollmentRow> myEnrollmentRows;
-            try
-            {
-                myEnrollmentRows = await _db.StudyPlanEnrollments.AsNoTracking()
-                    .Where(x => x.UserId == userId && x.ScopeType == "Cohort")
-                    .Join(_db.Cohorts.AsNoTracking(),
-                        e => e.ScopeId,
-                        c => c.Id,
-                        (e, c) => new SettingsEnrollmentRow
-                        {
-                            ScopeId = e.ScopeId,
-                            Status = e.Status,
-                            EnrolledAt = e.EnrolledAt,
-                            UpdatedAt = e.UpdatedAt,
-                            PlanVersionId = e.PlanVersionId,
-                            CohortTitle = c.Title,
-                            StudyGroupId = c.StudyGroupId
-                        })
-                    .Where(x => x.StudyGroupId == gid && (x.Status == "Active" || x.Status == "active"))
-                    .ToListAsync();
-            }
-            catch (Exception ex) when (IsMissingColumnException(ex, "GroupId", "EnrollmentPolicy", "CurrentOfferingId"))
-            {
-                myEnrollmentRows = new List<SettingsEnrollmentRow>();
-            }
+            var myEnrollmentRows = await _db.UserGroups.AsNoTracking()
+                .Where(x => x.UserId == userId && x.Status == "Active")
+                .Join(_db.Cohorts.AsNoTracking().Where(c => c.Status == "Active"),
+                    e => e.GroupId,
+                    c => c.Id,
+                    (e, c) => new { Membership = e, Cohort = c })
+                .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
+                    x => x.Cohort.StudyGroupStudyPlanId,
+                    sgsp => sgsp.Id,
+                    (x, sgsp) => new { x.Membership, x.Cohort, Adoption = sgsp })
+                .Where(x => x.Adoption.StudyGroupId == gid)
+                .Select(x => new SettingsMyCohortPlanRow
+                    {
+                        CohortId = x.Cohort.Id,
+                        JoinedAt = x.Membership.JoinedAt,
+                        PlanVersionId = x.Cohort.StudyPlanVersionId,
+                        PlanStableId = x.Adoption.StudyPlanStableId,
+                        CohortTitle = x.Cohort.Title
+                    })
+                .ToListAsync();
 
             myPlans = myEnrollmentRows
                 .GroupBy(x => x.PlanVersionId)
-                .Select(g => g.OrderByDescending(x => x.UpdatedAt ?? x.EnrolledAt).First())
+                .Select(g => g.OrderByDescending(x => x.JoinedAt).First())
                 .Select(x =>
                 {
                     var title = versionLookup.TryGetValue(x.PlanVersionId, out var versionInfo)
@@ -346,7 +305,7 @@ public class StudyGroupController : ControllerBase
                         : x.PlanVersionId.ToString();
                     return (object)new
                     {
-                        planId = versionLookup.TryGetValue(x.PlanVersionId, out var info) ? info.StableId : x.PlanVersionId,
+                        planId = x.PlanStableId != Guid.Empty ? x.PlanStableId : (versionLookup.TryGetValue(x.PlanVersionId, out var info) ? info.StableId : x.PlanVersionId),
                         title,
                         cohortTitle = x.CohortTitle ?? string.Empty
                     };

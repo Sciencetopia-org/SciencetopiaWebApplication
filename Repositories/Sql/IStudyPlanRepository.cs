@@ -177,8 +177,26 @@ public class StudyPlanRepository : IStudyPlanRepository
 
     public async Task<List<StudyPlanEntity>> GetStudyPlansByUserIdAsync(string userId)
     {
+        var userGuid = Guid.TryParse(userId, out var parsedUserId) ? parsedUserId : Guid.Empty;
+
+        var enrolledStableIds = await _dbContext.UserGroups.AsNoTracking()
+            .Where(ug => ug.UserId == userId && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .Join(_dbContext.GroupPlanEnrollments.AsNoTracking().Where(e => e.Status == "Active"),
+                ug => ug.GroupId,
+                e => e.GroupId,
+                (ug, e) => e.StudyPlanStableId)
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .ToListAsync();
+
         return await _dbContext.StudyPlans
-            .Where(sp => sp.CreatorId == Guid.Parse(userId))
+            .Where(sp =>
+                (userGuid != Guid.Empty && sp.CreatorId == userGuid)
+                || sp.CreatedBy == userId
+                || enrolledStableIds.Contains(sp.StableId)
+                || (sp.StableId == Guid.Empty && enrolledStableIds.Contains(sp.Id)))
+            .OrderByDescending(sp => sp.IsCurrent)
+            .ThenByDescending(sp => sp.UpdatedDate)
             .Select(sp => new StudyPlanEntity
             {
                 Id = sp.Id,

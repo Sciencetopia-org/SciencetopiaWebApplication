@@ -12,7 +12,7 @@ namespace Sciencetopia.Models
         [ForeignKey(nameof(Group))]
         public Guid Id { get; set; } = Guid.NewGuid();
 
-        // L10n binding per规范; keep legacy Name/Description as fallbacks
+        // L10n binding per规范; Name/Description remain direct display fields.
         public Guid? NameL10nSetId { get; set; }
         public Guid? DescriptionL10nSetId { get; set; }
 

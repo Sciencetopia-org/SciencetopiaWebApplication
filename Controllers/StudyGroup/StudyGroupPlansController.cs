@@ -14,12 +14,14 @@ namespace Sciencetopia.Controllers.StudyGroups
     {
         private readonly PlanSharingService _sharingService;
         private readonly StudyGroupService _groups;
+        private readonly PermissionService _permissions;
         private readonly ApplicationDbContext _db;
 
-        public StudyGroupPlansController(PlanSharingService sharingService, StudyGroupService groups, ApplicationDbContext db)
+        public StudyGroupPlansController(PlanSharingService sharingService, StudyGroupService groups, PermissionService permissions, ApplicationDbContext db)
         {
             _sharingService = sharingService;
             _groups = groups;
+            _permissions = permissions;
             _db = db;
         }
 
@@ -76,6 +78,12 @@ namespace Sciencetopia.Controllers.StudyGroups
             if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
             var isManager = await _groups.IsUserManagerAsync(studyGroupId, userId);
             if (!isManager) return Forbid();
+            if (!Guid.TryParse(studyGroupId, out var groupGuid)) return BadRequest("Invalid studyGroupId.");
+            if (!Guid.TryParse(planId, out var planGuid)) return BadRequest("Invalid planId.");
+            if (!await _permissions.CanAdoptPlanToGroupAsync(userId, planGuid, groupGuid, HttpContext.RequestAborted))
+            {
+                return Forbid();
+            }
 
             var rec = await _sharingService.ShareToStudyGroupAsync(studyGroupId, planId, request.Permission, request.AutoEnroll, request.VersionNumber, userId);
             return Ok(rec);

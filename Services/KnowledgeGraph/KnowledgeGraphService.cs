@@ -81,7 +81,7 @@ public class KnowledgeGraphService
         return data!;
     }
 
-    public async Task<object?> GetNodeDetailsByIdAsync(Guid nodeId, string language = "zh")
+    public async Task<KnowledgeNodeDetailDTO?> GetNodeDetailsByIdAsync(Guid nodeId, string language = "zh")
     {
         var details = await _knowledgeRepo.GetNodeDetailsByIdAsync(nodeId, language);
         if (!details.HasValue) return null;
@@ -93,13 +93,13 @@ public class KnowledgeGraphService
             if (!string.IsNullOrWhiteSpace(title)) d = (title!, d.Description, d.CreatedDate, d.UpdatedDate);
             if (!string.IsNullOrWhiteSpace(desc)) d = (d.Name, desc!, d.CreatedDate, d.UpdatedDate);
         }
-        return new
+        return new KnowledgeNodeDetailDTO
         {
-            id = nodeId,
-            name = d.Name,
-            description = d.Description,
-            createdDate = d.CreatedDate,
-            updatedDate = d.UpdatedDate
+            Id = nodeId,
+            Name = d.Name,
+            Description = d.Description,
+            CreatedDate = d.CreatedDate,
+            UpdatedDate = d.UpdatedDate
         };
     }
 

@@ -4,20 +4,21 @@ using Sciencetopia.Services;
 namespace Sciencetopia.Controllers.StudyPlan
 {
     [ApiController]
-    [Route("api/Plans")] 
+    [Route("api/Plans")]
     public class PlanPermissionsController : ControllerBase
     {
-        private readonly PlanSharingService _sharingService;
-        public PlanPermissionsController(PlanSharingService sharingService)
+        private readonly PermissionService _permissionService;
+        public PlanPermissionsController(PermissionService permissionService)
         {
-            _sharingService = sharingService;
+            _permissionService = permissionService;
         }
 
         [HttpGet("{planId}/Permissions")]
         public async Task<IActionResult> GetPermissions([FromRoute] string planId, [FromQuery] string userId)
         {
             if (string.IsNullOrEmpty(userId)) return BadRequest("userId is required");
-            var result = await _sharingService.GetEffectivePermissionsAsync(planId, userId);
+            if (!Guid.TryParse(planId, out var planGuid)) return BadRequest("Invalid planId.");
+            var result = await _permissionService.GetEffectivePermissionsAsync(userId, planGuid, null, HttpContext.RequestAborted);
             return Ok(result);
         }
     }

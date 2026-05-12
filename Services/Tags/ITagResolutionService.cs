@@ -12,6 +12,7 @@ public class TagResolutionService : ITagResolutionService
     private readonly ApplicationDbContext _db;
     private readonly Sciencetopia.Services.L10n.IL10nService _l10n;
     private readonly Sciencetopia.Middleware.ILanguageContext _langCtx;
+    private static string NormalizeKey(string value) => (value ?? string.Empty).Trim().ToLowerInvariant();
 
     public TagResolutionService(ApplicationDbContext db,
                                 Sciencetopia.Services.L10n.IL10nService l10n,
@@ -31,31 +32,73 @@ public class TagResolutionService : ITagResolutionService
 
         if (list.Count == 0) return (Array.Empty<Guid>(), Array.Empty<Guid>());
 
-        // Match by L10n name in effective language (fallback to null lang), case-insensitive
-        var lowerNames = list.Select(t => t.Clean.ToLower()).Distinct().ToList();
+        // Match by base name and L10n name across all languages, case-insensitive
+        var lowerNames = list.Select(t => NormalizeKey(t.Clean)).Distinct().ToList();
+        var lowerNameSet = lowerNames.ToHashSet();
         var lang = _langCtx.EffectiveLang;
 
-        var existing = await (
+        var baseCandidates = await _db.Tags
+            .Where(t => t.Id.HasValue && t.IsCurrent && t.Status == "Current" && t.Name != null)
+            .Select(t => new { t.Id, t.CreatedAt, Name = t.Name })
+            .ToListAsync();
+
+        var l10nCandidates = await (
             from t in _db.Tags
             where t.Id.HasValue && t.IsCurrent && t.Status == "Current"
             join tls in _db.TagL10nSets on t.Id!.Value equals tls.TagId
             join si in _db.L10nSetItems on tls.L10nSetId equals si.L10nSetId
             join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
-            where i.FieldKey == "name" && (i.LangCode == lang || i.LangCode == null)
-            select new { t.Id, Name = i.Content ?? i.Text }
+            where i.FieldKey == "name"
+            select new { t.Id, t.CreatedAt, i.LangCode, Name = i.Content ?? i.Text }
         ).ToListAsync();
 
-        var byLower = existing
-            .Where(x => x.Id.HasValue && !string.IsNullOrWhiteSpace(x.Name))
-            .GroupBy(x => (x.Name ?? string.Empty).ToLower())
-            .ToDictionary(g => g.Key, g => g.Select(x => x.Id!.Value).First());
+        var candidates = new List<(string NameLower, Guid Id, DateTimeOffset? CreatedAt, int Rank)>();
+
+        foreach (var row in baseCandidates)
+        {
+            if (!row.Id.HasValue || string.IsNullOrWhiteSpace(row.Name)) continue;
+            var key = NormalizeKey(row.Name);
+            if (lowerNameSet.Contains(key))
+            {
+                candidates.Add((key, row.Id.Value, row.CreatedAt, 0));
+            }
+        }
+
+        foreach (var row in l10nCandidates)
+        {
+            if (!row.Id.HasValue || string.IsNullOrWhiteSpace(row.Name)) continue;
+            var key = NormalizeKey(row.Name);
+            if (!lowerNameSet.Contains(key)) continue;
+            var rank = 3;
+            if (!string.IsNullOrWhiteSpace(lang) && string.Equals(row.LangCode, lang, StringComparison.OrdinalIgnoreCase))
+            {
+                rank = 1;
+            }
+            else if (row.LangCode == null)
+            {
+                rank = 2;
+            }
+            candidates.Add((key, row.Id.Value, row.CreatedAt, rank));
+        }
+
+        var byLower = candidates
+            .GroupBy(c => c.NameLower)
+            .ToDictionary(
+                g => g.Key,
+                g => g
+                    .OrderBy(c => c.Rank)
+                    .ThenBy(c => c.CreatedAt ?? DateTimeOffset.MinValue)
+                    .ThenBy(c => c.Id)
+                    .Select(c => c.Id)
+                    .First()
+            );
 
         var resolved = new List<Guid>();
         var created = new List<Guid>();
 
         foreach (var item in list)
         {
-            var key = item.Clean.ToLower();
+            var key = NormalizeKey(item.Clean);
             if (byLower.TryGetValue(key, out var id))
             {
                 resolved.Add(id);

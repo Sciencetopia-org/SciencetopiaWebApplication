@@ -13,7 +13,6 @@
     <PackageReference Include="Betalgo.OpenAI" Version="8.7.2" />
     <PackageReference Include="Elastic.Clients.Elasticsearch" Version="8.17.0" />
     <PackageReference Include="HtmlAgilityPack" Version="1.11.72" />
-    <PackageReference Include="iTextSharp" Version="5.5.13.4" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.8" />
     <PackageReference Include="Microsoft.AspNetCore.Cors" Version="2.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.1" />
@@ -33,5 +32,8 @@
   </ItemGroup>
 
   <!-- Removed old inclusion of backend/**/*.cs; backend is now its own project -->
+  <ItemGroup>
+    <Compile Remove="Tools\All150TagImporter\**\*.cs" />
+  </ItemGroup>
 
 </Project>

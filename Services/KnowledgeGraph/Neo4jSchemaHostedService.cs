@@ -9,6 +9,7 @@ public sealed class Neo4jSchemaHostedService : IHostedService
         "CREATE CONSTRAINT tag_stable_id IF NOT EXISTS FOR (n:Tag) REQUIRE n.stableId IS UNIQUE",
         "CREATE CONSTRAINT knowledge_node_stable_id IF NOT EXISTS FOR (n:KnowledgeNode) REQUIRE n.stableId IS UNIQUE",
         "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT group_id IF NOT EXISTS FOR (n:Group) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT study_plan_id IF NOT EXISTS FOR (n:StudyPlan) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT lesson_id IF NOT EXISTS FOR (n:Lesson) REQUIRE n.id IS UNIQUE",
         "CREATE CONSTRAINT resource_id IF NOT EXISTS FOR (n:Resource) REQUIRE n.id IS UNIQUE",

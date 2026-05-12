@@ -68,22 +68,14 @@ erDiagram
 
     COHORTENTITY {
         guid GroupId PK
-        guid StudyGroupId FK
-        guid CurrentOfferingId FK
-        string EnrollmentPolicy
-        string Status
-        string Title
-        string Visibility
-    }
-
-    COHORTOFFERING {
-        guid Id PK
-        guid CohortGroupId FK
         guid StudyGroupStudyPlanId FK
         guid StudyPlanVersionId FK
+        string EnrollmentPolicy
         string Status
         datetime StartAt
         datetime EndAt
+        string Title
+        string Visibility
     }
 
     USERGROUPENTITY {
@@ -142,16 +134,6 @@ erDiagram
         guid PlanStableId PK
         string UserId PK
         string Role
-    }
-
-    STUDYPLANENROLLMENT {
-        guid EnrollmentId PK
-        string UserId FK
-        string ScopeType
-        guid ScopeId
-        guid PlanVersionId FK
-        string Status
-        datetime EnrolledAt
     }
 
     KNOWLEDGENODE {
@@ -226,26 +208,20 @@ erDiagram
     APPLICATIONUSER ||--o{ FAVORITE : favorites
     APPLICATIONUSER ||--o{ USERGROUPENTITY : memberships
     APPLICATIONUSER ||--o{ STUDYPLANUSERROLE : plan_roles
-    APPLICATIONUSER ||--o{ STUDYPLANENROLLMENT : enrollments
-
     GROUPENTITY ||--|| STUDYGROUPENTITY : flavor
     GROUPENTITY ||--|| COHORTENTITY : flavor
     GROUPENTITY ||--o{ USERGROUPENTITY : members
+    GROUPENTITY ||--o{ STUDYGROUPSTUDYPLAN : plan_bindings
 
     STUDYGROUPENTITY ||--o{ STUDYGROUPSTUDYPLAN : plans
     STUDYGROUPENTITY ||--o{ GROUPPLANSWITCH : plan_switches
-    STUDYGROUPENTITY ||--o{ COHORTENTITY : cohorts
-    STUDYGROUPSTUDYPLAN ||--o{ COHORTOFFERING : offerings
+    STUDYGROUPSTUDYPLAN ||--o{ COHORTENTITY : cohorts
 
     STUDYPLANENTITY ||--o{ LESSONENTITY : lessons
     STUDYPLANENTITY ||--o{ STUDYPLANLESSONSNAPSHOT : lesson_snapshot
     STUDYPLANENTITY ||--o{ STUDYPLANUSERROLE : user_roles
     STUDYPLANENTITY ||--o{ STUDYGROUPSTUDYPLAN : group_binding
-    STUDYPLANENTITY ||--o{ COHORTOFFERING : offerings
-    STUDYPLANENTITY ||--o{ STUDYPLANENROLLMENT : enrollments
-
-    COHORTENTITY ||--o{ COHORTOFFERING : offerings
-    COHORTENTITY ||--o{ STUDYPLANENROLLMENT : enrollments
+    STUDYPLANENTITY ||--o{ COHORTENTITY : cohort_version
 
     LESSONENTITY ||--o{ STUDYPLANLESSONSNAPSHOT : snapshot
 
@@ -268,5 +244,5 @@ erDiagram
 Notes:
 - Identity tables (AspNetRoles, AspNetUserRoles, AspNetUserClaims, etc.) live in the Users schema and are not expanded here.
 - Some links use stable ids (StudyPlanStableId, TagStableId, LessonStableId) and are modeled as logical relations even when an explicit FK is not configured.
-- StudyPlanEnrollments uses (ScopeType, ScopeId) to reference either Cohorts.GroupId (Cohort) or Groups.GroupId (PersonalGroup).
+- Plan enrollment is group-level. Personal plans use UserGroups membership + StudyPlans.GroupPlanEnrollments. Cohort plans use UserGroups membership + StudyGroups.Cohorts. StudyGroups.StudyGroupStudyPlans is the stable study-group adoption/catalog relation.
 - Lesson tag relations are stored in Neo4j via `(:Tag)-[:TAGGED_WITH]->(:Lesson)`.

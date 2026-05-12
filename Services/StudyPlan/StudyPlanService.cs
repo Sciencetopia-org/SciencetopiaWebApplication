@@ -7,12 +7,14 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Sciencetopia.Services.Plans;
 
 public class StudyPlanService
 {
     private readonly IDriver _neo4jDriver;
     private readonly ILogger<StudyPlanService> _logger;
     private readonly IStudyPlanRepository _sqlRepository;
+    private readonly IPersonalPlanEnrollmentService _personalEnrollment;
     private readonly IMemoryCache _cache;
     private readonly ITagRepository? _tagRepo; // optional via DI in controller methods
     private readonly ITagResolutionService? _tagResolution;
@@ -24,11 +26,12 @@ public class StudyPlanService
     private static readonly TimeSpan SingleLessonGraphMetaCacheTtl = TimeSpan.FromMinutes(10);
     private static readonly JsonSerializerOptions CloneJsonOptions = new(JsonSerializerDefaults.Web);
 
-    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository, IMemoryCache cache)
+    public StudyPlanService(IDriver neo4jDriver, ILogger<StudyPlanService> logger, IStudyPlanRepository sqlRepository, IPersonalPlanEnrollmentService personalEnrollment, IMemoryCache cache)
     {
         _neo4jDriver = neo4jDriver;
         _logger = logger;
         _sqlRepository = sqlRepository;
+        _personalEnrollment = personalEnrollment;
         _cache = cache;
     }
 
@@ -105,10 +108,11 @@ public class StudyPlanService
         IDriver neo4jDriver,
         ILogger<StudyPlanService> logger,
         IStudyPlanRepository sqlRepository,
+        IPersonalPlanEnrollmentService personalEnrollment,
         IMemoryCache cache,
         ITagRepository tagRepository,
         ITagResolutionService tagResolution)
-        : this(neo4jDriver, logger, sqlRepository, cache)
+        : this(neo4jDriver, logger, sqlRepository, personalEnrollment, cache)
     {
         _tagRepo = tagRepository;
         _tagResolution = tagResolution;
@@ -148,6 +152,7 @@ public class StudyPlanService
         };
 
         await _sqlRepository.InsertStudyPlanAsync(planEntity);
+        await _personalEnrollment.EnsureEnrollmentAsync(userId, planStableId, planVersionId);
 
         var snapshots = await UpdateLessonsAsync(planStableId, planVersionId, planEntity.VersionNumber, planDto, createNewVersion: false, userId, utcOffsetNow);
         await _sqlRepository.ReplacePlanLessonSnapshotsAsync(planStableId, planEntity.VersionNumber, snapshots);
@@ -197,13 +202,48 @@ public class StudyPlanService
 
     private string BuildPlanMetadataJson(StudyPlanDetail? studyPlan)
     {
-        var counts = new
+        var metadata = new Dictionary<string, object?>
         {
-            prerequisites = studyPlan?.Prerequisite?.Count ?? 0,
-            mainCurriculum = studyPlan?.MainCurriculum?.Count ?? 0,
-            advancedTopics = studyPlan?.AdvancedTopics?.Count ?? 0
+            ["prerequisites"] = studyPlan?.Prerequisite?.Count ?? 0,
+            ["mainCurriculum"] = studyPlan?.MainCurriculum?.Count ?? 0,
+            ["advancedTopics"] = studyPlan?.AdvancedTopics?.Count ?? 0,
+            ["allowCohortSharing"] = studyPlan?.AllowCohortSharing ?? false
         };
-        return JsonSerializer.Serialize(counts);
+        return JsonSerializer.Serialize(metadata);
+    }
+
+    private static bool ReadAllowCohortSharing(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (doc.RootElement.TryGetProperty("allowCohortSharing", out var value)
+                || doc.RootElement.TryGetProperty("AllowCohortSharing", out value))
+            {
+                return value.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.String => bool.TryParse(value.GetString(), out var parsed) && parsed,
+                    _ => false
+                };
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return false;
     }
 
     private async Task<List<StudyPlanLessonSnapshot>> UpdateLessonsAsync(Guid planStableId, Guid planVersionId, int planVersionNumber, StudyPlanDetail? studyPlan, bool createNewVersion, string userId, DateTimeOffset timestamp)
@@ -497,6 +537,10 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
         var stableId = existingPlan.StableId == Guid.Empty ? planId : existingPlan.StableId;
         var utcNow = DateTime.UtcNow;
         var offsetNow = DateTimeOffset.UtcNow;
+        if (updatedStudyPlan.StudyPlan != null && !updatedStudyPlan.StudyPlan.AllowCohortSharing)
+        {
+            updatedStudyPlan.StudyPlan.AllowCohortSharing = ReadAllowCohortSharing(existingPlan.MetadataJson);
+        }
 
         StudyPlanEntity targetVersion;
 
@@ -580,14 +624,18 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
 
     public async Task<bool> MarkStudyPlanAsCompletedAsync(string studyPlanTitle, string userId)
     {
+        var personalGroupId = await _personalEnrollment.EnsurePersonalGroupProjectionAsync(userId);
         var session = _neo4jDriver.AsyncSession();
         try
         {
             var result = await session.RunAsync($@"
             MATCH (u:User {{id: $userId}})-[r:CREATED]->(p:StudyPlan {{title: $title}})
-            CREATE (u)-[rel:COMPLETED]->(p)
+            MERGE (g:Group {{id: $groupId}})
+            SET g.kind = 'PersonalGroup'
+            MERGE (u)-[:MEMBER_OF]->(g)
+            CREATE (g)-[rel:COMPLETED]->(p)
             RETURN COUNT(rel) > 0",
-                new { userId, title = studyPlanTitle });
+                new { userId, groupId = personalGroupId.ToString(), title = studyPlanTitle });
 
             var summary = await result.ConsumeAsync();
             return summary.Counters.RelationshipsCreated > 0;
@@ -600,14 +648,15 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
 
     public async Task<bool> DisMarkStudyPlanAsCompletedAsync(string studyPlanTitle, string userId)
     {
+        var personalGroupId = await _personalEnrollment.EnsurePersonalGroupProjectionAsync(userId);
         var session = _neo4jDriver.AsyncSession();
         try
         {
             var result = await session.RunAsync($@"
-            MATCH (u:User {{id: $userId}})-[r:COMPLETED]->(p:StudyPlan {{title: $title}})
+            MATCH (g:Group {{id: $groupId}})-[r:COMPLETED]->(p:StudyPlan {{title: $title}})
             DELETE r
             RETURN COUNT(r) > 0",
-                new { userId, title = studyPlanTitle });
+                new { groupId = personalGroupId.ToString(), title = studyPlanTitle });
 
             var summary = await result.ConsumeAsync();
             return summary.Counters.RelationshipsDeleted > 0;
@@ -620,13 +669,14 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
 
     public async Task<int> CountCompletedStudyPlansAsync(string userId)
     {
+        var personalGroupId = await _personalEnrollment.EnsurePersonalGroupProjectionAsync(userId);
         var session = _neo4jDriver.AsyncSession();
         try
         {
             var result = await session.RunAsync($@"
-            MATCH (u:User {{id: $userId}})-[r:COMPLETED]->(p:StudyPlan)
+            MATCH (g:Group {{id: $groupId}})-[r:COMPLETED]->(p:StudyPlan)
             RETURN COUNT(r)",
-                new { userId });
+                new { groupId = personalGroupId.ToString() });
 
             var count = await result.SingleAsync();
             return count[0].As<int>();
@@ -690,6 +740,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
                 Status = entity.Status,
                 IsCurrent = entity.IsCurrent,
                 PublishedAt = entity.PublishedAt,
+                AllowCohortSharing = ReadAllowCohortSharing(entity.MetadataJson),
                 Introduction = new Introduction { Description = entity.Description },
                 Prerequisite = new List<Lesson>(),
                 MainCurriculum = new List<Lesson>(),
@@ -1024,6 +1075,7 @@ MERGE (l)-[:ASSOCIATED_WITH]->(k)", new { lessonId = lesson.Id });
             Status = entity.Status,
             IsCurrent = entity.IsCurrent,
             PublishedAt = entity.PublishedAt,
+            AllowCohortSharing = ReadAllowCohortSharing(entity.MetadataJson),
             Introduction = new Introduction { Description = entity.Description },
             Prerequisite = new List<Lesson>(),
             MainCurriculum = new List<Lesson>(),

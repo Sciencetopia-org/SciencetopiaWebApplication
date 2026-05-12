@@ -7,6 +7,7 @@ using Sciencetopia.Services;
 using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Services.KnowledgeGraph;
+using Sciencetopia.Services.Progress;
 
 namespace Sciencetopia.Controllers.KnowledgeNetwork
 {
@@ -19,8 +20,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         private readonly KnowledgeGraphService _knowledgeGraphService;
         private readonly ITagRepository _tagRepository;
         private readonly IGraphRepository _graphRepository;
+        private readonly IResourceRepository _resourceRepository;
+        private readonly IResourceProgressService _resourceProgressService;
 
-        public KnowledgeGraphController(IDriver driver, ApplicationDbContext context, KnowledgeGraphService knowledgeGraphService, ITagRepository tagRepository, IGraphRepository graphRepository)
+        public KnowledgeGraphController(
+            IDriver driver,
+            ApplicationDbContext context,
+            KnowledgeGraphService knowledgeGraphService,
+            ITagRepository tagRepository,
+            IGraphRepository graphRepository,
+            IResourceRepository resourceRepository,
+            IResourceProgressService resourceProgressService)
         {
             // Initialize Neo4j driver
             _driver = driver;
@@ -28,6 +38,8 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             _knowledgeGraphService = knowledgeGraphService;
             _tagRepository = tagRepository;
             _graphRepository = graphRepository;
+            _resourceRepository = resourceRepository;
+            _resourceProgressService = resourceProgressService;
         }
 
         /// <summary>
@@ -135,12 +147,69 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                     return BadRequest("Invalid Node ID format.");
                 }
                 var data = await _knowledgeGraphService.GetNodeDetailsByIdAsync(parsedNodeId, lang);
-                if (data != null)
+                if (data == null) return NotFound("Node not found.");
+
+                var resourceIds = await _graphRepository.GetResourcesIdsRelatedToNodeAsync(parsedNodeId.ToString());
+                var orderedResourceIds = resourceIds
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (orderedResourceIds.Count > 0)
                 {
-                    return Ok(data);
+                    var resources = await _resourceRepository.GetResourcesByIdsAsync(orderedResourceIds);
+                    var resourcesById = resources
+                        .Where(r => r.Id != Guid.Empty)
+                        .GroupBy(r => r.Id.ToString(), StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                    var parsedResourceIds = resources
+                        .Where(r => r.Id != Guid.Empty)
+                        .Select(r => r.Id)
+                        .Distinct()
+                        .ToList();
+
+                    HashSet<Guid> completedIds = new();
+                    string? userId = User?.Identity?.IsAuthenticated == true
+                        ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                        : null;
+
+                    if (!string.IsNullOrWhiteSpace(userId) && parsedResourceIds.Count > 0)
+                    {
+                        var completedStatuses = await _resourceProgressService.GetCompletedStatusAsync(userId, parsedResourceIds);
+                        completedIds = completedStatuses
+                            .Where(x => x.completed)
+                            .Select(x => x.resourceId)
+                            .ToHashSet();
+                    }
+
+                    data.Resources = orderedResourceIds
+                        .Select(resourceId =>
+                        {
+                            if (resourcesById.TryGetValue(resourceId, out var resource))
+                            {
+                                return new ResourceDTO
+                                {
+                                    Id = resource.Id.ToString(),
+                                    Name = resource.Name ?? resource.Link ?? resourceId,
+                                    Link = resource.Link,
+                                    Learned = completedIds.Contains(resource.Id)
+                                };
+                            }
+
+                            return new ResourceDTO
+                            {
+                                Id = resourceId,
+                                Name = resourceId,
+                                Link = null,
+                                Learned = false
+                            };
+                        })
+                        .ToList();
                 }
 
-                return NotFound("Node not found.");
+                return Ok(data);
+
             }
             catch (Exception ex)
             {

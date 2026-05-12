@@ -1,14 +1,17 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Neo4j.Driver;
 using Sciencetopia.Data;
 using Sciencetopia.Models;
 using Sciencetopia.Models.Enums;
 using Sciencetopia.Services;
-using Microsoft.AspNetCore.Authorization;
+using Sciencetopia.Services.Cohorts;
 using Sciencetopia.Services.Progress;
-using Microsoft.Extensions.Caching.Memory;
+using System.Security.Claims;
+using System.Text.Json.Serialization;
 
 namespace Sciencetopia.Controllers.StudyGroups;
 
@@ -21,7 +24,9 @@ public class GroupCohortsController : ControllerBase
     private readonly StudyGroupService _groups;
     private readonly IResourceProgressService _progress;
     private readonly PermissionService _perm;
+    private readonly ICohortService _cohorts;
     private readonly IMemoryCache _cache;
+    private readonly ILogger<GroupCohortsController> _logger;
 
     public GroupCohortsController(
         ApplicationDbContext db,
@@ -29,73 +34,65 @@ public class GroupCohortsController : ControllerBase
         StudyGroupService groups,
         IResourceProgressService progress,
         PermissionService perm,
-        IMemoryCache cache)
+        ICohortService cohorts,
+        IMemoryCache cache,
+        ILogger<GroupCohortsController> logger)
     {
         _db = db;
         _driver = driver;
         _groups = groups;
         _progress = progress;
         _perm = perm;
+        _cohorts = cohorts;
         _cache = cache;
-    }
-
-    private async Task<Dictionary<Guid, int>> GetCohortMemberCountsAsync(List<Guid> cohortIds)
-    {
-        if (cohortIds == null || cohortIds.Count == 0) return new Dictionary<Guid, int>();
-
-        return await _db.UserGroups.AsNoTracking()
-            .Where(ug => cohortIds.Contains(ug.GroupId) && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
-            .GroupBy(ug => ug.GroupId)
-            .Select(g => new { GroupId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.GroupId, x => x.Count);
+        _logger = logger;
     }
 
     public class CreateGroupCohortRequest
     {
         public string? Title { get; set; }
         public string? Visibility { get; set; }
+
+        [JsonConverter(typeof(JsonStringEnumConverter))]
         public CohortEnrollMode? EnrollMode { get; set; }
     }
 
-    [HttpGet("CohortPlans")] // B5-4 list group-scoped
+    public class UpdateGroupCohortRequest
+    {
+        [JsonConverter(typeof(JsonStringEnumConverter))]
+        public CohortEnrollMode? EnrollMode { get; set; }
+        public int? PinnedVersionNumber { get; set; }
+    }
+
+    private sealed record GroupCohortPlanCohortCard(
+        Guid Id,
+        Guid StudyPlanId,
+        Guid StudyPlanStableId,
+        string? Title,
+        string? Visibility,
+        string EnrollMode,
+        int? PinnedVersionNumber,
+        int MemberCount,
+        double AvgProgress,
+        DateTime CreatedAt,
+        string? CreatedBy);
+
+    [HttpGet("CohortPlans")]
     public async Task<IActionResult> List(Guid groupId)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
+
         var cacheKey = $"group:cohortplans:{groupId}:{userId}";
-        if (_cache.TryGetValue<object>(cacheKey, out var cached) && cached != null)
-        {
-            return Ok(cached);
-        }
+        if (_cache.TryGetValue<object>(cacheKey, out var cached) && cached != null) return Ok(cached);
 
-        var cohorts = await _db.Cohorts.AsNoTracking()
-            .Where(c => c.StudyGroupId == groupId)
-            .Join(_db.CohortOfferings.AsNoTracking(),
-                c => c.CurrentOfferingId,
-                o => o.Id,
-                (c, o) => new { Cohort = c, Offering = o })
-            .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
-                co => co.Offering.StudyGroupStudyPlanId,
-                sgsp => sgsp.Id,
-                (co, sgsp) => new
-                {
-                    co.Cohort,
-                    co.Offering,
-                    sgsp.StudyPlanStableId
-                })
+        var adoptions = await _db.StudyGroupStudyPlans.AsNoTracking()
+            .Where(x => x.StudyGroupId == groupId)
+            .OrderByDescending(x => x.UpdatedDate)
             .ToListAsync();
 
-        var planVersionIds = cohorts.Select(c => c.Offering.StudyPlanVersionId).Distinct().ToList();
-        var versionSummaries = await _db.StudyPlans.AsNoTracking()
-            .Where(p => planVersionIds.Contains(p.Id))
-            .Select(p => new { p.Id, p.StableId, p.VersionNumber, p.IsCurrent, p.Title })
-            .ToListAsync();
-
-        var stableIds = cohorts
-            .Select(c => c.StudyPlanStableId)
-            .Where(id => id != Guid.Empty)
-            .Distinct()
-            .ToList();
+        var adoptionIds = adoptions.Select(x => x.Id).ToList();
+        var stableIds = adoptions.Select(x => x.StudyPlanStableId).Where(x => x != Guid.Empty).Distinct().ToList();
 
         var planSummaries = await _db.StudyPlans.AsNoTracking()
             .Where(p => stableIds.Contains(p.StableId == Guid.Empty ? p.Id : p.StableId))
@@ -104,57 +101,106 @@ public class GroupCohortsController : ControllerBase
 
         var currentVersionLookup = planSummaries
             .GroupBy(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.OrderByDescending(x => x.IsCurrent).ThenByDescending(x => x.VersionNumber).First().VersionNumber
-            );
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.IsCurrent).ThenByDescending(x => x.VersionNumber).First().VersionNumber);
 
         var titleLookup = planSummaries
             .GroupBy(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.OrderByDescending(x => x.VersionNumber).First().Title
-            );
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.VersionNumber).First().Title);
 
-        var versionLookup = versionSummaries.ToDictionary(
-            v => v.Id,
-            v => new
-            {
-                StableId = v.StableId == Guid.Empty ? v.Id : v.StableId,
-                v.VersionNumber,
-                v.Title
-            });
+        var versionByStable = planSummaries
+            .GroupBy(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.IsCurrent).ThenByDescending(x => x.VersionNumber).First());
 
-        var cohortIds = cohorts.Select(c => c.Cohort.Id).ToList();
+        var cohorts = await _db.Cohorts.AsNoTracking()
+            .Where(c => adoptionIds.Contains(c.StudyGroupStudyPlanId) && c.Status == "Active")
+            .ToListAsync();
+
+        var allVersionIds = adoptions
+            .Where(x => x.PlanVersionId.HasValue)
+            .Select(x => x.PlanVersionId!.Value)
+            .Concat(cohorts.Select(c => c.StudyPlanVersionId))
+            .Distinct()
+            .ToList();
+
+        var versionLookup = await _db.StudyPlans.AsNoTracking()
+            .Where(p => allVersionIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.StableId, p.VersionNumber, p.IsCurrent, p.Title })
+            .ToDictionaryAsync(x => x.Id, x => x);
+
+        var cohortsByAdoption = cohorts
+            .GroupBy(x => x.StudyGroupStudyPlanId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.CreatedAt).ToList());
+
+        var cohortIds = cohorts.Select(c => c.Id).Distinct().ToList();
         var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
+        var summaryTasks = cohortIds.ToDictionary(id => id, id => _progress.GetCohortSummaryAsync(id));
+        await Task.WhenAll(summaryTasks.Values);
 
-        var result = await Task.WhenAll(cohorts.Select(async c =>
+        var result = await Task.WhenAll(adoptions.Select(async adoption =>
         {
-            versionLookup.TryGetValue(c.Offering.StudyPlanVersionId, out var versionInfo);
-            var stableId = c.StudyPlanStableId != Guid.Empty ? c.StudyPlanStableId : (versionInfo?.StableId ?? Guid.Empty);
-            var title = stableId != Guid.Empty && titleLookup.TryGetValue(stableId, out var t) ? t : versionInfo?.Title;
+            var stableId = adoption.StudyPlanStableId;
+            var targetVersionId = adoption.PlanVersionId;
+            if (!targetVersionId.HasValue && versionByStable.TryGetValue(stableId, out var resolvedVersion))
+            {
+                targetVersionId = resolvedVersion.Id;
+            }
+
+            var title = stableId != Guid.Empty && titleLookup.TryGetValue(stableId, out var t) ? t : null;
             var currentNo = stableId != Guid.Empty && currentVersionLookup.TryGetValue(stableId, out var cur) ? cur : (int?)null;
-            var pinnedNo = versionInfo?.VersionNumber;
-            var memberCount = memberCounts.TryGetValue(c.Cohort.Id, out var cnt) ? cnt : 0;
-            var summary = await _progress.GetCohortSummaryAsync(c.Cohort.Id);
-            var role = await _perm.GetEffectivePlanRoleAsync(userId, c.Offering.StudyPlanVersionId);
+            var pinnedNo = adoption.PinnedVersionNumber;
+            if (!pinnedNo.HasValue && targetVersionId.HasValue && versionLookup.TryGetValue(targetVersionId.Value, out var adoptionVersion))
+            {
+                pinnedNo = adoptionVersion.VersionNumber;
+                title ??= adoptionVersion.Title;
+            }
+
+            var cohortCards = new List<GroupCohortPlanCohortCard>();
+            if (cohortsByAdoption.TryGetValue(adoption.Id, out var cohortRows))
+            {
+                cohortCards = cohortRows.Select(c =>
+                {
+                    versionLookup.TryGetValue(c.StudyPlanVersionId, out var versionInfo);
+                    var memberCount = memberCounts.TryGetValue(c.Id, out var cnt) ? cnt : 0;
+                    var summary = summaryTasks.TryGetValue(c.Id, out var task) ? task.Result : default;
+                    return new GroupCohortPlanCohortCard(
+                        c.Id,
+                        c.StudyPlanVersionId,
+                        stableId,
+                        c.Title,
+                        c.Visibility,
+                        c.EnrollmentPolicy.ToString(),
+                        versionInfo?.VersionNumber,
+                        summary.memberCount > 0 ? summary.memberCount : memberCount,
+                        summary.avgProgress,
+                        c.CreatedAt,
+                        c.CreatedBy);
+                }).ToList();
+            }
+
+            var role = targetVersionId.HasValue
+                ? await _perm.GetEffectivePlanRoleAsync(userId, targetVersionId.Value)
+                : PlanRole.Viewer;
+            var primaryCohort = cohortCards.FirstOrDefault();
 
             return new
             {
-                id = c.Cohort.Id,
-                studyPlanId = c.Offering.StudyPlanVersionId, // for FE routing
+                id = primaryCohort?.Id,
+                studyPlanId = targetVersionId,
                 studyPlanStableId = stableId,
                 planTitle = title,
                 planCurrentVersionNumber = currentNo,
-                title = c.Cohort.Title,
-                visibility = c.Cohort.Visibility,
-                enrollMode = c.Cohort.EnrollmentPolicy,
+                title = primaryCohort?.Title,
+                visibility = primaryCohort?.Visibility,
+                enrollMode = primaryCohort?.EnrollMode,
                 pinnedVersionNumber = pinnedNo,
-                memberCount = summary.memberCount > 0 ? summary.memberCount : memberCount,
-                avgProgress = summary.avgProgress,
+                memberCount = cohortCards.Sum(x => x.MemberCount),
+                avgProgress = cohortCards.Count > 0 ? cohortCards.Average(x => x.AvgProgress) : 0,
                 role = role.ToString(),
-                createdAt = c.Cohort.CreatedAt,
-                createdBy = c.Cohort.CreatedBy
+                sharePermission = adoption.Permission,
+                autoEnroll = adoption.AutoEnroll,
+                createdAt = adoption.CreatedDate,
+                createdBy = adoption.CreatedBy,
+                cohorts = cohortCards
             };
         }));
 
@@ -167,140 +213,223 @@ public class GroupCohortsController : ControllerBase
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        if (!await _groups.IsUserMemberAsync(groupId.ToString(), userId)) return Forbid();
 
-        var canRead = await _groups.IsUserMemberAsync(groupId.ToString(), userId);
-        if (!canRead) return Forbid();
-
-        var cohorts = await _db.Cohorts.AsNoTracking()
-            .Where(c => c.StudyGroupId == groupId)
-            .Join(_db.CohortOfferings.AsNoTracking(),
-                c => c.CurrentOfferingId,
-                o => o.Id,
-                (c, o) => new { Cohort = c, Offering = o })
+        var rows = await _db.Cohorts.AsNoTracking()
             .Join(_db.StudyGroupStudyPlans.AsNoTracking(),
-                co => co.Offering.StudyGroupStudyPlanId,
+                c => c.StudyGroupStudyPlanId,
                 sgsp => sgsp.Id,
-                (co, sgsp) => new
-                {
-                    co.Cohort,
-                    co.Offering,
-                    sgsp.StudyPlanStableId
-                })
-            .Where(x => x.StudyPlanStableId == planStableId)
+                (c, sgsp) => new { Cohort = c, Adoption = sgsp })
+            .Where(x => x.Adoption.StudyGroupId == groupId
+                && x.Adoption.StudyPlanStableId == planStableId
+                && x.Cohort.Status == "Active")
             .OrderByDescending(x => x.Cohort.CreatedAt)
             .ToListAsync();
 
-        var planVersionIds = cohorts.Select(c => c.Offering.StudyPlanVersionId).Distinct().ToList();
-        var versions = await _db.StudyPlans.AsNoTracking()
-            .Where(p => planVersionIds.Contains(p.Id))
+        var versionIds = rows.Select(x => x.Cohort.StudyPlanVersionId).Distinct().ToList();
+        var versionMap = await _db.StudyPlans.AsNoTracking()
+            .Where(p => versionIds.Contains(p.Id))
             .Select(p => new { p.Id, p.Title, p.VersionNumber })
-            .ToListAsync();
-        var versionMap = versions.ToDictionary(x => x.Id, x => x);
+            .ToDictionaryAsync(x => x.Id, x => x);
 
-        var cohortIds = cohorts.Select(c => c.Cohort.Id).ToList();
-        var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
+        var memberCounts = await GetCohortMemberCountsAsync(rows.Select(x => x.Cohort.Id).ToList());
 
-        var result = cohorts.Select(c =>
+        var result = rows.Select(x =>
         {
-            versionMap.TryGetValue(c.Offering.StudyPlanVersionId, out var versionInfo);
-            var memberCount = memberCounts.TryGetValue(c.Cohort.Id, out var cnt) ? cnt : 0;
-
+            versionMap.TryGetValue(x.Cohort.StudyPlanVersionId, out var versionInfo);
+            memberCounts.TryGetValue(x.Cohort.Id, out var memberCount);
             return new
             {
-                id = c.Cohort.Id,
-                studyGroupId = c.Cohort.StudyGroupId,
-                studyPlanStableId = c.StudyPlanStableId,
-                studyPlanId = c.Offering.StudyPlanVersionId,
+                id = x.Cohort.Id,
+                studyGroupId = x.Adoption.StudyGroupId,
+                studyPlanStableId = x.Adoption.StudyPlanStableId,
+                studyPlanId = x.Cohort.StudyPlanVersionId,
                 planTitle = versionInfo?.Title,
-                title = c.Cohort.Title,
-                visibility = c.Cohort.Visibility,
-                enrollMode = c.Cohort.EnrollmentPolicy.ToString(),
+                title = x.Cohort.Title,
+                visibility = x.Cohort.Visibility,
+                enrollMode = x.Cohort.EnrollmentPolicy.ToString(),
                 pinnedVersionNumber = versionInfo?.VersionNumber,
                 memberCount,
-                createdAt = c.Cohort.CreatedAt,
-                createdBy = c.Cohort.CreatedBy
+                createdAt = x.Cohort.CreatedAt,
+                createdBy = x.Cohort.CreatedBy
             };
         });
 
         return Ok(result);
     }
 
-    [HttpPost("Plans/{planStableId:guid}/Cohorts")] // B5-4 create group-scoped
-    [Authorize(Policy = "Plan.Edit")]
+    [HttpPost("Plans/{planStableId:guid}/Cohorts")]
     public async Task<IActionResult> Create(Guid groupId, Guid planStableId, [FromBody] CreateGroupCohortRequest body)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
-        if (!isManager) return Forbid();
+        if (!await _groups.IsUserManagerAsync(groupId.ToString(), userId)) return Forbid();
 
         var adoption = await _db.StudyGroupStudyPlans.AsNoTracking()
             .FirstOrDefaultAsync(x => x.StudyGroupId == groupId && x.StudyPlanStableId == planStableId);
-        if (adoption == null)
+        if (adoption == null) return NotFound(new { message = "Study plan not adopted by this group." });
+
+        var current = adoption.PlanVersionId.HasValue
+            ? await _db.StudyPlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == adoption.PlanVersionId.Value)
+            : null;
+        current ??= await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == planStableId || (p.StableId == Guid.Empty && p.Id == planStableId))
+            .OrderByDescending(p => p.IsCurrent)
+            .ThenByDescending(p => p.VersionNumber)
+            .FirstOrDefaultAsync();
+        if (current == null) return NotFound(new { message = "Study plan version not found." });
+
+        var cohortId = Guid.NewGuid();
+        var title = body.Title;
+        var visibility = string.IsNullOrEmpty(body.Visibility) ? "group" : body.Visibility;
+        var enrollmentPolicy = body.EnrollMode ?? CohortEnrollMode.OptIn;
+
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            return NotFound(new { message = "Study plan not adopted by this group." });
+            await using var transaction = await _db.Database.BeginTransactionAsync();
+            try
+            {
+                _db.Groups.Add(new GroupEntity
+                {
+                    Id = cohortId,
+                    Kind = "Cohort",
+                    CreatedByUserId = userId,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                });
+
+                _db.Cohorts.Add(new CohortEntity
+                {
+                    Id = cohortId,
+                    StudyGroupStudyPlanId = adoption.Id,
+                    StudyPlanVersionId = current.Id,
+                    Title = title,
+                    Visibility = visibility,
+                    EnrollmentPolicy = enrollmentPolicy,
+                    Status = "Active",
+                    StartAt = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow,
+                    CreatedBy = userId
+                });
+
+                await _db.SaveChangesAsync();
+                await transaction.CommitAsync();
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                _db.ChangeTracker.Clear();
+                throw;
+            }
+        });
+
+        var graphSynced = await SyncCohortGraphAsync(cohortId, groupId, planStableId, current.VersionNumber, title, visibility);
+
+        var enrolledCount = 0;
+        if (enrollmentPolicy == CohortEnrollMode.Auto || adoption.AutoEnroll)
+        {
+            enrolledCount = await _cohorts.RunAutoEnrollAsync(cohortId, groupId, HttpContext.RequestAborted);
+        }
+        else
+        {
+            await _cohorts.JoinCohortAsync(cohortId, userId, true, HttpContext.RequestAborted);
+            enrolledCount = 1;
         }
 
-        StudyPlanEntity? current = null;
-        if (adoption.PlanVersionId.HasValue)
+        return Ok(new { cohortId, pinnedVersionNumber = current.VersionNumber, graphSynced, enrolledCount });
+    }
+
+    [HttpPatch("Cohorts/{cohortId:guid}")]
+    [Authorize(Policy = "Cohort.Manage")]
+    public async Task<IActionResult> Patch(Guid groupId, Guid cohortId, [FromBody] UpdateGroupCohortRequest body)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        if (!await _groups.IsUserManagerAsync(groupId.ToString(), userId)) return Forbid();
+
+        var row = await _db.Cohorts
+            .Join(_db.StudyGroupStudyPlans,
+                c => c.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (c, sgsp) => new { Cohort = c, Adoption = sgsp })
+            .FirstOrDefaultAsync(x => x.Cohort.Id == cohortId && x.Adoption.StudyGroupId == groupId);
+        if (row == null) return NotFound();
+
+        if (body.EnrollMode.HasValue) row.Cohort.EnrollmentPolicy = body.EnrollMode.Value;
+
+        int? pinnedNo = null;
+        if (body.PinnedVersionNumber.HasValue)
         {
-            current = await _db.StudyPlans.AsNoTracking()
-                .FirstOrDefaultAsync(p => p.Id == adoption.PlanVersionId.Value);
+            var requestedNo = body.PinnedVersionNumber.Value;
+            var planVersion = await _db.StudyPlans.AsNoTracking()
+                .FirstOrDefaultAsync(p =>
+                    (p.StableId == row.Adoption.StudyPlanStableId || (p.StableId == Guid.Empty && p.Id == row.Adoption.StudyPlanStableId))
+                    && p.VersionNumber == requestedNo);
+            if (planVersion == null) return BadRequest(new { code = "version_not_found", versionNumber = requestedNo });
+
+            row.Cohort.StudyPlanVersionId = planVersion.Id;
+            pinnedNo = requestedNo;
         }
-        if (current == null)
-        {
-            current = await _db.StudyPlans.AsNoTracking()
-                .Where(p => p.StableId == planStableId || (p.StableId == Guid.Empty && p.Id == planStableId))
-                .OrderByDescending(p => p.IsCurrent)
-                .ThenByDescending(p => p.VersionNumber)
-                .FirstOrDefaultAsync();
-        }
-        if (current == null)
-        {
-            return NotFound(new { message = "Study plan version not found." });
-        }
 
-        var pinnedNo = current.VersionNumber;
-
-        var group = new GroupEntity
-        {
-            Kind = "Cohort",
-            CreatedByUserId = userId,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow
-        };
-
-        var cohort = new CohortEntity
-        {
-            Id = group.Id,
-            StudyGroupId = groupId,
-            Title = body.Title,
-            Visibility = string.IsNullOrEmpty(body.Visibility) ? "group" : body.Visibility,
-            EnrollmentPolicy = body.EnrollMode ?? CohortEnrollMode.OptIn,
-            CreatedAt = DateTime.UtcNow,
-            CreatedBy = userId
-        };
-
-        var offering = new CohortOffering
-        {
-            CohortGroupId = group.Id,
-            StudyGroupStudyPlanId = adoption.Id,
-            StudyPlanVersionId = current.Id,
-            Status = "Active",
-            StartAt = DateTime.UtcNow,
-            CreatedAt = DateTime.UtcNow,
-            CreatedBy = userId
-        };
-        cohort.CurrentOfferingId = offering.Id;
-
-        _db.Groups.Add(group);
-        _db.Cohorts.Add(cohort);
-        _db.CohortOfferings.Add(offering);
         await _db.SaveChangesAsync();
 
-        // Neo4j wiring
-        await using (var session = _driver.AsyncSession())
+        if (pinnedNo.HasValue)
         {
+            await AlignCohortGraphVersionAsync(cohortId, pinnedNo.Value);
+        }
+
+        return Ok();
+    }
+
+    [HttpPost("Cohorts/{cohortId:guid}/UpgradeVersion")]
+    [Authorize(Policy = "Cohort.Manage")]
+    public async Task<IActionResult> UpgradeToCurrent(Guid groupId, Guid cohortId)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+        if (!await _groups.IsUserManagerAsync(groupId.ToString(), userId)) return Forbid();
+
+        var row = await _db.Cohorts
+            .Join(_db.StudyGroupStudyPlans,
+                c => c.StudyGroupStudyPlanId,
+                sgsp => sgsp.Id,
+                (c, sgsp) => new { Cohort = c, Adoption = sgsp })
+            .FirstOrDefaultAsync(x => x.Cohort.Id == cohortId && x.Adoption.StudyGroupId == groupId);
+        if (row == null) return NotFound();
+
+        var current = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.StableId == row.Adoption.StudyPlanStableId || (p.StableId == Guid.Empty && p.Id == row.Adoption.StudyPlanStableId))
+            .OrderByDescending(p => p.IsCurrent)
+            .ThenByDescending(p => p.VersionNumber)
+            .FirstOrDefaultAsync();
+        if (current == null) return BadRequest(new { code = "no_versions" });
+
+        if (row.Cohort.StudyPlanVersionId != current.Id)
+        {
+            row.Cohort.StudyPlanVersionId = current.Id;
+            await _db.SaveChangesAsync();
+            await AlignCohortGraphVersionAsync(cohortId, current.VersionNumber);
+        }
+
+        return Ok(new { pinnedVersionNumber = current.VersionNumber });
+    }
+
+    private async Task<Dictionary<Guid, int>> GetCohortMemberCountsAsync(List<Guid> cohortIds)
+    {
+        if (cohortIds.Count == 0) return new Dictionary<Guid, int>();
+        return await _db.UserGroups.AsNoTracking()
+            .Where(ug => cohortIds.Contains(ug.GroupId) && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .GroupBy(ug => ug.GroupId)
+            .Select(g => new { GroupId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.GroupId, x => x.Count);
+    }
+
+    private async Task<bool> SyncCohortGraphAsync(Guid cohortId, Guid groupId, Guid planStableId, int versionNumber, string? title, string? visibility)
+    {
+        try
+        {
+            await using var session = _driver.AsyncSession();
             await session.ExecuteWriteAsync(async tx =>
             {
                 var cypher = @"
@@ -311,206 +440,32 @@ MERGE (c)-[:FOR_PLAN]->(p)
 MERGE (g:StudyGroup {id:$groupId})
 MERGE (c)-[:SCOPED_BY]->(g)
 MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
-MERGE (c)-[:OF_VERSION]->(v)
-";
+MERGE (c)-[:OF_VERSION]->(v)";
                 await tx.RunAsync(cypher, new
                 {
                     planId = planStableId.ToString(),
-                    cohortId = cohort.Id.ToString(),
-                    title = cohort.Title,
-                    visibility = cohort.Visibility,
-                    groupId = groupId.ToString(),
-                    versionNumber = pinnedNo
-                });
-            });
-        }
-
-        return Ok(new { cohortId = cohort.Id, pinnedVersionNumber = pinnedNo });
-    }
-
-    public class UpdateGroupCohortRequest
-    {
-        public CohortEnrollMode? EnrollMode { get; set; }
-        public int? PinnedVersionNumber { get; set; }
-    }
-
-    [HttpPatch("Cohorts/{cohortId:guid}")] // B5-4 patch enrollMode/pinnedVersion
-    [Authorize(Policy = "Cohort.Manage")]
-    public async Task<IActionResult> Patch(Guid groupId, Guid cohortId, [FromBody] UpdateGroupCohortRequest body)
-    {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
-        if (!isManager) return Forbid();
-
-        var cohort = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
-        if (cohort == null) return NotFound();
-
-        if (body.EnrollMode.HasValue)
-        {
-            cohort.EnrollmentPolicy = body.EnrollMode.Value;
-        }
-
-        int? pinnedNo = null;
-        Guid? updatedPlanVersionId = null;
-        if (body.PinnedVersionNumber.HasValue)
-        {
-            var requestedNo = body.PinnedVersionNumber.Value;
-            CohortOffering? currentOffering = null;
-            if (cohort.CurrentOfferingId.HasValue)
-            {
-                currentOffering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.Id == cohort.CurrentOfferingId.Value);
-            }
-            if (currentOffering == null)
-            {
-                currentOffering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.CohortGroupId == cohort.Id && o.Status == "Active");
-            }
-            if (currentOffering == null)
-            {
-                return BadRequest(new { code = "offering_not_found" });
-            }
-
-            var adoption = await _db.StudyGroupStudyPlans.AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == currentOffering.StudyGroupStudyPlanId);
-            if (adoption == null)
-            {
-                return BadRequest(new { code = "adoption_not_found" });
-            }
-
-            var planVersion = await _db.StudyPlans.AsNoTracking()
-                .Where(p => (p.StableId == adoption.StudyPlanStableId || (p.StableId == Guid.Empty && p.Id == adoption.StudyPlanStableId))
-                            && p.VersionNumber == requestedNo)
-                .FirstOrDefaultAsync();
-            if (planVersion == null)
-            {
-                return BadRequest(new { code = "version_not_found", versionNumber = requestedNo });
-            }
-
-            if (planVersion.Id != currentOffering.StudyPlanVersionId)
-            {
-                currentOffering.Status = "Archived";
-                currentOffering.EndAt = DateTime.UtcNow;
-
-                var nextOffering = new CohortOffering
-                {
-                    CohortGroupId = cohort.Id,
-                    StudyGroupStudyPlanId = currentOffering.StudyGroupStudyPlanId,
-                    StudyPlanVersionId = planVersion.Id,
-                    Status = "Active",
-                    StartAt = DateTime.UtcNow,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = userId
-                };
-                _db.CohortOfferings.Add(nextOffering);
-                cohort.CurrentOfferingId = nextOffering.Id;
-                updatedPlanVersionId = planVersion.Id;
-                pinnedNo = requestedNo;
-            }
-        }
-
-        await _db.SaveChangesAsync();
-
-        if (pinnedNo.HasValue && updatedPlanVersionId.HasValue)
-        {
-            await using var session = _driver.AsyncSession();
-            await session.ExecuteWriteAsync(async tx =>
-            {
-                var cypher = @"
-MATCH (c:Cohort {id:$cohortId})
-OPTIONAL MATCH (c)-[r:OF_VERSION]->(:PlanVersion)
-DELETE r
-WITH c
-MATCH (p:StudyPlan)<-[:FOR_PLAN]-(c)
-MERGE (v:PlanVersion {studyPlanId:p.id, versionNumber:$versionNumber})
-MERGE (c)-[:OF_VERSION]->(v)
-// Align enrolled users in this cohort to the new PlanVersion
-OPTIONAL MATCH (u:User)-[:IN_COHORT]->(c)
-WITH c, v AS pv, collect(u) AS users
-UNWIND users AS u
-MERGE (u)-[:ENROLLED_IN]->(pv)";
-                await tx.RunAsync(cypher, new
-                {
                     cohortId = cohortId.ToString(),
-                    versionNumber = pinnedNo.Value
+                    title,
+                    visibility,
+                    groupId = groupId.ToString(),
+                    versionNumber
                 });
             });
-
-            await AlignCohortEnrollmentsAsync(cohortId, updatedPlanVersionId.Value);
+            return true;
         }
-
-        return Ok();
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Created or updated cohort in SQL but failed to sync Neo4j. groupId={GroupId} planStableId={PlanStableId} cohortId={CohortId}", groupId, planStableId, cohortId);
+            return false;
+        }
     }
 
-    [HttpPost("Cohorts/{cohortId:guid}/UpgradeVersion")] // B5-4 upgrade to plan current
-    [Authorize(Policy = "Cohort.Manage")]
-    public async Task<IActionResult> UpgradeToCurrent(Guid groupId, Guid cohortId)
+    private async Task AlignCohortGraphVersionAsync(Guid cohortId, int versionNumber)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var isManager = await _groups.IsUserManagerAsync(groupId.ToString(), userId);
-        if (!isManager) return Forbid();
-
-        var cohort = await _db.Cohorts.FirstOrDefaultAsync(x => x.Id == cohortId && x.StudyGroupId == groupId);
-        if (cohort == null) return NotFound();
-
-        CohortOffering? currentOffering = null;
-        if (cohort.CurrentOfferingId.HasValue)
+        await using var session = _driver.AsyncSession();
+        await session.ExecuteWriteAsync(async tx =>
         {
-            currentOffering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.Id == cohort.CurrentOfferingId.Value);
-        }
-        if (currentOffering == null)
-        {
-            currentOffering = await _db.CohortOfferings.FirstOrDefaultAsync(o => o.CohortGroupId == cohort.Id && o.Status == "Active");
-        }
-        if (currentOffering == null)
-        {
-            return BadRequest(new { code = "offering_not_found" });
-        }
-
-        var adoption = await _db.StudyGroupStudyPlans.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == currentOffering.StudyGroupStudyPlanId);
-        if (adoption == null)
-        {
-            return BadRequest(new { code = "adoption_not_found" });
-        }
-
-        var current = await _db.StudyPlans.AsNoTracking()
-            .Where(p => p.StableId == adoption.StudyPlanStableId || (p.StableId == Guid.Empty && p.Id == adoption.StudyPlanStableId))
-            .OrderByDescending(p => p.IsCurrent)
-            .ThenByDescending(p => p.VersionNumber)
-            .FirstOrDefaultAsync();
-
-        if (current == null)
-        {
-            return BadRequest(new { code = "no_versions" });
-        }
-
-        var pinnedNo = current.VersionNumber;
-
-        if (current.Id != currentOffering.StudyPlanVersionId)
-        {
-            currentOffering.Status = "Archived";
-            currentOffering.EndAt = DateTime.UtcNow;
-
-            var nextOffering = new CohortOffering
-            {
-                CohortGroupId = cohort.Id,
-                StudyGroupStudyPlanId = currentOffering.StudyGroupStudyPlanId,
-                StudyPlanVersionId = current.Id,
-                Status = "Active",
-                StartAt = DateTime.UtcNow,
-                CreatedAt = DateTime.UtcNow,
-                CreatedBy = userId
-            };
-            _db.CohortOfferings.Add(nextOffering);
-            cohort.CurrentOfferingId = nextOffering.Id;
-            await _db.SaveChangesAsync();
-
-            await using (var session = _driver.AsyncSession())
-            {
-                await session.ExecuteWriteAsync(async tx =>
-                {
-                    var cypher = @"
+            var cypher = @"
 MATCH (c:Cohort {id:$cohortId})
 OPTIONAL MATCH (c)-[r:OF_VERSION]->(:PlanVersion)
 DELETE r
@@ -518,63 +473,13 @@ WITH c
 MATCH (p:StudyPlan)<-[:FOR_PLAN]-(c)
 MERGE (v:PlanVersion {studyPlanId:p.id, versionNumber:$versionNumber})
 MERGE (c)-[:OF_VERSION]->(v)
-// Align enrolled users in this cohort to the new PlanVersion
 OPTIONAL MATCH (u:User)-[:IN_COHORT]->(c)
-WITH c, v AS pv, collect(u) AS users
-UNWIND users AS u
-MERGE (u)-[:ENROLLED_IN]->(pv)";
-                    await tx.RunAsync(cypher, new { cohortId = cohortId.ToString(), versionNumber = pinnedNo });
-                });
-            }
-
-            await AlignCohortEnrollmentsAsync(cohortId, current.Id);
-        }
-
-        return Ok(new { pinnedVersionNumber = pinnedNo });
-    }
-
-    private async Task AlignCohortEnrollmentsAsync(Guid cohortId, Guid planVersionId)
-    {
-        var userIds = await _db.UserGroups.AsNoTracking()
-            .Where(x => x.GroupId == cohortId && x.Status == "Active")
-            .Select(x => x.UserId)
-            .ToListAsync();
-        if (userIds.Count == 0)
-        {
-            return;
-        }
-
-        var existing = await _db.StudyPlanEnrollments
-            .Where(x => x.ScopeType == "Cohort" && x.ScopeId == cohortId && userIds.Contains(x.UserId))
-            .ToListAsync();
-        var existingMap = existing.ToDictionary(x => x.UserId, StringComparer.OrdinalIgnoreCase);
-
-        var now = DateTimeOffset.UtcNow;
-        foreach (var userId in userIds)
-        {
-            if (existingMap.TryGetValue(userId, out var enrollment))
-            {
-                enrollment.PlanVersionId = planVersionId;
-                if (!string.Equals(enrollment.Status, "Completed", StringComparison.OrdinalIgnoreCase))
-                {
-                    enrollment.Status = "Active";
-                }
-                enrollment.UpdatedAt = now;
-            }
-            else
-            {
-                _db.StudyPlanEnrollments.Add(new StudyPlanEnrollment
-                {
-                    UserId = userId,
-                    ScopeType = "Cohort",
-                    ScopeId = cohortId,
-                    PlanVersionId = planVersionId,
-                    Status = "Active",
-                    EnrolledAt = now
-                });
-            }
-        }
-
-        await _db.SaveChangesAsync();
+OPTIONAL MATCH (u)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+WITH c, v AS pv, collect(pg) AS personalGroups
+UNWIND personalGroups AS pg
+WITH pg, pv WHERE pg IS NOT NULL
+MERGE (pg)-[:ENROLLED_IN]->(pv)";
+            await tx.RunAsync(cypher, new { cohortId = cohortId.ToString(), versionNumber });
+        });
     }
 }

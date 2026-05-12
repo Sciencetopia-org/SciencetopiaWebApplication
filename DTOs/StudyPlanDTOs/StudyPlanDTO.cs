@@ -17,6 +17,7 @@ public class StudyPlanDetail
     public Introduction? Introduction { get; set; }
     public float ProgressPercentage { get; set; }
     public float AdvancedTopicProgressPercentage { get; set; }
+    public bool AllowCohortSharing { get; set; }
     public List<Lesson>? Prerequisite { get; set; }
     public List<Lesson>? MainCurriculum { get; set; }
     public List<Lesson>? AdvancedTopics { get; set; }

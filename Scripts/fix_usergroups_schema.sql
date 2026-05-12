@@ -23,7 +23,7 @@ BEGIN TRY
     END
     ELSE
     BEGIN
-        -- Normalize legacy column names first.
+        -- Normalize retired column names first.
         IF COL_LENGTH('Groups.UserGroups', 'UserId') IS NULL AND COL_LENGTH('Groups.UserGroups', 'UserID') IS NOT NULL
             EXEC sp_rename N'[Groups].[UserGroups].[UserID]', N'UserId', N'COLUMN';
 
@@ -40,7 +40,7 @@ BEGIN TRY
             ALTER TABLE [Groups].[UserGroups]
                 ADD [Status] nvarchar(16) NOT NULL CONSTRAINT [DF_UserGroups_Status] DEFAULT (N'Active');
 
-        -- JoinedAt (migrate from legacy JoinDate/JoinedDate if present)
+        -- JoinedAt (migrate from retired JoinDate/JoinedDate if present)
         IF COL_LENGTH('Groups.UserGroups', 'JoinedAt') IS NULL
         BEGIN
             ALTER TABLE [Groups].[UserGroups] ADD [JoinedAt] datetimeoffset NULL;
@@ -65,7 +65,7 @@ SET [JoinedAt] = SYSUTCDATETIME();');
             END
         END
 
-        -- LeftAt (migrate from legacy LeftDate if present)
+        -- LeftAt (migrate from retired LeftDate if present)
         IF COL_LENGTH('Groups.UserGroups', 'LeftAt') IS NULL
         BEGIN
             ALTER TABLE [Groups].[UserGroups] ADD [LeftAt] datetimeoffset NULL;
@@ -118,26 +118,26 @@ WHERE [JoinedAt] IS NULL;');
                 ADD CONSTRAINT [DF_UserGroups_JoinedAt] DEFAULT (SYSUTCDATETIME()) FOR [JoinedAt];');
         END
 
-        -- Optional: remove legacy date columns after migration.
+        -- Optional: remove retired date columns after migration.
         IF COL_LENGTH('Groups.UserGroups', 'JoinDate') IS NOT NULL
            OR COL_LENGTH('Groups.UserGroups', 'JoinedDate') IS NOT NULL
            OR COL_LENGTH('Groups.UserGroups', 'LeftDate') IS NOT NULL
         BEGIN
-            DECLARE @legacyCol sysname;
-            DECLARE legacy_cols_cursor CURSOR LOCAL FAST_FORWARD FOR
+            DECLARE @retiredCol sysname;
+            DECLARE retired_cols_cursor CURSOR LOCAL FAST_FORWARD FOR
                 SELECT [name]
                 FROM sys.columns
                 WHERE [object_id] = OBJECT_ID(N'[Groups].[UserGroups]')
                   AND [name] IN (N'JoinDate', N'JoinedDate', N'LeftDate');
 
-            OPEN legacy_cols_cursor;
-            FETCH NEXT FROM legacy_cols_cursor INTO @legacyCol;
+            OPEN retired_cols_cursor;
+            FETCH NEXT FROM retired_cols_cursor INTO @retiredCol;
 
             WHILE @@FETCH_STATUS = 0
             BEGIN
                 DECLARE @dropDepsSql nvarchar(max) = N'';
 
-                -- Drop default constraints bound to legacy column
+                -- Drop default constraints bound to retired column
                 SELECT @dropDepsSql = @dropDepsSql +
                     N'ALTER TABLE [Groups].[UserGroups] DROP CONSTRAINT [' + dc.name + N'];' + CHAR(10)
                 FROM sys.default_constraints dc
@@ -145,9 +145,9 @@ WHERE [JoinedAt] IS NULL;');
                     ON c.object_id = dc.parent_object_id
                    AND c.column_id = dc.parent_column_id
                 WHERE dc.parent_object_id = OBJECT_ID(N'[Groups].[UserGroups]')
-                  AND c.name = @legacyCol;
+                  AND c.name = @retiredCol;
 
-                -- Drop non-PK/non-unique-constraint indexes that reference legacy column
+                -- Drop non-PK/non-unique-constraint indexes that reference retired column
                 SELECT @dropDepsSql = @dropDepsSql +
                     N'DROP INDEX [' + i.name + N'] ON [Groups].[UserGroups];' + CHAR(10)
                 FROM sys.indexes i
@@ -158,7 +158,7 @@ WHERE [JoinedAt] IS NULL;');
                     ON c.object_id = ic.object_id
                    AND c.column_id = ic.column_id
                 WHERE i.object_id = OBJECT_ID(N'[Groups].[UserGroups]')
-                  AND c.name = @legacyCol
+                  AND c.name = @retiredCol
                   AND i.is_primary_key = 0
                   AND i.is_unique_constraint = 0
                   AND i.name IS NOT NULL;
@@ -167,13 +167,13 @@ WHERE [JoinedAt] IS NULL;');
                     EXEC sp_executesql @dropDepsSql;
 
                 DECLARE @dropColSql nvarchar(max) =
-                    N'ALTER TABLE [Groups].[UserGroups] DROP COLUMN ' + QUOTENAME(@legacyCol) + N';';
+                    N'ALTER TABLE [Groups].[UserGroups] DROP COLUMN ' + QUOTENAME(@retiredCol) + N';';
                 EXEC sp_executesql @dropColSql;
-                FETCH NEXT FROM legacy_cols_cursor INTO @legacyCol;
+                FETCH NEXT FROM retired_cols_cursor INTO @retiredCol;
             END
 
-            CLOSE legacy_cols_cursor;
-            DEALLOCATE legacy_cols_cursor;
+            CLOSE retired_cols_cursor;
+            DEALLOCATE retired_cols_cursor;
         END
     END
 

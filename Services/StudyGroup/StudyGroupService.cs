@@ -83,8 +83,6 @@ using GroupMemberDto = global::GroupMember;
         return "member";
     }
 
-    // Backward-compatible visibility:
-    // historical rows may use approved/active or leave status empty.
     private static bool IsVisibleStudyGroupStatus(string? status)
     {
         if (string.IsNullOrWhiteSpace(status)) return true;

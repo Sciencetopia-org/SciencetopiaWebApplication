@@ -7,7 +7,6 @@ namespace Sciencetopia.Models.Enums
         Learner = 1,
         TA = 2,
         Admin = 3,
-        // Manager kept as alias of Admin for backward compatibility
         Manager = Admin,
         Owner = 4
     }

@@ -22,6 +22,9 @@ using Microsoft.Extensions.Caching.Memory;
 // Modular backend moved into its own project
 
 var builder = WebApplication.CreateBuilder(args);
+var enableOptionalStartupTasks =
+    builder.Configuration.GetValue<bool?>("StartupTasks:EnableOptionalTasksOnStartup")
+    ?? !builder.Environment.IsDevelopment();
 
 // 注册编码提供程序
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -34,6 +37,7 @@ builder.Services.AddScoped<StudyPlanService>(sp =>
         sp.GetRequiredService<IDriver>(),
         sp.GetRequiredService<ILogger<StudyPlanService>>(),
         sp.GetRequiredService<IStudyPlanRepository>(),
+        sp.GetRequiredService<Sciencetopia.Services.Plans.IPersonalPlanEnrollmentService>(),
         sp.GetRequiredService<IMemoryCache>(),
         sp.GetRequiredService<ITagRepository>(),
         sp.GetRequiredService<ITagResolutionService>()));
@@ -61,9 +65,11 @@ builder.Services.AddSingleton<Sciencetopia.Services.Region.IRegionService, Scien
 builder.Services.AddSingleton<IDraftFreezeService, DraftFreezeService>();
 builder.Services.AddScoped(x => x.GetService<IDriver>().AsyncSession());
 builder.Services.AddScoped<IUserValidator<ApplicationUser>, CustomUserValidator>();
+builder.Services.AddScoped<Sciencetopia.Services.Plans.IPersonalPlanEnrollmentService, Sciencetopia.Services.Plans.PersonalPlanEnrollmentService>();
 builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
+builder.Services.AddHttpClient();
 builder.Services.AddResponseCompression(options =>
 {
     options.EnableForHttps = true;
@@ -91,7 +97,6 @@ builder.Services.AddScoped<StudyPlanVersioningService>();
 // L10n services
 builder.Services.Configure<Sciencetopia.Services.L10n.L10nOptions>(builder.Configuration.GetSection("L10n"));
 builder.Services.AddScoped<Sciencetopia.Services.L10n.IL10nService, Sciencetopia.Services.L10n.L10nService>();
-builder.Services.AddScoped<Sciencetopia.Services.L10n.L10nMigrationRunner>();
 builder.Services.AddSingleton<Sciencetopia.Middleware.ILanguageContext, Sciencetopia.Middleware.LanguageContext>();
 builder.Services.Configure<DraftFreezeOptions>(builder.Configuration.GetSection("KnowledgeGraph:DraftFreeze"));
 // Progress tracking services
@@ -101,10 +106,14 @@ builder.Services.AddScoped<Sciencetopia.Services.Progress.IResourceProgressServi
 // Add SignalR service
 builder.Services.AddSignalR();
 
-// Register the hosted service
-builder.Services.AddHostedService<DailySummaryHostedService>();
+// Register the hosted services that warm external dependencies only when enabled.
+if (enableOptionalStartupTasks)
+{
+    builder.Services.AddHostedService<DailySummaryHostedService>();
+    builder.Services.AddHostedService<Sciencetopia.Services.KnowledgeGraph.KnowledgeGraphWarmupHostedService>();
+}
+
 builder.Services.AddHostedService<Sciencetopia.Services.KnowledgeGraph.Neo4jSchemaHostedService>();
-builder.Services.AddHostedService<Sciencetopia.Services.KnowledgeGraph.KnowledgeGraphWarmupHostedService>();
 
 // Configure JWT Authentication
 builder.Services.AddAuthentication(options =>
@@ -324,21 +333,29 @@ else
 });
 }
 
-// Ensure you create roles before running the application
-try
+// Ensure you create roles before running the application when optional startup tasks are enabled.
+if (enableOptionalStartupTasks)
 {
-    using var scope = app.Services.CreateScope();
-    var services = scope.ServiceProvider;
-    var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
-    if (!await roleManager.RoleExistsAsync("administrator"))
+    try
     {
-        await roleManager.CreateAsync(new IdentityRole("administrator"));
+        using var scope = app.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
+        if (!await roleManager.RoleExistsAsync("administrator"))
+        {
+            await roleManager.CreateAsync(new IdentityRole("administrator"));
+        }
+    }
+    catch (Exception ex)
+    {
+        var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+        logger.LogError(ex, "Failed to seed initial roles. Continuing startup. Verify database connectivity and state.");
     }
 }
-catch (Exception ex)
+else
 {
     var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
-    logger.LogError(ex, "Failed to seed initial roles. Continuing startup. Verify database connectivity and state.");
+    logger.LogInformation("Optional startup tasks are disabled. Skipping startup role seeding and warmup tasks for this environment.");
 }
 
 app.UseMiddleware<UserActivityMiddleware>();

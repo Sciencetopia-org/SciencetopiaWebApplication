@@ -19,7 +19,8 @@ public class Neo4jProgressRepository : INeo4jProgressRepository
         await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})
+MERGE (u:Group {id:$userId})
+SET u.kind = coalesce(u.kind, 'PersonalGroup')
 MATCH (r:Resource {id:$resourceId})
 MERGE (u)-[c:COMPLETED]->(r)
 SET c.completedAt = coalesce(c.completedAt, $completedAt),
@@ -44,7 +45,7 @@ SET c.completedAt = coalesce(c.completedAt, $completedAt),
         await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})-[c:COMPLETED]->(r:Resource {id:$resourceId})
+MATCH (u:Group {id:$userId})-[c:COMPLETED]->(r:Resource {id:$resourceId})
 DELETE c
 ";
             await tx.RunAsync(cypher, new { userId, resourceId = resourceId.ToString() });
@@ -59,7 +60,7 @@ DELETE c
             var cypher = @"
 MATCH (p:StudyPlan {id:$planId})-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
 ";
@@ -76,7 +77,7 @@ MATCH (p:StudyPlan {id:$planId})-[hs:HAS_STEP]->(l:Lesson)
 WHERE hs.type IN $advancedTypes
 OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
 ";
@@ -96,7 +97,7 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
             var cypher = @"
 MATCH (p:StudyPlan {id:$planId})-[hs:HAS_STEP]->(l:Lesson)
 OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
-OPTIONAL MATCH (u:User {id:$userId})-[c:COMPLETED]->(r)
+OPTIONAL MATCH (u:Group {id:$userId})-[c:COMPLETED]->(r)
 RETURN l.id AS lessonId,
        hs.type AS stepType,
        collect(DISTINCT r.id) AS resourceIds,
@@ -187,14 +188,14 @@ UNWIND $planIds AS pid
 MATCH (p:StudyPlan {id: pid})
 OPTIONAL MATCH (p)-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH p, collect(DISTINCT r) AS totalResources
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN totalResources
 WITH p, totalResources, collect(DISTINCT rc) AS completedResources
 OPTIONAL MATCH (p)-[hs:HAS_STEP]->(l:Lesson)
 WHERE hs.type IN $advancedTypes
 OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(ar:Resource)
 WITH p, totalResources, completedResources, collect(DISTINCT ar) AS totalAdvancedResources
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(arc:Resource)
+OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(arc:Resource)
 WHERE arc IN totalAdvancedResources
 RETURN p.id AS planId,
        size(totalResources) AS totalCount,
@@ -239,7 +240,7 @@ RETURN p.id AS planId,
             var cypher = @"
 MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
 ";
@@ -263,27 +264,24 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
-OPTIONAL MATCH (pv)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (c:Cohort {id:$cohortId})
+OPTIONAL MATCH (c)-[:OF_VERSION]->(pv:PlanVersion)
+OPTIONAL MATCH (c)-[:FOR_PLAN]->(p:StudyPlan)
+OPTIONAL MATCH (p)-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH c, pv, COLLECT(DISTINCT r) AS total
-// Cohort membership
-OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)
-WITH pv, total, collect(u) AS members
-// Filter users whose enrollment aligns to cohort's version
-UNWIND members AS u
-OPTIONAL MATCH (u)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
-WITH pv, total, u, v
+OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+OPTIONAL MATCH (pg)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
 WITH total,
-     collect(CASE WHEN v.versionNumber = pv.versionNumber THEN u ELSE null END) AS aligned,
-     collect(CASE WHEN v.versionNumber <> pv.versionNumber OR v IS NULL THEN u ELSE null END) AS mismatched
+     collect(DISTINCT CASE WHEN pg IS NOT NULL AND pv IS NOT NULL AND v.versionNumber = pv.versionNumber THEN pg END) AS aligned,
+     collect(DISTINCT CASE WHEN pg IS NOT NULL AND (pv IS NULL OR v IS NULL OR v.versionNumber <> pv.versionNumber) THEN pg END) AS mismatched
 WITH total,
      [x IN aligned WHERE x IS NOT NULL] AS alignedUsers,
      [x IN mismatched WHERE x IS NOT NULL] AS mismatchUsers
-UNWIND alignedUsers AS au
+UNWIND CASE WHEN alignedUsers = [] THEN [null] ELSE alignedUsers END AS au
 OPTIONAL MATCH (au)-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 WITH size(total) AS totalResources, alignedUsers, mismatchUsers, au, COUNT(DISTINCT rc) AS completed
-WITH totalResources, alignedUsers, mismatchUsers, COLLECT(completed) AS comp
+WITH totalResources, alignedUsers, mismatchUsers, COLLECT(CASE WHEN au IS NULL THEN 0 ELSE completed END) AS comp
 WITH totalResources, size(alignedUsers) AS memberCount, size(mismatchUsers) AS mismatchCount, comp
 RETURN CASE WHEN memberCount=0 OR totalResources=0 THEN 0.0
             ELSE reduce(s=0.0, x IN comp | s + (toFloat(x)/toFloat(totalResources))) / toFloat(memberCount)
@@ -292,7 +290,12 @@ RETURN CASE WHEN memberCount=0 OR totalResources=0 THEN 0.0
        mismatchCount AS versionMismatchCount
 ";
             var cursor = await tx.RunAsync(cypher, new { cohortId = cohortId.ToString() });
-            var rec = await cursor.SingleAsync();
+            if (!await cursor.FetchAsync())
+            {
+                return new CohortSummaryDto(0.0, 0);
+            }
+
+            var rec = cursor.Current;
             var avg = rec?["avgProgress"].As<double?>() ?? 0.0;
             var members = rec?["memberCount"].As<int?>() ?? 0;
             return new CohortSummaryDto(avg, members);
@@ -305,23 +308,23 @@ RETURN CASE WHEN memberCount=0 OR totalResources=0 THEN 0.0
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
-OPTIONAL MATCH (pv)-[:HAS_STEP]->(l:Lesson)
-OPTIONAL MATCH (pv)-[:HAS_RESOURCE {lessonId: l.id}]->(r:Resource)
+OPTIONAL MATCH (c:Cohort {id:$cohortId})
+OPTIONAL MATCH (c)-[:OF_VERSION]->(pv:PlanVersion)
+OPTIONAL MATCH (c)-[:FOR_PLAN]->(p:StudyPlan)
+OPTIONAL MATCH (p)-[:HAS_STEP]->(l:Lesson)
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
 WITH c, pv, l, COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)
-WITH pv, l, total, collect(u) AS members
-UNWIND members AS u
-OPTIONAL MATCH (u)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
-WITH pv, l, total, u, v
-WITH l, total, collect(CASE WHEN v.versionNumber = pv.versionNumber THEN u ELSE null END) AS aligned
+OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+OPTIONAL MATCH (pg)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
+WITH pv, l, total, collect(DISTINCT CASE WHEN pg IS NOT NULL AND pv IS NOT NULL AND v.versionNumber = pv.versionNumber THEN pg END) AS aligned
 WITH l, total, [x IN aligned WHERE x IS NOT NULL] AS alignedUsers
-UNWIND alignedUsers AS au
+UNWIND CASE WHEN alignedUsers = [] THEN [null] ELSE alignedUsers END AS au
 OPTIONAL MATCH (au)-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 WITH l, total, au, COUNT(DISTINCT rc) AS completed
-WITH l, total, COLLECT(completed) AS perUserCounts, COUNT(DISTINCT au) AS members
-RETURN l.id AS lessonId, coalesce(l.title, '') AS lessonTitle,
+WITH l, total, COLLECT(CASE WHEN au IS NULL THEN 0 ELSE completed END) AS perUserCounts, COUNT(DISTINCT au) AS members
+WHERE l IS NOT NULL
+RETURN l.id AS lessonId, coalesce(l.title, l.name, '') AS lessonTitle,
        CASE WHEN size(total)=0 OR members=0 THEN 0.0 ELSE reduce(s=0.0, x IN perUserCounts | s + (toFloat(x)/toFloat(size(total)))) / toFloat(members) END AS lessonAvgProgress,
        reduce(s=0, x IN perUserCounts | s + x) AS completedCount,
        size(total) AS totalResources
@@ -348,17 +351,16 @@ RETURN l.id AS lessonId, coalesce(l.title, '') AS lessonTitle,
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (c:Cohort {id:$cohortId})-[:OF_VERSION]->(pv:PlanVersion)
-OPTIONAL MATCH (pv)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (c:Cohort {id:$cohortId})
+OPTIONAL MATCH (c)-[:OF_VERSION]->(pv:PlanVersion)
+OPTIONAL MATCH (c)-[:FOR_PLAN]->(p:StudyPlan)
+OPTIONAL MATCH (p)-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH c, pv, COLLECT(DISTINCT r) AS total
-OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)
-WITH pv, total, collect(u) AS members
-UNWIND members AS u
-OPTIONAL MATCH (u)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
-WITH pv, total, u, v
-WITH total, u
-WHERE v.versionNumber = pv.versionNumber
-OPTIONAL MATCH (u)-[:COMPLETED]->(rc:Resource)
+OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
+OPTIONAL MATCH (pg)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
+WITH pv, total, u, pg, v
+WHERE u IS NOT NULL AND pg IS NOT NULL AND pv IS NOT NULL AND v.versionNumber = pv.versionNumber
+OPTIONAL MATCH (pg)-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 WITH u, size(total) AS totalResources, COUNT(DISTINCT rc) AS completed
 WITH u, CASE WHEN totalResources=0 THEN 0.0 ELSE toFloat(completed)/toFloat(totalResources) END AS progress
@@ -386,7 +388,7 @@ LIMIT $top
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})-[:ENROLLED_IN]->(pv:PlanVersion {studyPlanId:$planId})
+MATCH (u:Group {id:$userId})-[:ENROLLED_IN]->(pv:PlanVersion {studyPlanId:$planId})
 MATCH (c:Cohort)-[:OF_VERSION]->(pv)
 RETURN c.id AS id
 ";
@@ -407,7 +409,8 @@ RETURN c.id AS id
         return await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})
+MERGE (u:Group {id:$userId})
+SET u.kind = coalesce(u.kind, 'PersonalGroup')
 MATCH (r:Resource {link:$link})
 OPTIONAL MATCH (u)-[c:COMPLETED]->(r)
 WITH u, r, c
@@ -436,7 +439,7 @@ RETURN c IS NULL AS completedNow
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})-[:COMPLETED]->(rc:Resource)
+MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc.id IN $ids
 RETURN COLLECT(DISTINCT rc.id) AS completedIds
 ";
@@ -465,7 +468,7 @@ RETURN COLLECT(DISTINCT rc.id) AS completedIds
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(:Lesson)<-[:HAS_STEP]-(p:StudyPlan {id:$planId})
+MATCH (u:Group {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(:Lesson)<-[:HAS_STEP]-(p:StudyPlan {id:$planId})
 RETURN COLLECT(DISTINCT r.id) AS completedIds
 ";
             var cursor = await tx.RunAsync(cypher, new
@@ -496,7 +499,7 @@ RETURN COLLECT(DISTINCT r.id) AS completedIds
         return await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:User {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(l:Lesson {id:$lessonId})
+MATCH (u:Group {id:$userId})-[:COMPLETED]->(r:Resource)<-[:HAS_RESOURCE]-(l:Lesson {id:$lessonId})
 RETURN COLLECT(DISTINCT r.id) AS completedIds
 ";
             var cursor = await tx.RunAsync(cypher, new

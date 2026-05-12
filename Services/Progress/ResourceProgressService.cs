@@ -3,6 +3,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Sciencetopia.Hubs;
 using Sciencetopia.DTOs;
 using Sciencetopia.Repositories.Neo4j;
+using Sciencetopia.Services.Plans;
 
 namespace Sciencetopia.Services.Progress;
 
@@ -11,14 +12,23 @@ namespace Sciencetopia.Services.Progress;
         private readonly INeo4jProgressRepository _repo;
         private readonly IHubContext<StudyHub> _hub;
         private readonly IMemoryCache _cache;
+        private readonly IPersonalPlanEnrollmentService _personalGroups;
         private static readonly TimeSpan CompletedResourceIdsCacheTtl = TimeSpan.FromSeconds(30);
 
-    public ResourceProgressService(INeo4jProgressRepository repo, IHubContext<StudyHub> hub, IMemoryCache cache)
+    public ResourceProgressService(
+        INeo4jProgressRepository repo,
+        IHubContext<StudyHub> hub,
+        IMemoryCache cache,
+        IPersonalPlanEnrollmentService personalGroups)
     {
         _repo = repo;
         _hub = hub;
         _cache = cache;
+        _personalGroups = personalGroups;
     }
+
+    private async Task<string> GetPersonalGroupSubjectIdAsync(string userId)
+        => (await _personalGroups.EnsurePersonalGroupProjectionAsync(userId)).ToString();
 
     private static string GetLessonCompletedCacheKey(string userId, Guid lessonId)
         => $"progress:lesson-completed:{userId}:{lessonId}";
@@ -41,7 +51,8 @@ namespace Sciencetopia.Services.Progress;
 
     public async Task<ResourceProgressResult> CompleteAsync(string userId, Guid resourceId, CompleteResourceDto dto)
     {
-        await _repo.CompleteResourceAsync(userId, resourceId, DateTime.UtcNow, dto.source, dto.device, dto.spentSeconds);
+        var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
+        await _repo.CompleteResourceAsync(subjectId, resourceId, DateTime.UtcNow, dto.source, dto.device, dto.spentSeconds);
         InvalidateCompletionCaches(userId, dto.planId, dto.lessonId);
 
         double planProgress = 0;
@@ -51,13 +62,13 @@ namespace Sciencetopia.Services.Progress;
 
         if (dto.planId.HasValue)
         {
-            var plan = await _repo.GetMyPlanProgressAsync(userId, dto.planId.Value);
+            var plan = await _repo.GetMyPlanProgressAsync(subjectId, dto.planId.Value);
             planProgress = plan.planProgress;
         }
 
         if (dto.lessonId.HasValue)
         {
-            var les = await _repo.GetMyLessonProgressAsync(userId, dto.lessonId.Value);
+            var les = await _repo.GetMyLessonProgressAsync(subjectId, dto.lessonId.Value);
             lessonProgress = les.lessonProgress;
             lessonCompleted = les.completedCount;
             lessonTotal = les.totalResources;
@@ -89,22 +100,23 @@ namespace Sciencetopia.Services.Progress;
 
     public async Task UndoAsync(string userId, Guid resourceId, Guid? planId = null, Guid? lessonId = null)
     {
-        await _repo.UndoCompleteResourceAsync(userId, resourceId);
+        var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
+        await _repo.UndoCompleteResourceAsync(subjectId, resourceId);
         InvalidateCompletionCaches(userId, planId, lessonId);
         // No broadcast here, clients typically refresh on demand.
     }
 
-    public Task<UserPlanProgressDto> GetPlanProgressAsync(string userId, Guid planId)
-        => _repo.GetMyPlanProgressWithLessonsAsync(userId, planId);
+    public async Task<UserPlanProgressDto> GetPlanProgressAsync(string userId, Guid planId)
+        => await _repo.GetMyPlanProgressWithLessonsAsync(await GetPersonalGroupSubjectIdAsync(userId), planId);
 
-    public Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetPlanProgressSnapshotAsync(string userId, Guid planId)
-        => _repo.GetMyPlanProgressSnapshotAsync(userId, planId);
+    public async Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetPlanProgressSnapshotAsync(string userId, Guid planId)
+        => await _repo.GetMyPlanProgressSnapshotAsync(await GetPersonalGroupSubjectIdAsync(userId), planId);
 
-    public Task<Dictionary<Guid, UserPlanProgressDto>> GetPlanProgressByPlanIdsAsync(string userId, IEnumerable<Guid> planIds)
-        => _repo.GetMyPlanProgressByPlanIdsAsync(userId, planIds);
+    public async Task<Dictionary<Guid, UserPlanProgressDto>> GetPlanProgressByPlanIdsAsync(string userId, IEnumerable<Guid> planIds)
+        => await _repo.GetMyPlanProgressByPlanIdsAsync(await GetPersonalGroupSubjectIdAsync(userId), planIds);
 
-    public Task<UserLessonProgressDto> GetLessonProgressAsync(string userId, Guid lessonId)
-        => _repo.GetMyLessonProgressAsync(userId, lessonId);
+    public async Task<UserLessonProgressDto> GetLessonProgressAsync(string userId, Guid lessonId)
+        => await _repo.GetMyLessonProgressAsync(await GetPersonalGroupSubjectIdAsync(userId), lessonId);
 
     public Task<CohortSummaryDto> GetCohortSummaryAsync(Guid cohortId)
         => _repo.GetCohortSummaryAsync(cohortId);
@@ -117,9 +129,9 @@ namespace Sciencetopia.Services.Progress;
 
         public async Task ToggleByLinkAsync(string userId, string resourceLink, string? source, string? device)
         {
-            // Use repository toggle by link for backward-compatible endpoint.
+            var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
             // No cohort broadcast here due to missing plan context.
-            await _repo.ToggleCompleteByLinkAsync(userId, resourceLink, DateTime.UtcNow, source, device);
+            await _repo.ToggleCompleteByLinkAsync(subjectId, resourceLink, DateTime.UtcNow, source, device);
         }
 
         public Task<HashSet<Guid>> GetCompletedResourceIdsForPlanAsync(string userId, Guid planStableId)
@@ -135,7 +147,7 @@ namespace Sciencetopia.Services.Progress;
                 return Task.FromResult(new HashSet<Guid>(cached));
             }
 
-            return GetAndCacheCompletedIdsAsync(cacheKey, () => _repo.GetCompletedResourceIdsForPlanAsync(userId, planStableId));
+            return GetAndCacheCompletedIdsAsync(cacheKey, async () => await _repo.GetCompletedResourceIdsForPlanAsync(await GetPersonalGroupSubjectIdAsync(userId), planStableId));
         }
 
         public Task<HashSet<Guid>> GetCompletedResourceIdsForLessonAsync(string userId, Guid lessonId)
@@ -151,12 +163,12 @@ namespace Sciencetopia.Services.Progress;
                 return Task.FromResult(new HashSet<Guid>(cached));
             }
 
-            return GetAndCacheCompletedIdsAsync(cacheKey, () => _repo.GetCompletedResourceIdsForLessonAsync(userId, lessonId));
+            return GetAndCacheCompletedIdsAsync(cacheKey, async () => await _repo.GetCompletedResourceIdsForLessonAsync(await GetPersonalGroupSubjectIdAsync(userId), lessonId));
         }
 
         public async Task<List<ResourceCompletedStatusDto>> GetCompletedStatusAsync(string userId, IEnumerable<Guid> resourceIds)
         {
-            var set = await _repo.GetCompletedResourceIdsAsync(userId, resourceIds);
+            var set = await _repo.GetCompletedResourceIdsAsync(await GetPersonalGroupSubjectIdAsync(userId), resourceIds);
             return resourceIds.Select(id => new ResourceCompletedStatusDto(id, set.Contains(id))).ToList();
         }
 

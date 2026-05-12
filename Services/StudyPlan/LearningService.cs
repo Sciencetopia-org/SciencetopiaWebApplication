@@ -1,37 +1,44 @@
 using Neo4j.Driver;
+using Sciencetopia.Services.Plans;
 
 namespace Sciencetopia.Services;
 
 public class LearningService
 {
     private readonly IDriver _driver;
+    private readonly IPersonalPlanEnrollmentService _personalGroups;
 
-    public LearningService(IDriver driver)
+    public LearningService(IDriver driver, IPersonalPlanEnrollmentService personalGroups)
     {
         _driver = driver;
+        _personalGroups = personalGroups;
     }
 
     [Obsolete("Use IResourceProgressService.ToggleByLinkAsync for unified progress tracking.")]
     public async Task<bool> ToggleFinishedLearningRelationship(string resourceLink, string userId, string? source, string? device)
     {
+        var personalGroupId = await _personalGroups.EnsurePersonalGroupProjectionAsync(userId);
         using (var session = _driver.AsyncSession())
         {
             var queryCheck = @"
-            MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
+            MATCH (g:Group {id: $groupId})-[rel:COMPLETED]->(r:Resource)
             WHERE r.link = $resourceLink
             RETURN rel";
 
             var queryDelete = @"
-            MATCH (u:User {id: $userId})-[rel:COMPLETED]->(r:Resource)
+            MATCH (g:Group {id: $groupId})-[rel:COMPLETED]->(r:Resource)
             WHERE r.link = $resourceLink
             DELETE rel";
 
             var queryCreate = @"
-            MATCH (u:User {id: $userId}), (r:Resource {link: $resourceLink})
-            CREATE (u)-[rel:COMPLETED { at: datetime(), source: $source, device: $device }]->(r)
+            MERGE (g:Group {id: $groupId})
+            SET g.kind = 'PersonalGroup'
+            WITH g
+            MATCH (r:Resource {link: $resourceLink})
+            CREATE (g)-[rel:COMPLETED { at: datetime(), source: $source, device: $device }]->(r)
             RETURN rel";
 
-            var parameters = new { resourceLink, userId, source, device };
+            var parameters = new { resourceLink, groupId = personalGroupId.ToString(), source, device };
 
             var result = await session.RunAsync(queryCheck, parameters);
             var relationshipExists = await result.FetchAsync();

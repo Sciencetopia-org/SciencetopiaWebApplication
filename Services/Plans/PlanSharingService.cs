@@ -70,6 +70,7 @@ namespace Sciencetopia.Services
         {
             var sgId = Guid.Parse(studyGroupId);
             var planIdentifier = Guid.Parse(studyPlanId);
+            permission = NormalizeGroupPlanPermission(permission);
 
             var (stableId, versions) = await LoadPlanVersionsAsync(planIdentifier);
             var targetVersion = requestedVersionNumber.HasValue
@@ -135,8 +136,9 @@ RETURN id(r) as relId;";
             {
                 var enrollCypher = @"
 MATCH (g:StudyGroup {id:$groupId})<-[:MEMBER_OF]-(u:User)
+MATCH (u)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
 MERGE (v:PlanVersion {studyPlanId:$planId, versionNumber:$versionNumber})
-MERGE (u)-[:ENROLLED_IN]->(v);";
+MERGE (pg)-[:ENROLLED_IN]->(v);";
                 await session.RunAsync(enrollCypher, new
                 {
                     groupId = studyGroupId,
@@ -146,6 +148,17 @@ MERGE (u)-[:ENROLLED_IN]->(v);";
             }
 
             return existing;
+        }
+
+        private static string NormalizeGroupPlanPermission(string? permission)
+        {
+            return (permission ?? "view").Trim().ToLowerInvariant() switch
+            {
+                "admin" => "admin",
+                "edit" or "editable" => "edit",
+                "comment" => "comment",
+                _ => "view"
+            };
         }
 
         public async Task<bool> UnshareFromStudyGroupAsync(string studyGroupId, string studyPlanId)
@@ -173,65 +186,5 @@ DELETE r";
             return true;
         }
 
-        // Permission calculation
-        public async Task<object> GetEffectivePermissionsAsync(string planId, string userId)
-        {
-            var identifier = Guid.Parse(planId);
-            var (stableId, _) = await LoadPlanVersionsAsync(identifier);
-            var nodeId = stableId.ToString();
-
-            using var session = _neo4j.AsyncSession();
-
-            // Owner check
-            var ownerQuery = @"MATCH (u:User {id:$userId})-[:CREATED]->(p:StudyPlan {id:$planId}) RETURN COUNT(p) > 0 AS isOwner";
-            var ownerRes = await session.RunAsync(ownerQuery, new { userId, planId = nodeId });
-            var isOwner = (await ownerRes.SingleAsync())[0].As<bool>();
-
-            // Collect group-based permissions
-            var permQuery = @"
-MATCH (u:User {id:$userId})- [m:MEMBER_OF]-> (sg:StudyGroup)- [r:SHARES_PLAN]-> (p:StudyPlan {id:$planId})
-RETURN collect({groupId: sg.id, permission: r.permission, role: m.role}) AS sources";
-            var permRes = await session.RunAsync(permQuery, new { userId, planId = nodeId });
-            var sources = (await permRes.SingleAsync())[0].As<List<object>>();
-
-            // Evaluate
-            var maxLevel = 0; // view=1, comment=2, edit=3, admin=4
-            bool canView = false, canComment = false, canEdit = false, isAdmin = false;
-            var sourceList = new List<Dictionary<string, string?>>();
-
-            foreach (var s in sources)
-            {
-                if (s is IDictionary<string, object> d)
-                {
-                    var perm = d.ContainsKey("permission") ? d["permission"]?.ToString() ?? "view" : "view";
-                    var role = d.ContainsKey("role") ? d["role"]?.ToString() : null;
-                    var gid = d.ContainsKey("groupId") ? d["groupId"]?.ToString() : null;
-                    sourceList.Add(new Dictionary<string, string?> { { "type", "StudyGroup" }, { "groupId", gid }, { "permission", perm }, { "role", role } });
-
-                    int lvl = perm switch { "admin" => 4, "edit" => 3, "comment" => 2, _ => 1 };
-                    maxLevel = Math.Max(maxLevel, lvl);
-                    canView = true;
-                    if (lvl >= 2) canComment = true;
-                    if ((role == "moderator" || role == "manager" || role == "admin" || role == "owner") && (lvl >= 3)) canEdit = true;
-                    if (lvl >= 4) isAdmin = true;
-                }
-            }
-
-            if (isOwner)
-            {
-                canView = canComment = canEdit = true;
-                isAdmin = true;
-                sourceList.Add(new Dictionary<string, string?> { { "type", "Owner" }, { "groupId", null }, { "permission", "admin" }, { "role", null } });
-            }
-
-            return new
-            {
-                canView,
-                canComment,
-                canEdit,
-                isAdmin,
-                sources = sourceList
-            };
-        }
     }
 }

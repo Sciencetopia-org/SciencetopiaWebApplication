@@ -21,14 +21,12 @@ public class LearningController : ControllerBase
     }
 
     [HttpPost("ToggleFinishedLearning")]
-    [Obsolete("Use /api/resources/{id}/complete for id-based progress; this route is kept for backward compatibility with link-based toggling.")]
     public async Task<IActionResult> ToggleFinishedLearning([FromBody] ToggleFinishedLearningRequest request)
     {
         string userId = GetCurrentUserId();
 
         if (!string.IsNullOrWhiteSpace(request?.Link))
         {
-            // Backward-compatible toggle via new progress service (by resource link)
             await _progress.ToggleByLinkAsync(userId, request.Link!, request.Source, request.Device);
         }
 
