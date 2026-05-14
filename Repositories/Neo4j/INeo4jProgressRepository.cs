@@ -4,8 +4,8 @@ namespace Sciencetopia.Repositories.Neo4j;
 
 public interface INeo4jProgressRepository
 {
-    Task CompleteResourceAsync(string userId, Guid resourceId, DateTime completedAt, string? source, string? device, int? spentSeconds);
-    Task UndoCompleteResourceAsync(string userId, Guid resourceId);
+    Task CompleteResourceAsync(string userId, Guid resourceId, string? resourceLink, DateTime completedAt, string? source, string? device, int? spentSeconds);
+    Task UndoCompleteResourceAsync(string userId, Guid resourceId, string? resourceLink = null);
 
     Task<UserPlanProgressDto>   GetMyPlanProgressAsync(string userId, Guid planId);
     Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetMyPlanProgressSnapshotAsync(string userId, Guid planId);

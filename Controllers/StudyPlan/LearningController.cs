@@ -25,9 +25,10 @@ public class LearningController : ControllerBase
     {
         string userId = GetCurrentUserId();
 
-        if (!string.IsNullOrWhiteSpace(request?.Link))
+        var link = request?.Link ?? request?.ResourceLink;
+        if (!string.IsNullOrWhiteSpace(link))
         {
-            await _progress.ToggleByLinkAsync(userId, request.Link!, request.Source, request.Device);
+            await _progress.ToggleByLinkAsync(userId, link!, request?.Source, request?.Device);
         }
 
         return Ok();

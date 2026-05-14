@@ -5,7 +5,7 @@ namespace Sciencetopia.Services.Progress;
 public interface IResourceProgressService
 {
     Task<ResourceProgressResult> CompleteAsync(string userId, Guid resourceId, CompleteResourceDto dto);
-    Task UndoAsync(string userId, Guid resourceId, Guid? planId = null, Guid? lessonId = null);
+    Task UndoAsync(string userId, Guid resourceId, Guid? planId = null, Guid? lessonId = null, string? resourceLink = null);
     Task ToggleByLinkAsync(string userId, string resourceLink, string? source, string? device);
 
     Task<UserPlanProgressDto>   GetPlanProgressAsync(string userId, Guid planId);

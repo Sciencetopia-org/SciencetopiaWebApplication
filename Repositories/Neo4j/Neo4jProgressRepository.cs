@@ -13,7 +13,7 @@ public class Neo4jProgressRepository : INeo4jProgressRepository
         _driver = driver;
     }
 
-    public async Task CompleteResourceAsync(string userId, Guid resourceId, DateTime completedAt, string? source, string? device, int? spentSeconds)
+    public async Task CompleteResourceAsync(string userId, Guid resourceId, string? resourceLink, DateTime completedAt, string? source, string? device, int? spentSeconds)
     {
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
@@ -21,7 +21,11 @@ public class Neo4jProgressRepository : INeo4jProgressRepository
             var cypher = @"
 MERGE (u:Group {id:$userId})
 SET u.kind = coalesce(u.kind, 'PersonalGroup')
-MATCH (r:Resource {id:$resourceId})
+WITH u
+MATCH (r:Resource)
+WHERE r.id = $resourceId OR ($resourceLink IS NOT NULL AND (r.link = $resourceLink OR r.url = $resourceLink))
+WITH u, r
+LIMIT 1
 MERGE (u)-[c:COMPLETED]->(r)
 SET c.completedAt = coalesce(c.completedAt, $completedAt),
     c.source = $source, c.device = $device,
@@ -31,6 +35,7 @@ SET c.completedAt = coalesce(c.completedAt, $completedAt),
             {
                 userId,
                 resourceId = resourceId.ToString(),
+                resourceLink = string.IsNullOrWhiteSpace(resourceLink) ? null : resourceLink,
                 completedAt,
                 source,
                 device,
@@ -39,16 +44,17 @@ SET c.completedAt = coalesce(c.completedAt, $completedAt),
         });
     }
 
-    public async Task UndoCompleteResourceAsync(string userId, Guid resourceId)
+    public async Task UndoCompleteResourceAsync(string userId, Guid resourceId, string? resourceLink = null)
     {
         await using var session = _driver.AsyncSession();
         await session.ExecuteWriteAsync(async tx =>
         {
             var cypher = @"
-MATCH (u:Group {id:$userId})-[c:COMPLETED]->(r:Resource {id:$resourceId})
+MATCH (u:Group {id:$userId})-[c:COMPLETED]->(r:Resource)
+WHERE r.id = $resourceId OR ($resourceLink IS NOT NULL AND (r.link = $resourceLink OR r.url = $resourceLink))
 DELETE c
 ";
-            await tx.RunAsync(cypher, new { userId, resourceId = resourceId.ToString() });
+            await tx.RunAsync(cypher, new { userId, resourceId = resourceId.ToString(), resourceLink = string.IsNullOrWhiteSpace(resourceLink) ? null : resourceLink });
         });
     }
 
@@ -58,7 +64,8 @@ DELETE c
         var (completed, total) = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (p:StudyPlan {id:$planId})-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (p:StudyPlan {id:$planId})
+OPTIONAL MATCH (p)-[:HAS_STEP]->(:Lesson)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
 OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
@@ -73,7 +80,8 @@ RETURN size(total) AS totalResources, size(COLLECT(DISTINCT rc)) AS completed
         var (advCompleted, advTotal) = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (p:StudyPlan {id:$planId})-[hs:HAS_STEP]->(l:Lesson)
+OPTIONAL MATCH (p:StudyPlan {id:$planId})
+OPTIONAL MATCH (p)-[hs:HAS_STEP]->(l:Lesson)
 WHERE hs.type IN $advancedTypes
 OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
@@ -238,7 +246,8 @@ RETURN p.id AS planId,
         var (completed, total) = await session.ExecuteReadAsync(async tx =>
         {
             var cypher = @"
-MATCH (l:Lesson {id:$lessonId})-[:HAS_RESOURCE]->(r:Resource)
+OPTIONAL MATCH (l:Lesson {id:$lessonId})
+OPTIONAL MATCH (l)-[:HAS_RESOURCE]->(r:Resource)
 WITH COLLECT(DISTINCT r) AS total
 OPTIONAL MATCH (u:Group {id:$userId})-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
@@ -359,7 +368,10 @@ WITH c, pv, COLLECT(DISTINCT r) AS total
 OPTIONAL MATCH (c)<-[:IN_COHORT]-(u:User)-[:MEMBER_OF]->(pg:Group {kind:'PersonalGroup'})
 OPTIONAL MATCH (pg)-[:ENROLLED_IN]->(v:PlanVersion {studyPlanId: pv.studyPlanId})
 WITH pv, total, u, pg, v
-WHERE u IS NOT NULL AND pg IS NOT NULL AND pv IS NOT NULL AND v.versionNumber = pv.versionNumber
+WHERE u IS NOT NULL
+  AND pg IS NOT NULL
+  AND pv IS NOT NULL
+  AND v.versionNumber = pv.versionNumber
 OPTIONAL MATCH (pg)-[:COMPLETED]->(rc:Resource)
 WHERE rc IN total
 WITH u, size(total) AS totalResources, COUNT(DISTINCT rc) AS completed
@@ -411,19 +423,22 @@ RETURN c.id AS id
             var cypher = @"
 MERGE (u:Group {id:$userId})
 SET u.kind = coalesce(u.kind, 'PersonalGroup')
-MATCH (r:Resource {link:$link})
+WITH u
+OPTIONAL MATCH (r:Resource)
+WHERE r.link = $link OR r.url = $link
+WITH u, collect(r)[0] AS r
 OPTIONAL MATCH (u)-[c:COMPLETED]->(r)
 WITH u, r, c
-FOREACH (_ IN CASE WHEN c IS NULL THEN [1] ELSE [] END |
+FOREACH (_ IN CASE WHEN r IS NOT NULL AND c IS NULL THEN [1] ELSE [] END |
   MERGE (u)-[nc:COMPLETED]->(r)
   SET nc.completedAt = coalesce(nc.completedAt, $now),
       nc.source = $source,
       nc.device = $device
 )
-FOREACH (_ IN CASE WHEN c IS NOT NULL THEN [1] ELSE [] END |
+FOREACH (_ IN CASE WHEN r IS NOT NULL AND c IS NOT NULL THEN [1] ELSE [] END |
   DELETE c
 )
-RETURN c IS NULL AS completedNow
+RETURN r IS NOT NULL AND c IS NULL AS completedNow
 ";
             var cursor = await tx.RunAsync(cypher, new { userId, link = resourceLink, now, source, device });
             var rec = await cursor.SingleAsync();

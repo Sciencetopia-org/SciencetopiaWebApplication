@@ -21,9 +21,9 @@ public interface ICohortService
     Task<int> RunAutoEnrollAsync(Guid cohortId, Guid groupId, CancellationToken ct = default);
 
     // B3-1 JoinCohortAsync
-    Task<(Guid planId, Guid cohortId)> JoinCohortAsync(Guid cohortId, string userId, bool shareMetrics = true, CancellationToken ct = default);
+    Task<(Guid planId, Guid cohortId)> JoinCohortAsync(Guid cohortId, string userId, CancellationToken ct = default);
     // B3-2 SwitchCohortAsync
-    Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, bool shareMetrics = true, string? migrationStrategy = null, CancellationToken ct = default);
+    Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, string? migrationStrategy = null, CancellationToken ct = default);
 
     Task<Sciencetopia.DTOs.EnrollmentMeDto> GetEnrollmentForUserAsync(Guid planId, string userId, CancellationToken ct = default);
 
@@ -282,7 +282,7 @@ SET r.enabled=$enabled, r.createdAt = coalesce(r.createdAt, datetime())";
         return count;
     }
 
-    public async Task<(Guid planId, Guid cohortId)> JoinCohortAsync(Guid cohortId, string userId, bool shareMetrics = true, CancellationToken ct = default)
+    public async Task<(Guid planId, Guid cohortId)> JoinCohortAsync(Guid cohortId, string userId, CancellationToken ct = default)
     {
         var info = await EnsureCohortScopeAccessAsync(cohortId, userId, ct);
         var existingActive = await GetActiveCohortForPlanAsync(userId, info.PlanStableId, ct);
@@ -296,7 +296,7 @@ SET r.enabled=$enabled, r.createdAt = coalesce(r.createdAt, datetime())";
         return (info.PlanStableId, cohortId);
     }
 
-    public async Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, bool shareMetrics = true, string? migrationStrategy = null, CancellationToken ct = default)
+    public async Task<(Guid planId, Guid? fromCohortId, Guid toCohortId)> SwitchCohortAsync(Guid planId, Guid toCohortId, string userId, string? migrationStrategy = null, CancellationToken ct = default)
     {
         var stableId = await ResolvePlanStableIdAsync(planId, ct);
         var target = await EnsureCohortScopeAccessAsync(toCohortId, userId, ct);
@@ -448,7 +448,8 @@ MERGE (u:User {id:$userId})
 MERGE (pg:Group {id:$personalGroupId})
 SET pg.kind = 'PersonalGroup'
 MERGE (u)-[:MEMBER_OF]->(pg)
-MERGE (u)-[:IN_COHORT]->(:Cohort {id:$cohortId})",
+MERGE (c:Cohort {id:$cohortId})
+MERGE (u)-[:IN_COHORT]->(c)",
                 new { userId, personalGroupId = personalGroupId.ToString(), cohortId = cohortId.ToString() });
         });
     }

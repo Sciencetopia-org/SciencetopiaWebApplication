@@ -145,14 +145,14 @@ Cohorts（通用）
 - POST `api/Cohorts/{cohortId}/Join`
   - 功能：加入组域 Cohort，并建立到其固定版本的 ENROLLED_IN
   - 规则：Cohort 必须为组域；调用者必须是该组成员
-  - 请求体：`{ shareMetrics?: bool }`（`migrationStrategy` 字段预留，忽略）
+  - 请求体：`{}`
   - 响应：`{ planId: Guid, cohortId: Guid }`
   - 失败：`403 Forbidden`（非组成员），`409 Conflict`（`{ code: "alreadyInPlan" }`）
 
 - POST `api/Plans/{planId}/SwitchCohort`
   - 功能：在同一计划内切换到目标组域 Cohort，并建立相应 ENROLLED_IN
   - 规则：目标 Cohort 必须为组域；调用者必须是该组成员
-  - 请求体：`{ toCohortId: Guid, shareMetrics?: bool, migrationStrategy?: string }`
+  - 请求体：`{ toCohortId: Guid, migrationStrategy?: string }`
   - 响应：`{ planId: Guid, fromCohortId: Guid|null, toCohortId: Guid }`
   - 失败：`404 Not Found`，`403 Forbidden`，`400 Bad Request`（`{ code: "cohort_plan_mismatch" }`）
 

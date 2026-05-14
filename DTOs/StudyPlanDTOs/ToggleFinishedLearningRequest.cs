@@ -4,6 +4,7 @@ namespace Sciencetopia.DTOs
     {
         public string? Name { get; set; }
         public string? Link { get; set; }
+        public string? ResourceLink { get; set; }
         public string? Source { get; set; }
         public string? Device { get; set; }
     }

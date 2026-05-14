@@ -46,7 +46,7 @@ public class ResourceProgressController : ControllerBase
     }
 
     [HttpDelete("{resourceId:guid}/Complete")]
-    public async Task<IActionResult> Undo(Guid resourceId, [FromQuery] Guid? planId = null, [FromQuery] Guid? lessonId = null)
+    public async Task<IActionResult> Undo(Guid resourceId, [FromQuery] Guid? planId = null, [FromQuery] Guid? lessonId = null, [FromQuery] string? resourceLink = null)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized("User is not authenticated.");
@@ -57,7 +57,7 @@ public class ResourceProgressController : ControllerBase
             if (!allowed) return Forbid();
         }
 
-        await _svc.UndoAsync(userId, resourceId, planId, lessonId);
+        await _svc.UndoAsync(userId, resourceId, planId, lessonId, resourceLink);
 
         // Compute updated progress to allow immediate UI refresh
         double planProgress = 0;

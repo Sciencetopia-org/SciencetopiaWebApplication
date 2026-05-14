@@ -65,7 +65,7 @@ public class CohortsController : ControllerBase
     {
         var userId = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
-        var (planId, cid) = await _svc.JoinCohortAsync(cohortId, userId, body?.ShareMetrics ?? true, HttpContext.RequestAborted);
+        var (planId, cid) = await _svc.JoinCohortAsync(cohortId, userId, HttpContext.RequestAborted);
         await _hub.Clients.All.SendAsync("cohort_joined", new { planId, cohortId = cid, userId });
         return Ok(new JoinCohortResponse { PlanId = planId, CohortId = cid });
     }
@@ -96,7 +96,7 @@ public class CohortsController : ControllerBase
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
         try
         {
-            var (planId, cid) = await _svc.JoinCohortAsync(cohortId, userId, body.ShareMetrics ?? true, HttpContext.RequestAborted);
+            var (planId, cid) = await _svc.JoinCohortAsync(cohortId, userId, HttpContext.RequestAborted);
             await _hub.Clients.All.SendAsync("cohort_joined", new { planId, cohortId = cid, userId });
             return Ok(new JoinCohortResponse { PlanId = planId, CohortId = cid });
         }
@@ -118,7 +118,7 @@ public class CohortsController : ControllerBase
         if (string.IsNullOrEmpty(userId)) return Unauthorized();
         try
         {
-            var (pid, fromC, toC) = await _svc.SwitchCohortAsync(planId, body.ToCohortId, userId, body.ShareMetrics ?? true, body.MigrationStrategy, HttpContext.RequestAborted);
+            var (pid, fromC, toC) = await _svc.SwitchCohortAsync(planId, body.ToCohortId, userId, body.MigrationStrategy, HttpContext.RequestAborted);
             await _hub.Clients.All.SendAsync("cohort_switched", new { planId = pid, from = fromC, to = toC, userId });
             return Ok(new SwitchCohortResponse { PlanId = pid, FromCohortId = fromC, ToCohortId = toC });
         }

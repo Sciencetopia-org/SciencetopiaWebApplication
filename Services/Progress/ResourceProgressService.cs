@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Sciencetopia.Hubs;
 using Sciencetopia.DTOs;
+using Sciencetopia.Data;
 using Sciencetopia.Repositories.Neo4j;
 using Sciencetopia.Services.Plans;
+using Microsoft.Extensions.Logging;
 
 namespace Sciencetopia.Services.Progress;
 
@@ -13,18 +16,24 @@ namespace Sciencetopia.Services.Progress;
         private readonly IHubContext<StudyHub> _hub;
         private readonly IMemoryCache _cache;
         private readonly IPersonalPlanEnrollmentService _personalGroups;
+        private readonly ApplicationDbContext _db;
+        private readonly ILogger<ResourceProgressService> _logger;
         private static readonly TimeSpan CompletedResourceIdsCacheTtl = TimeSpan.FromSeconds(30);
 
     public ResourceProgressService(
         INeo4jProgressRepository repo,
         IHubContext<StudyHub> hub,
         IMemoryCache cache,
-        IPersonalPlanEnrollmentService personalGroups)
+        IPersonalPlanEnrollmentService personalGroups,
+        ApplicationDbContext db,
+        ILogger<ResourceProgressService> logger)
     {
         _repo = repo;
         _hub = hub;
         _cache = cache;
         _personalGroups = personalGroups;
+        _db = db;
+        _logger = logger;
     }
 
     private async Task<string> GetPersonalGroupSubjectIdAsync(string userId)
@@ -35,6 +44,9 @@ namespace Sciencetopia.Services.Progress;
 
     private static string GetPlanCompletedCacheKey(string userId, Guid planId)
         => $"progress:plan-completed:{userId}:{planId}";
+
+    private static string GetStudyPlanListVersionCacheKey(string userId)
+        => $"studyplans:list-version:{userId}";
 
     private void InvalidateCompletionCaches(string userId, Guid? planId = null, Guid? lessonId = null)
     {
@@ -47,70 +59,153 @@ namespace Sciencetopia.Services.Progress;
         {
             _cache.Remove(GetLessonCompletedCacheKey(userId, lessonId.Value));
         }
+
+        _cache.Set(GetStudyPlanListVersionCacheKey(userId), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    }
+
+    private async Task<Guid> ResolvePlanStableIdAsync(Guid planId)
+    {
+        if (planId == Guid.Empty)
+        {
+            return Guid.Empty;
+        }
+
+        var stableId = await _db.StudyPlans.AsNoTracking()
+            .Where(p => p.Id == planId || p.StableId == planId)
+            .Select(p => p.StableId == Guid.Empty ? p.Id : p.StableId)
+            .FirstOrDefaultAsync();
+
+        return stableId == Guid.Empty ? planId : stableId;
+    }
+
+    private async Task TouchPlanStudiedAtAsync(Guid planId, DateTime studiedAt)
+    {
+        if (planId == Guid.Empty)
+        {
+            return;
+        }
+
+        var stableId = await ResolvePlanStableIdAsync(planId);
+        if (stableId == Guid.Empty)
+        {
+            return;
+        }
+
+        var plans = await _db.StudyPlans
+            .Where(p => p.Id == planId || p.StableId == stableId || (p.StableId == Guid.Empty && p.Id == stableId))
+            .ToListAsync();
+
+        foreach (var plan in plans)
+        {
+            plan.LastStudiedAt = studiedAt;
+        }
+
+        if (plans.Count > 0)
+        {
+            await _db.SaveChangesAsync();
+        }
     }
 
     public async Task<ResourceProgressResult> CompleteAsync(string userId, Guid resourceId, CompleteResourceDto dto)
     {
         var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
-        await _repo.CompleteResourceAsync(subjectId, resourceId, DateTime.UtcNow, dto.source, dto.device, dto.spentSeconds);
+        var completedAt = DateTime.UtcNow;
+        var planStableId = dto.planId.HasValue ? await ResolvePlanStableIdAsync(dto.planId.Value) : (Guid?)null;
+
+        await _repo.CompleteResourceAsync(subjectId, resourceId, dto.resourceLink, completedAt, dto.source, dto.device, dto.spentSeconds);
         InvalidateCompletionCaches(userId, dto.planId, dto.lessonId);
+        if (planStableId.HasValue && dto.planId.HasValue && planStableId.Value != dto.planId.Value)
+        {
+            _cache.Remove(GetPlanCompletedCacheKey(userId, planStableId.Value));
+        }
+        if (dto.planId.HasValue)
+        {
+            await TouchPlanStudiedAtAsync(dto.planId.Value, completedAt);
+        }
 
         double planProgress = 0;
         double lessonProgress = 0;
         int lessonCompleted = 0;
         int lessonTotal = 0;
 
-        if (dto.planId.HasValue)
+        if (planStableId.HasValue && planStableId.Value != Guid.Empty)
         {
-            var plan = await _repo.GetMyPlanProgressAsync(subjectId, dto.planId.Value);
-            planProgress = plan.planProgress;
+            try
+            {
+                var plan = await _repo.GetMyPlanProgressAsync(subjectId, planStableId.Value);
+                planProgress = plan.planProgress;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Completed resource but failed to recalculate plan progress. userId={UserId} subjectId={SubjectId} planId={PlanId} resourceId={ResourceId}", userId, subjectId, planStableId.Value, resourceId);
+            }
         }
 
         if (dto.lessonId.HasValue)
         {
-            var les = await _repo.GetMyLessonProgressAsync(subjectId, dto.lessonId.Value);
-            lessonProgress = les.lessonProgress;
-            lessonCompleted = les.completedCount;
-            lessonTotal = les.totalResources;
+            try
+            {
+                var les = await _repo.GetMyLessonProgressAsync(subjectId, dto.lessonId.Value);
+                lessonProgress = les.lessonProgress;
+                lessonCompleted = les.completedCount;
+                lessonTotal = les.totalResources;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Completed resource but failed to recalculate lesson progress. userId={UserId} subjectId={SubjectId} lessonId={LessonId} resourceId={ResourceId}", userId, subjectId, dto.lessonId.Value, resourceId);
+            }
         }
 
         // Broadcast to cohorts if applicable
-        if (dto.planId.HasValue)
+        if (planStableId.HasValue && planStableId.Value != Guid.Empty)
         {
-            var cohortIds = await _repo.GetCohortsForUserAndPlanAsync(userId, dto.planId.Value);
-            foreach (var cid in cohortIds)
+            try
             {
-                // Push resourceCompleted (lightweight)
-                await _hub.Clients.Group($"cohort:{cid}").SendAsync("resourceCompleted", new
+                var cohortIds = await _repo.GetCohortsForUserAndPlanAsync(subjectId, planStableId.Value);
+                foreach (var cid in cohortIds)
                 {
-                    cohortId = cid,
-                    userId,
-                    resourceId,
-                    planProgress
-                });
+                    await _hub.Clients.Group($"cohort:{cid}").SendAsync("resourceCompleted", new
+                    {
+                        cohortId = cid,
+                        userId,
+                        resourceId,
+                        planProgress
+                    });
 
-                // Recompute and push cohort summary
-                var summary = await _repo.GetCohortSummaryAsync(cid);
-                await _hub.Clients.Group($"cohort:{cid}").SendAsync("progressUpdated", new { cohortId = cid, summary });
+                    var summary = await _repo.GetCohortSummaryAsync(cid);
+                    await _hub.Clients.Group($"cohort:{cid}").SendAsync("progressUpdated", new { cohortId = cid, summary });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Completed resource but failed to broadcast cohort progress. userId={UserId} subjectId={SubjectId} planId={PlanId} resourceId={ResourceId}", userId, subjectId, planStableId.Value, resourceId);
             }
         }
 
         return new ResourceProgressResult(planProgress, lessonProgress, lessonCompleted, lessonTotal);
     }
 
-    public async Task UndoAsync(string userId, Guid resourceId, Guid? planId = null, Guid? lessonId = null)
+    public async Task UndoAsync(string userId, Guid resourceId, Guid? planId = null, Guid? lessonId = null, string? resourceLink = null)
     {
         var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
-        await _repo.UndoCompleteResourceAsync(subjectId, resourceId);
+        await _repo.UndoCompleteResourceAsync(subjectId, resourceId, resourceLink);
         InvalidateCompletionCaches(userId, planId, lessonId);
+        if (planId.HasValue)
+        {
+            var planStableId = await ResolvePlanStableIdAsync(planId.Value);
+            if (planStableId != planId.Value)
+            {
+                _cache.Remove(GetPlanCompletedCacheKey(userId, planStableId));
+            }
+        }
         // No broadcast here, clients typically refresh on demand.
     }
 
     public async Task<UserPlanProgressDto> GetPlanProgressAsync(string userId, Guid planId)
-        => await _repo.GetMyPlanProgressWithLessonsAsync(await GetPersonalGroupSubjectIdAsync(userId), planId);
+        => await _repo.GetMyPlanProgressWithLessonsAsync(await GetPersonalGroupSubjectIdAsync(userId), await ResolvePlanStableIdAsync(planId));
 
     public async Task<(UserPlanProgressDto progress, HashSet<Guid> completedResourceIds)> GetPlanProgressSnapshotAsync(string userId, Guid planId)
-        => await _repo.GetMyPlanProgressSnapshotAsync(await GetPersonalGroupSubjectIdAsync(userId), planId);
+        => await _repo.GetMyPlanProgressSnapshotAsync(await GetPersonalGroupSubjectIdAsync(userId), await ResolvePlanStableIdAsync(planId));
 
     public async Task<Dictionary<Guid, UserPlanProgressDto>> GetPlanProgressByPlanIdsAsync(string userId, IEnumerable<Guid> planIds)
         => await _repo.GetMyPlanProgressByPlanIdsAsync(await GetPersonalGroupSubjectIdAsync(userId), planIds);
@@ -132,6 +227,7 @@ namespace Sciencetopia.Services.Progress;
             var subjectId = await GetPersonalGroupSubjectIdAsync(userId);
             // No cohort broadcast here due to missing plan context.
             await _repo.ToggleCompleteByLinkAsync(subjectId, resourceLink, DateTime.UtcNow, source, device);
+            InvalidateCompletionCaches(userId);
         }
 
         public Task<HashSet<Guid>> GetCompletedResourceIdsForPlanAsync(string userId, Guid planStableId)

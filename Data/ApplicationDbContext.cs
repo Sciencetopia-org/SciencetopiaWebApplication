@@ -474,6 +474,7 @@ namespace Sciencetopia.Data
                 eb.Property<string>("Privacy").HasMaxLength(16).HasDefaultValue("private");
                 eb.Property(x => x.MetadataJson).HasColumnType("nvarchar(max)");
                 eb.Property(x => x.LockfileJson).HasColumnType("nvarchar(max)");
+                eb.Property(x => x.LastStudiedAt).HasColumnType("datetime2");
 
                 eb.HasIndex(x => new { x.StableId, x.VersionNumber })
                   .HasDatabaseName("IX_SP_Stable_Version");

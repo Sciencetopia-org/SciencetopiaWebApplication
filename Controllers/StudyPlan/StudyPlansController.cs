@@ -28,6 +28,9 @@ namespace Sciencetopia.Controllers.StudyPlan
         private static readonly TimeSpan StudyPlansVisibilityCacheTtl = TimeSpan.FromMinutes(1);
         private static readonly TimeSpan StudyPlansResponseCacheTtl = TimeSpan.FromSeconds(30);
 
+        private static string GetStudyPlanListVersionCacheKey(string userId)
+            => $"studyplans:list-version:{userId}";
+
         public StudyPlansController(
             ApplicationDbContext db,
             PermissionService perm,
@@ -175,7 +178,17 @@ namespace Sciencetopia.Controllers.StudyPlan
                     && (string.IsNullOrEmpty(gr.Status) || gr.Status == "Active" || gr.Status == "active"));
         }
 
-        private async Task<object> BuildListFallbackAsync(string subjectUserId, int page, int pageSize, string? q, string? sort)
+        private static bool MatchesProgressFilter(double progress, string? progressStatus)
+        {
+            return (progressStatus ?? string.Empty).Trim().ToLowerInvariant() switch
+            {
+                "inprogress" => progress < 99.999,
+                "completed" => progress >= 99.999,
+                _ => true
+            };
+        }
+
+        private async Task<object> BuildListFallbackAsync(string subjectUserId, int page, int pageSize, string? q, string? sort, string? progressStatus)
         {
             var subjectGuid = Guid.TryParse(subjectUserId, out var parsedSubjectId) ? parsedSubjectId : Guid.Empty;
 
@@ -205,7 +218,10 @@ namespace Sciencetopia.Controllers.StudyPlan
             {
                 "createdDesc" => query.OrderByDescending(p => p.CreatedDate),
                 "createdAsc" => query.OrderBy(p => p.CreatedDate),
-                _ => query.OrderByDescending(p => p.UpdatedDate)
+                "updatedDesc" => query.OrderByDescending(p => p.UpdatedDate),
+                "updatedAsc" => query.OrderBy(p => p.UpdatedDate),
+                "lastStudiedAsc" => query.OrderBy(p => p.LastStudiedAt ?? DateTime.MinValue),
+                _ => query.OrderByDescending(p => p.LastStudiedAt ?? p.UpdatedDate)
             };
 
             var total = await query.CountAsync();
@@ -222,7 +238,8 @@ namespace Sciencetopia.Controllers.StudyPlan
                     p.Title,
                     p.Description,
                     p.CreatedDate,
-                    p.UpdatedDate
+                    p.UpdatedDate,
+                    p.LastStudiedAt
                 })
                 .ToListAsync();
 
@@ -238,12 +255,15 @@ namespace Sciencetopia.Controllers.StudyPlan
                 title = p.Title,
                 description = p.Description,
                 updatedAt = p.UpdatedDate,
+                lastStudiedAt = p.LastStudiedAt,
                 createdAt = p.CreatedDate,
                 hasUpgrade = false,
                 role = PlanRole.Viewer.ToString(),
                 progress = 0.0,
                 advancedProgress = 0.0
-            }).ToList();
+            })
+            .Where(p => MatchesProgressFilter(p.progress, progressStatus))
+            .ToList();
 
             return new { total, page, pageSize, items };
         }
@@ -255,6 +275,7 @@ namespace Sciencetopia.Controllers.StudyPlan
             [FromQuery] string? q = null,
             [FromQuery] string? sort = null,
             [FromQuery] string? scope = null,
+            [FromQuery] string? progressStatus = null,
             [FromQuery] string? targetUserId = null)
         {
             var totalSw = Stopwatch.StartNew();
@@ -263,8 +284,12 @@ namespace Sciencetopia.Controllers.StudyPlan
 
             var subjectUserId = string.IsNullOrWhiteSpace(targetUserId) ? userId : targetUserId;
             var normalizedScope = string.IsNullOrWhiteSpace(scope) ? "mine" : scope.Trim().ToLowerInvariant();
+            var listVersion = _cache.TryGetValue<long>(GetStudyPlanListVersionCacheKey(subjectUserId), out var cachedVersion)
+                ? cachedVersion
+                : 0L;
 
-            var responseCacheKey = $"studyplans:list:{userId}:subject:{subjectUserId}:scope:{normalizedScope}:page:{page}:size:{pageSize}:q:{q ?? string.Empty}:sort:{sort ?? string.Empty}";
+            var normalizedProgressStatus = string.IsNullOrWhiteSpace(progressStatus) ? "all" : progressStatus.Trim().ToLowerInvariant();
+            var responseCacheKey = $"studyplans:list:{userId}:subject:{subjectUserId}:v:{listVersion}:scope:{normalizedScope}:progress:{normalizedProgressStatus}:page:{page}:size:{pageSize}:q:{q ?? string.Empty}:sort:{sort ?? string.Empty}";
             if (_cache.TryGetValue(responseCacheKey, out object? cachedPayload) && cachedPayload != null)
             {
                 totalSw.Stop();
@@ -304,22 +329,31 @@ namespace Sciencetopia.Controllers.StudyPlan
                 baseQ = baseQ.Where(p => p.Title.Contains(q));
             }
 
+            var requiresProgressShaping = normalizedProgressStatus is "inprogress" or "completed"
+                || string.Equals(sort, "progressDesc", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(sort, "progressAsc", StringComparison.OrdinalIgnoreCase);
+
             baseQ = sort switch
             {
                 "createdDesc" => baseQ.OrderByDescending(p => p.CreatedDate),
                 "createdAsc" => baseQ.OrderBy(p => p.CreatedDate),
-                _ => baseQ.OrderByDescending(p => p.UpdatedDate)
+                "updatedDesc" => baseQ.OrderByDescending(p => p.UpdatedDate),
+                "updatedAsc" => baseQ.OrderBy(p => p.UpdatedDate),
+                "lastStudiedAsc" => baseQ.OrderBy(p => p.LastStudiedAt ?? DateTime.MinValue),
+                _ => baseQ.OrderByDescending(p => p.LastStudiedAt ?? p.UpdatedDate)
             };
 
             var countSw = Stopwatch.StartNew();
-            var total = await baseQ.CountAsync();
+            var total = requiresProgressShaping ? 0 : await baseQ.CountAsync();
             countSw.Stop();
 
             // Project only Id and Title for speed
             var sliceSw = Stopwatch.StartNew();
-            var slice = await baseQ
-                .Skip((page - 1) * pageSize)
-                .Take(pageSize)
+            var rawRowsQuery = requiresProgressShaping
+                ? baseQ
+                : baseQ.Skip((page - 1) * pageSize).Take(pageSize);
+
+            var slice = await rawRowsQuery
                 .Select(p => new
                 {
                     p.Id,
@@ -330,7 +364,8 @@ namespace Sciencetopia.Controllers.StudyPlan
                     p.Title,
                     p.Description,
                     p.CreatedDate,
-                    p.UpdatedDate
+                    p.UpdatedDate,
+                    p.LastStudiedAt
                 })
                 .ToListAsync();
             sliceSw.Stop();
@@ -414,15 +449,39 @@ namespace Sciencetopia.Controllers.StudyPlan
                     title = p.Title,
                     description = p.Description,
                     updatedAt = p.UpdatedDate,
+                    lastStudiedAt = p.LastStudiedAt,
                     createdAt = p.CreatedDate,
                     hasUpgrade,
                     role,
                     progress = progress.planProgress,
                     advancedProgress = progress.advancedTopicProgress
                 };
-            }).ToList();
+            });
 
-            var payload = new { total, page, pageSize, items };
+            if (requiresProgressShaping)
+            {
+                items = sort switch
+                {
+                    "progressAsc" => items.OrderBy(x => x.progress).ThenByDescending(x => x.lastStudiedAt ?? x.updatedAt),
+                    "progressDesc" => items.OrderByDescending(x => x.progress).ThenByDescending(x => x.lastStudiedAt ?? x.updatedAt),
+                    _ => items
+                };
+            }
+
+            var filteredItems = items
+                .Where(x => MatchesProgressFilter(x.progress, normalizedProgressStatus))
+                .ToList();
+
+            if (requiresProgressShaping)
+            {
+                total = filteredItems.Count;
+                filteredItems = filteredItems
+                    .Skip((page - 1) * pageSize)
+                    .Take(pageSize)
+                    .ToList();
+            }
+
+            var payload = new { total, page, pageSize, items = filteredItems };
             _cache.Set(responseCacheKey, payload, StudyPlansResponseCacheTtl);
 
             totalSw.Stop();
@@ -456,7 +515,7 @@ namespace Sciencetopia.Controllers.StudyPlan
                     page,
                     pageSize);
 
-                var fallbackPayload = await BuildListFallbackAsync(subjectUserId, page, pageSize, q, sort);
+                var fallbackPayload = await BuildListFallbackAsync(subjectUserId, page, pageSize, q, sort, progressStatus);
                 return Ok(fallbackPayload);
             }
         }

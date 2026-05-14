@@ -9,6 +9,9 @@ IF OBJECT_ID(N'[Groups].[UserGroups]', N'U') IS NULL
 IF OBJECT_ID(N'[StudyPlans].[StudyPlans]', N'U') IS NULL
     THROW 50000, 'Invariant failed: StudyPlans.StudyPlans must exist.', 1;
 
+IF COL_LENGTH(N'StudyPlans.StudyPlans', N'LastStudiedAt') IS NULL
+    THROW 50000, 'Invariant failed: StudyPlans.StudyPlans.LastStudiedAt must exist for learning activity recency.', 1;
+
 IF OBJECT_ID(N'[StudyPlans].[GroupPlanEnrollments]', N'U') IS NULL
     THROW 50000, 'Invariant failed: StudyPlans.GroupPlanEnrollments must exist for PersonalGroup plan enrollment.', 1;
 

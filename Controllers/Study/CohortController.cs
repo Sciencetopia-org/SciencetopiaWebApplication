@@ -157,7 +157,7 @@ public class CohortController : ControllerBase
         }
         else if (!isEnrolled && string.Equals(row.Cohort.CreatedBy, userId, StringComparison.OrdinalIgnoreCase))
         {
-            await _cohorts.JoinCohortAsync(cohortId, userId, true, HttpContext.RequestAborted);
+            await _cohorts.JoinCohortAsync(cohortId, userId, HttpContext.RequestAborted);
             isEnrolled = true;
         }
 
@@ -199,8 +199,7 @@ public class CohortController : ControllerBase
             new CohortDashboardMeDto(
                 isEnrolled,
                 myProgressTask.Result.planProgress,
-                myRank >= 0 ? myRank + 1 : null,
-                true),
+                myRank >= 0 ? myRank + 1 : null),
             ranked,
             lessons);
 

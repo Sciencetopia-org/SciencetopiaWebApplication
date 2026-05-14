@@ -38,6 +38,8 @@ public class StudyPlanEntity
 
     public DateTime UpdatedDate { get; set; } = DateTime.UtcNow;
 
+    public DateTime? LastStudiedAt { get; set; }
+
     // Frozen snapshot of lesson version bindings for published versions
     // JSON structure: { lessons: [{ lessonStableId, lessonVersionNumber, stepType, index }] }
     public string? LockfileJson { get; set; }

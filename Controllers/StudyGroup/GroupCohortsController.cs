@@ -333,7 +333,7 @@ public class GroupCohortsController : ControllerBase
         }
         else
         {
-            await _cohorts.JoinCohortAsync(cohortId, userId, true, HttpContext.RequestAborted);
+            await _cohorts.JoinCohortAsync(cohortId, userId, HttpContext.RequestAborted);
             enrolledCount = 1;
         }
 
