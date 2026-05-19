@@ -1,5 +1,7 @@
 public class SearchService
 {
+    private const int LinkedNodeSearchLimit = 50;
+
     private readonly IKnowledgeNodeRepository _knowledgeRepo;
     private readonly IResourceRepository _resourceRepo;
     private readonly IGraphRepository _neo4jRepository;
@@ -20,7 +22,7 @@ public class SearchService
         var directMatches = await _resourceRepo.SearchResourcesByQueryAsync(query);
 
         // Step 2: SQL - 匹配且审核通过的 KnowledgeNode ID
-        var approvedNodes = await _knowledgeRepo.SearchKnowledgeNodesAsync(query, 0, int.MaxValue);
+        var approvedNodes = await _knowledgeRepo.SearchKnowledgeNodesAsync(query, 0, LinkedNodeSearchLimit);
         var approvedNodeIds = approvedNodes
             .Where(n => n.Id.HasValue)
             .Select(n => n.Id!.Value)

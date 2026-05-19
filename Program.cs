@@ -42,6 +42,9 @@ builder.Services.AddScoped<StudyPlanService>(sp =>
         sp.GetRequiredService<ITagRepository>(),
         sp.GetRequiredService<ITagResolutionService>()));
 builder.Services.AddScoped<StudyGroupService>();
+builder.Services.AddScoped<Sciencetopia.Services.StudyGroupDiscovery.IStudyGroupDiscoveryService, Sciencetopia.Services.StudyGroupDiscovery.StudyGroupDiscoveryService>();
+builder.Services.AddScoped<Sciencetopia.Services.StudyGroupDiscovery.Vectors.IEmbeddingService, Sciencetopia.Services.StudyGroupDiscovery.Vectors.NoopEmbeddingService>();
+builder.Services.AddScoped<Sciencetopia.Services.StudyGroupDiscovery.Vectors.IVectorSearchService, Sciencetopia.Services.StudyGroupDiscovery.Vectors.NoopVectorSearchService>();
 builder.Services.AddScoped<LearningService>();
 builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<KnowledgeGraphService>();
@@ -50,6 +53,7 @@ builder.Services.AddScoped<EmailTemplateService>();
 builder.Services.AddScoped<UserActivityService>();
 builder.Services.AddScoped<DailySummaryService>();
 builder.Services.AddScoped<SearchService>();
+builder.Services.AddScoped<Sciencetopia.Services.SearchEngine.SearchVectorService>();
 
 builder.Services.AddScoped<GroupManagerAuthorizeAttribute>(); // Register the custom authorization attribute
 

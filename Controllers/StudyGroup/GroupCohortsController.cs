@@ -133,6 +133,7 @@ public class GroupCohortsController : ControllerBase
 
         var cohortIds = cohorts.Select(c => c.Id).Distinct().ToList();
         var memberCounts = await GetCohortMemberCountsAsync(cohortIds);
+        var uniqueMemberCountsByAdoption = await GetUniqueCohortMemberCountsByAdoptionAsync(cohorts);
         var summaryTasks = cohortIds.ToDictionary(id => id, id => _progress.GetCohortSummaryAsync(id));
         await Task.WhenAll(summaryTasks.Values);
 
@@ -181,6 +182,7 @@ public class GroupCohortsController : ControllerBase
                 ? await _perm.GetEffectivePlanRoleAsync(userId, targetVersionId.Value)
                 : PlanRole.Viewer;
             var primaryCohort = cohortCards.FirstOrDefault();
+            uniqueMemberCountsByAdoption.TryGetValue(adoption.Id, out var uniqueMemberCount);
 
             return new
             {
@@ -193,7 +195,7 @@ public class GroupCohortsController : ControllerBase
                 visibility = primaryCohort?.Visibility,
                 enrollMode = primaryCohort?.EnrollMode,
                 pinnedVersionNumber = pinnedNo,
-                memberCount = cohortCards.Sum(x => x.MemberCount),
+                memberCount = uniqueMemberCount,
                 avgProgress = cohortCards.Count > 0 ? cohortCards.Average(x => x.AvgProgress) : 0,
                 role = role.ToString(),
                 sharePermission = adoption.Permission,
@@ -421,8 +423,30 @@ public class GroupCohortsController : ControllerBase
         return await _db.UserGroups.AsNoTracking()
             .Where(ug => cohortIds.Contains(ug.GroupId) && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
             .GroupBy(ug => ug.GroupId)
-            .Select(g => new { GroupId = g.Key, Count = g.Count() })
+            .Select(g => new { GroupId = g.Key, Count = g.Select(x => x.UserId).Distinct().Count() })
             .ToDictionaryAsync(x => x.GroupId, x => x.Count);
+    }
+
+    private async Task<Dictionary<Guid, int>> GetUniqueCohortMemberCountsByAdoptionAsync(List<CohortEntity> cohorts)
+    {
+        if (cohorts.Count == 0) return new Dictionary<Guid, int>();
+
+        var cohortToAdoption = cohorts
+            .GroupBy(c => c.Id)
+            .ToDictionary(g => g.Key, g => g.First().StudyGroupStudyPlanId);
+        var cohortIds = cohortToAdoption.Keys.ToList();
+
+        var rows = await _db.UserGroups.AsNoTracking()
+            .Where(ug => cohortIds.Contains(ug.GroupId)
+                && !string.IsNullOrEmpty(ug.UserId)
+                && (string.IsNullOrEmpty(ug.Status) || ug.Status == "Active" || ug.Status == "active"))
+            .Select(ug => new { CohortId = ug.GroupId, ug.UserId })
+            .ToListAsync();
+
+        return rows
+            .Where(x => cohortToAdoption.ContainsKey(x.CohortId))
+            .GroupBy(x => cohortToAdoption[x.CohortId])
+            .ToDictionary(g => g.Key, g => g.Select(x => x.UserId).Distinct().Count());
     }
 
     private async Task<bool> SyncCohortGraphAsync(Guid cohortId, Guid groupId, Guid planStableId, int versionNumber, string? title, string? visibility)

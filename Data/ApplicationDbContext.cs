@@ -36,6 +36,9 @@ namespace Sciencetopia.Data
         public DbSet<StudyGroupStudyPlan> StudyGroupStudyPlans => Set<StudyGroupStudyPlan>();
         public DbSet<GroupPlanEnrollment> GroupPlanEnrollments => Set<GroupPlanEnrollment>();
         public DbSet<UserGroupEntity> UserGroups => Set<UserGroupEntity>();
+        public DbSet<StudyGroupRecommendationFeedback> StudyGroupRecommendationFeedback => Set<StudyGroupRecommendationFeedback>();
+        public DbSet<StudyGroupRecommendationRequestLog> StudyGroupRecommendationRequestLogs => Set<StudyGroupRecommendationRequestLog>();
+        public DbSet<StudyGroupEmbedding> StudyGroupEmbeddings => Set<StudyGroupEmbedding>();
         public DbSet<StudyPlanLessonSnapshot> StudyPlanLessonSnapshots => Set<StudyPlanLessonSnapshot>();
         public DbSet<GroupPlanSwitch> GroupPlanSwitches => Set<GroupPlanSwitch>();
         // L10n domain
@@ -116,6 +119,59 @@ namespace Sciencetopia.Data
                   .HasForeignKey<StudyGroupEntity>(x => x.Id)
                   .OnDelete(DeleteBehavior.Cascade);
                 eb.HasIndex(x => x.Visibility);
+            });
+
+            builder.Entity<StudyGroupRecommendationFeedback>(eb =>
+            {
+                eb.ToTable("StudyGroupRecommendationFeedback", schema: "StudyGroups");
+                eb.HasKey(x => x.Id);
+                eb.Property(x => x.UserId)
+                  .HasMaxLength(450)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                eb.Property(x => x.Action).HasMaxLength(32).IsRequired();
+                eb.Property(x => x.Scene).HasMaxLength(32);
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.RequestId);
+                eb.HasIndex(x => new { x.UserId, x.CreatedAt });
+                eb.HasIndex(x => new { x.GroupId, x.Action, x.CreatedAt });
+                eb.HasOne<StudyGroupEntity>()
+                  .WithMany()
+                  .HasForeignKey(x => x.GroupId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            builder.Entity<StudyGroupRecommendationRequestLog>(eb =>
+            {
+                eb.ToTable("StudyGroupRecommendationRequestLogs", schema: "StudyGroups");
+                eb.HasKey(x => x.Id);
+                eb.Property(x => x.UserId)
+                  .HasMaxLength(450)
+                  .HasColumnType("nvarchar(450)")
+                  .UseCollation("SQL_Latin1_General_CP1_CI_AS");
+                eb.Property(x => x.Scene).HasMaxLength(32);
+                eb.Property(x => x.SortMode).HasMaxLength(32);
+                eb.Property(x => x.Query).HasMaxLength(512);
+                eb.Property(x => x.StrategyVersion).HasMaxLength(64).IsRequired();
+                eb.Property(x => x.CreatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasIndex(x => x.RequestId);
+                eb.HasIndex(x => new { x.UserId, x.CreatedAt });
+            });
+
+            builder.Entity<StudyGroupEmbedding>(eb =>
+            {
+                eb.ToTable("StudyGroupEmbeddings", schema: "StudyGroups");
+                eb.HasKey(x => x.GroupId);
+                eb.Property(x => x.Provider).HasMaxLength(64).IsRequired();
+                eb.Property(x => x.Model).HasMaxLength(128).IsRequired();
+                eb.Property(x => x.VectorStoreId).HasMaxLength(128);
+                eb.Property(x => x.SourceText).HasColumnType("nvarchar(max)");
+                eb.Property(x => x.SourceHash).HasMaxLength(128).IsRequired();
+                eb.Property(x => x.UpdatedAt).HasDefaultValueSql("SYSUTCDATETIME()");
+                eb.HasOne<StudyGroupEntity>()
+                  .WithOne()
+                  .HasForeignKey<StudyGroupEmbedding>(x => x.GroupId)
+                  .OnDelete(DeleteBehavior.Cascade);
             });
 
             builder.Entity<CohortEntity>(eb =>
