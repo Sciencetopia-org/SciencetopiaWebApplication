@@ -877,6 +877,38 @@ public class KnowledgeGraphService
         return true;
     }
 
+    public async Task<bool> ApproveTagAsync(Guid versionId, string reviewerId)
+    {
+        await _workflow.PublishTagAsync(versionId, reviewerId);
+
+        var tag = await _context.Tags
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == versionId);
+
+        if (tag is { StableId: var stableIdGuid } && stableIdGuid != Guid.Empty)
+        {
+            await _graphRepository.SetTagStatusApprovedAsync(stableIdGuid.ToString());
+        }
+
+        return true;
+    }
+
+    public async Task<bool> DisapproveTagAsync(Guid versionId, string reviewerId)
+    {
+        await _workflow.RejectTagAsync(versionId, reviewerId);
+
+        var tag = await _context.Tags
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == versionId);
+
+        if (tag is { StableId: var stableIdGuid } && stableIdGuid != Guid.Empty)
+        {
+            await _graphRepository.SetTagStatusRejectedAsync(stableIdGuid.ToString());
+        }
+
+        return true;
+    }
+
     public async Task DisapprovePendingTagsRelatedToNodeAsync(Guid nodeId)
     {
         var tagIds = await _graphRepository.GetTagsRelatedToNodeAsync(nodeId);

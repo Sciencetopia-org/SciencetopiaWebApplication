@@ -491,6 +491,54 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             }
         }
 
+        [HttpPost("ApproveTag")]
+        [Authorize(Roles = "administrator")]
+        public async Task<IActionResult> ApproveTag(Guid versionId)
+        {
+            if (versionId == Guid.Empty)
+            {
+                return BadRequest("Version identifier is required.");
+            }
+
+            try
+            {
+                string adminId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                bool success = await _knowledgeGraphService.ApproveTagAsync(versionId, adminId);
+                if (success)
+                    return Ok("Tag approval successful.");
+                else
+                    return NotFound("Tag not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
+        [HttpPost("RejectTag")]
+        [Authorize(Roles = "administrator")]
+        public async Task<IActionResult> DisapproveTag(Guid versionId)
+        {
+            if (versionId == Guid.Empty)
+            {
+                return BadRequest("Version identifier is required.");
+            }
+
+            try
+            {
+                string adminId = User?.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                bool success = await _knowledgeGraphService.DisapproveTagAsync(versionId, adminId);
+                if (success)
+                    return Ok("Tag disapproval successful.");
+                else
+                    return NotFound("Tag not found or not marked as pending approval.");
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
         [HttpPost("ResubmitNode")]
         public async Task<IActionResult> ResubmitNode(Guid versionId)
         {
@@ -648,6 +696,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpGet("GetPendingTags")]
+        [Authorize(Roles = "administrator")]
         public async Task<IActionResult> GetPendingTags()
         {
             try
