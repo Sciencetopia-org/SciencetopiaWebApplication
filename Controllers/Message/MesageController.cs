@@ -4,38 +4,106 @@ using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Services.Messaging;
 using Azure.Storage.Blobs;
-using Azure.Storage.Blobs.Models;
+using Azure.Storage.Sas;
 using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
+using Sciencetopia.Services.ContentSafety;
 
 namespace Sciencetopia.Controllers.Messaging;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class MessageController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly UserService _userService;
     private readonly BlobServiceClient _blobServiceClient;
     private readonly MessageAttachmentService _attachmentService;
+    private readonly IContentModerationService _contentModeration;
 
-    public MessageController(ApplicationDbContext context, UserService userService, BlobServiceClient blobServiceClient, MessageAttachmentService attachmentService)
+    public MessageController(ApplicationDbContext context, UserService userService, BlobServiceClient blobServiceClient, MessageAttachmentService attachmentService, IContentModerationService contentModeration)
     {
         _context = context;
         _userService = userService;
         _blobServiceClient = blobServiceClient;
         _attachmentService = attachmentService;
+        _contentModeration = contentModeration;
     }
-    // POST: api/Message
     [HttpPost("SendMessage")]
-    public async Task<ActionResult<Message>> PostMessage(Message message)
+    public async Task<ActionResult<MessageWithUserDetailsDTO>> PostMessage([FromBody] SendMessageRequest request)
     {
+        var currentUserId = CurrentUserId();
+        if (currentUserId == null) return Unauthorized();
+
+        if (!Guid.TryParse(request.ConversationId, out var conversationGuid))
+        {
+            return BadRequest("Invalid conversationId format.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ReceiverId))
+        {
+            return BadRequest("ReceiverId is required.");
+        }
+
+        var moderation = await _contentModeration.ReviewTextAsync(new[] { request.Content }, HttpContext.RequestAborted);
+        if (!moderation.Allowed)
+        {
+            return BadRequest(new
+            {
+                message = "内容未通过审核，请修改后再发布。",
+                reason = moderation.Reason,
+                blockedCategories = moderation.BlockedCategories
+            });
+        }
+
+        var conversationHasMessages = await _context.Messages
+            .AnyAsync(m => m.ConversationId == conversationGuid);
+        var conversationExists = conversationHasMessages || await _context.Conversations
+            .AsNoTracking()
+            .AnyAsync(c => c.Id == conversationGuid);
+
+        if (conversationHasMessages && !await IsConversationParticipantAsync(conversationGuid, currentUserId))
+        {
+            return Forbid();
+        }
+
+        if (!conversationExists)
+        {
+            _context.Conversations.Add(new Conversation { Id = conversationGuid });
+        }
+
+        var message = new Message
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversationGuid,
+            SenderId = currentUserId,
+            ReceiverId = request.ReceiverId,
+            Content = _attachmentService.NormalizeForStorage(request.Content ?? string.Empty),
+            SentTime = DateTimeOffset.UtcNow,
+            IsRead = false
+        };
+
         _context.Messages.Add(message);
         await _context.SaveChangesAsync();
-        return CreatedAtAction("GetMessage", new { id = message.Id }, message);
+
+        return Ok(new MessageWithUserDetailsDTO
+        {
+            Id = message.Id,
+            Content = _attachmentService.GetClientReadableContent(message.Content),
+            SentTime = message.SentTime,
+            Sender = new UserDetailsDTO
+            {
+                Id = currentUserId,
+                UserName = await _userService.GetUserNameByIdAsync(currentUserId),
+                AvatarUrl = await _userService.FetchUserAvatarUrlByIdAsync(currentUserId)
+            },
+            IsRead = false
+        });
     }
 
-    // Additional methods to retrieve messages...
     [HttpGet("GetMessages")]
+    [Authorize(Roles = "administrator")]
     public async Task<ActionResult<IEnumerable<Message>>> GetMessages()
     {
         return await _context.Messages.ToListAsync();
@@ -44,6 +112,13 @@ public class MessageController : ControllerBase
     [HttpGet("GetGroupedMessagesByUser/{userId}")]
     public async Task<ActionResult<IEnumerable<GroupedMessageDTO>>> GetGroupedMessagesByUser(string userId)
     {
+        var currentUserId = CurrentUserId();
+        if (currentUserId == null) return Unauthorized();
+        if (!string.Equals(userId, currentUserId, StringComparison.OrdinalIgnoreCase) && !User.IsInRole("administrator"))
+        {
+            return Forbid();
+        }
+
         // Step 1: Fetch the conversations with sorted messages
         var groupedMessages = await _context.Messages
             .Include(m => m.Sender)
@@ -111,11 +186,19 @@ public class MessageController : ControllerBase
     [HttpGet("GetConversation/{conversationId}")]
     public async Task<ActionResult<GroupedMessageDTO>> GetConversation(string conversationId)
     {
-        // Step 1: Retrieve the conversation and related messages
+        var currentUserId = CurrentUserId();
+        if (currentUserId == null) return Unauthorized();
+
         if (!Guid.TryParse(conversationId, out Guid conversationGuid))
         {
             return BadRequest("Invalid conversationId format.");
         }
+
+        if (!await IsConversationParticipantAsync(conversationGuid, currentUserId) && !User.IsInRole("administrator"))
+        {
+            return Forbid();
+        }
+
         var conversationGroup = await _context.Messages
             .Include(m => m.Sender)
             .Include(m => m.Receiver)
@@ -177,13 +260,21 @@ public class MessageController : ControllerBase
     [HttpPost("MarkAsRead")]
     public async Task<IActionResult> MarkAsRead([FromBody] MarkAsReadRequest request)
     {
+        var currentUserId = CurrentUserId();
+        if (currentUserId == null) return Unauthorized();
+
         if (!Guid.TryParse(request.ConversationId, out Guid conversationGuid))
         {
             return BadRequest("Invalid ConversationId format.");
         }
 
+        if (!await IsConversationParticipantAsync(conversationGuid, currentUserId))
+        {
+            return Forbid();
+        }
+
         var messages = await _context.Messages
-            .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == request.UserId && !m.IsRead)
+            .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == currentUserId && !m.IsRead)
             .ToListAsync();
 
         foreach (var message in messages)
@@ -196,38 +287,62 @@ public class MessageController : ControllerBase
         return Ok(new { Message = "Messages marked as read" });
     }
 
-    [HttpPost("UploadAttachment")]
-    [RequestSizeLimit(10_000_000)] // 10 MB
+    [HttpPost("CreateAttachmentUpload")]
     [Authorize]
-    public async Task<IActionResult> UploadAttachment(IFormFile file)
+    public async Task<IActionResult> CreateAttachmentUpload([FromBody] AttachmentUploadRequest request)
     {
-        if (file == null || file.Length == 0)
+        if (string.IsNullOrWhiteSpace(request.ContentType) ||
+            !request.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
-            return BadRequest("Invalid file.");
+            return BadRequest("Only image uploads are supported.");
         }
 
-        try
+        var container = _blobServiceClient.GetBlobContainerClient("message-attachments");
+        await container.CreateIfNotExistsAsync();
+
+        var ext = Path.GetExtension(request.FileName);
+        if (string.IsNullOrWhiteSpace(ext) || ext.Length > 10)
         {
-            var container = _blobServiceClient.GetBlobContainerClient("message-attachments");
-            await container.CreateIfNotExistsAsync();
+            ext = ".jpg";
+        }
 
-            var ext = Path.GetExtension(file.FileName);
-            var name = $"{Guid.NewGuid()}{ext}";
-            var blob = container.GetBlobClient(name);
+        var name = $"{Guid.NewGuid():N}{ext.ToLowerInvariant()}";
+        var blob = container.GetBlobClient(name);
+        var sasBuilder = new BlobSasBuilder
+        {
+            BlobContainerName = blob.BlobContainerName,
+            BlobName = blob.Name,
+            Resource = "b",
+            StartsOn = DateTimeOffset.UtcNow.AddMinutes(-5),
+            ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(15),
+            ContentType = request.ContentType
+        };
+        sasBuilder.SetPermissions(BlobSasPermissions.Create | BlobSasPermissions.Write);
 
-            await using (var stream = file.OpenReadStream())
+        var storedContent = _attachmentService.NormalizeForStorage(blob.Uri.ToString());
+        var readUrl = _attachmentService.GetClientReadableContent(storedContent, TimeSpan.FromMinutes(30));
+        return Ok(new
+        {
+            uploadUrl = blob.GenerateSasUri(sasBuilder).ToString(),
+            blobUrl = blob.Uri.ToString(),
+            readUrl,
+            headers = new Dictionary<string, string>
             {
-                await blob.UploadAsync(stream, new BlobHttpHeaders { ContentType = file.ContentType });
+                ["x-ms-blob-type"] = "BlockBlob",
+                ["Content-Type"] = request.ContentType
             }
+        });
+    }
 
-            var storedContent = _attachmentService.NormalizeForStorage(blob.Uri.ToString());
-            var sasUri = _attachmentService.GetClientReadableContent(storedContent);
-            return Ok(new { url = sasUri });
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(500, new { error = ex.Message });
-        }
+    private string? CurrentUserId() => User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+    private Task<bool> IsConversationParticipantAsync(Guid conversationId, string userId)
+    {
+        return _context.Messages.AsNoTracking()
+            .AnyAsync(m => m.ConversationId == conversationId && (m.SenderId == userId || m.ReceiverId == userId));
     }
 
 }
+
+public record AttachmentUploadRequest(string? FileName, string ContentType);
+public record SendMessageRequest(string ConversationId, string ReceiverId, string? Content);

@@ -1,11 +1,14 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Data;
+using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
 
 namespace Sciencetopia.Controllers.Messaging;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class NotificationController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
@@ -18,6 +21,7 @@ public class NotificationController : ControllerBase
     }
 
     [HttpPost("SendNotification")]
+    [Authorize(Roles = "administrator")]
     public async Task<ActionResult<Notification>> PostNotification(Notification notification)
     {
         _context.Notifications.Add(notification);
@@ -26,6 +30,7 @@ public class NotificationController : ControllerBase
     }
     
     [HttpGet("GetNotifications")]
+    [Authorize(Roles = "administrator")]
     public async Task<ActionResult<IEnumerable<Notification>>> GetNotifications()
     {
         // Logic to retrieve system notifications
@@ -35,6 +40,8 @@ public class NotificationController : ControllerBase
     [HttpGet("GetNotificationsForUser/{userId}")]
     public async Task<IActionResult> GetNotificationsForUser(string userId)
     {
+        if (!CanAccessUser(userId)) return Forbid();
+
         var notifications = await _notificationService.GetNotificationsForUserAsync(userId);
 
         if (notifications == null || !notifications.Any())
@@ -48,6 +55,8 @@ public class NotificationController : ControllerBase
     [HttpPost("MarkAsReadByUser/{userId}")]
     public async Task<IActionResult> MarkNotificationsAsRead(string userId)
     {
+        if (!CanAccessUser(userId)) return Forbid();
+
         var notifications = await _context.Notifications
             .Where(n => n.UserId == userId && !n.IsRead)
             .ToListAsync();
@@ -65,5 +74,12 @@ public class NotificationController : ControllerBase
         await _context.SaveChangesAsync();
 
         return Ok("Notifications marked as read successfully.");
+    }
+
+    private bool CanAccessUser(string userId)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return !string.IsNullOrEmpty(currentUserId)
+            && (string.Equals(userId, currentUserId, StringComparison.OrdinalIgnoreCase) || User.IsInRole("administrator"));
     }
 }

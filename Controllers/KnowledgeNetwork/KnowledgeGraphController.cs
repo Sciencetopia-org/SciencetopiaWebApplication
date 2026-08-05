@@ -8,6 +8,7 @@ using Sciencetopia.Data;
 using Microsoft.EntityFrameworkCore;
 using Sciencetopia.Services.KnowledgeGraph;
 using Sciencetopia.Services.Progress;
+using Sciencetopia.Services.ContentSafety;
 
 namespace Sciencetopia.Controllers.KnowledgeNetwork
 {
@@ -22,6 +23,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         private readonly IGraphRepository _graphRepository;
         private readonly IResourceRepository _resourceRepository;
         private readonly IResourceProgressService _resourceProgressService;
+        private readonly IContentModerationService _contentModeration;
 
         public KnowledgeGraphController(
             IDriver driver,
@@ -30,7 +32,8 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             ITagRepository tagRepository,
             IGraphRepository graphRepository,
             IResourceRepository resourceRepository,
-            IResourceProgressService resourceProgressService)
+            IResourceProgressService resourceProgressService,
+            IContentModerationService contentModeration)
         {
             // Initialize Neo4j driver
             _driver = driver;
@@ -40,6 +43,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             _graphRepository = graphRepository;
             _resourceRepository = resourceRepository;
             _resourceProgressService = resourceProgressService;
+            _contentModeration = contentModeration;
         }
 
         /// <summary>
@@ -60,6 +64,11 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             [FromQuery] string lang = "zh",
             [FromQuery] bool includePending = false)
         {
+            if (includePending && User?.Identity?.IsAuthenticated != true)
+            {
+                return Unauthorized();
+            }
+
             string userId = User?.Identity?.IsAuthenticated == true
                 ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                 : string.Empty;
@@ -81,6 +90,11 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 string userId = User?.Identity?.IsAuthenticated == true
                     ? User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty
                     : string.Empty;
+
+                if (includePending && string.IsNullOrEmpty(userId))
+                {
+                    return Unauthorized();
+                }
 
                 // Define the valid zoom levels (lowest -> highest)
                 var validZoomLevels = new[] { "Keyword", "Topic", "Field", "Subject", "Discipline" };
@@ -331,6 +345,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("CreateNode")]
+        [Authorize]
         public async Task<IActionResult> CreateNode([FromBody] CreateNodeRequest request)
         {
             if (request == null)
@@ -341,6 +356,19 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             if (string.IsNullOrWhiteSpace(request.Name))
             {
                 return BadRequest("Node name is required.");
+            }
+
+            var moderation = await _contentModeration.ReviewTextAsync(
+                new[] { request.Label, request.Name, request.Description }.Concat(request.NewTagNames ?? Enumerable.Empty<string>()),
+                HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
             }
 
             try
@@ -392,11 +420,23 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         // }
 
         [HttpPost("CreateTag")]
+        [Authorize]
         public async Task<IActionResult> CreateTag([FromBody] CreateTagRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.Name))
             {
                 return BadRequest("Tag name is required.");
+            }
+
+            var moderation = await _contentModeration.ReviewTextAsync(new[] { request.Name, request.Description }, HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
             }
 
             try
@@ -416,11 +456,25 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("EditNode")]
+        [Authorize]
         public async Task<IActionResult> EditNode([FromBody] EditNodeRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.NodeId.ToString()) || string.IsNullOrWhiteSpace(request.Name))
             {
                 return BadRequest("Node ID and name are required.");
+            }
+
+            var moderation = await _contentModeration.ReviewTextAsync(
+                new[] { request.Name, request.Description }.Concat(request.TagNames ?? Enumerable.Empty<string>()),
+                HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
             }
 
             try
@@ -540,6 +594,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("ResubmitNode")]
+        [Authorize]
         public async Task<IActionResult> ResubmitNode(Guid versionId)
         {
             if (versionId == Guid.Empty)
@@ -631,6 +686,7 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         // }
 
         [HttpPost("AddResource")]
+        [Authorize]
         public async Task<IActionResult> AddResource([FromBody] AddResourceRequest request)
         {
             if (request == null)
@@ -641,6 +697,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
             if (string.IsNullOrWhiteSpace(request.NodeName) || string.IsNullOrWhiteSpace(request.Link))
             {
                 return BadRequest("Node name and resource link are both required.");
+            }
+
+            var moderation = await _contentModeration.ReviewTextAsync(new[] { request.NodeName, request.Link }, HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
             }
 
             try
@@ -677,11 +744,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("GetPendingNodeByUserId")]
+        [Authorize]
         public async Task<IActionResult> GetPendingNodeByUserId(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId))
             {
                 return BadRequest("User ID is required.");
+            }
+
+            if (!CanAccessUserScopedData(userId))
+            {
+                return Forbid();
             }
 
             try
@@ -711,11 +784,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpPost("GetPendingTagsByUserId")]
+        [Authorize]
         public async Task<IActionResult> GetPendingTagsByUserId(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId))
             {
                 return BadRequest("User ID is required.");
+            }
+
+            if (!CanAccessUserScopedData(userId))
+            {
+                return Forbid();
             }
 
             try
@@ -730,11 +809,17 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
         }
 
         [HttpGet("CountContributedNodesAndLinksByUserId")]
+        [Authorize]
         public async Task<IActionResult> CountContributedNodesAndLinks(string userId)
         {
             if (string.IsNullOrWhiteSpace(userId))
             {
                 return BadRequest("User ID is required.");
+            }
+
+            if (!CanAccessUserScopedData(userId))
+            {
+                return Forbid();
             }
 
             try
@@ -749,6 +834,14 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork
                 Console.WriteLine($"Stack Trace: {ex.StackTrace}");
                 return StatusCode(500, $"Internal server error: {ex.Message}");
             }
+        }
+
+        private bool CanAccessUserScopedData(string userId)
+        {
+            var currentUserId = User?.FindFirstValue(ClaimTypes.NameIdentifier);
+            return !string.IsNullOrWhiteSpace(currentUserId)
+                && (string.Equals(currentUserId, userId, StringComparison.OrdinalIgnoreCase)
+                    || User.IsInRole("administrator"));
         }
     }
 }

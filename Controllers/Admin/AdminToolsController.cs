@@ -7,18 +7,24 @@ namespace Sciencetopia.Controllers.Admin
 {
     [ApiController]
     [Route("api/admin/tools")] 
-    [AllowAnonymous] // guarded by shared secret below; remove this controller after use
+    [AllowAnonymous] // emergency-only; disabled unless AdminTools:EnableReset=true
     public class AdminToolsController : ControllerBase
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
         private readonly IConfiguration _configuration;
+        private readonly IHostEnvironment _environment;
 
-        public AdminToolsController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager, IConfiguration configuration)
+        public AdminToolsController(
+            UserManager<ApplicationUser> userManager,
+            RoleManager<IdentityRole> roleManager,
+            IConfiguration configuration,
+            IHostEnvironment environment)
         {
             _userManager = userManager;
             _roleManager = roleManager;
             _configuration = configuration;
+            _environment = environment;
         }
 
         public record ResetAdminRequest(string email, string newPassword, bool createIfMissing = true);
@@ -26,8 +32,12 @@ namespace Sciencetopia.Controllers.Admin
         [HttpPost("reset")] 
         public async Task<IActionResult> Reset([FromBody] ResetAdminRequest req)
         {
-            var providedSecret = Request.Headers["X-Admin-Reset-Secret"].FirstOrDefault()
-                                   ?? Request.Query["secret"].FirstOrDefault();
+            if (!_environment.IsDevelopment() || !_configuration.GetValue<bool>("AdminTools:EnableReset"))
+            {
+                return NotFound();
+            }
+
+            var providedSecret = Request.Headers["X-Admin-Reset-Secret"].FirstOrDefault();
             // Accept from ENV or configuration (appsettings/UserSecrets): ADMIN_RESET_SECRET or Admin:ResetSecret
             var expectedSecret = Environment.GetEnvironmentVariable("ADMIN_RESET_SECRET")
                                    ?? _configuration["ADMIN_RESET_SECRET"]

@@ -8,9 +8,11 @@ using System;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Services.Messaging;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Sciencetopia.Hubs
 {
+    [Authorize]
     public class ChatHub : Hub
     {
         private readonly ApplicationDbContext _context;
@@ -26,15 +28,24 @@ namespace Sciencetopia.Hubs
 
         public async Task SendMessage(string conversationId, string senderId, string receiverId, string content)
         {
+            var currentUserId = CurrentUserId();
+
             if (!Guid.TryParse(conversationId, out var conversationGuid))
             {
                 throw new HubException("Invalid conversation ID format");
             }
 
-            // Ensure the conversation exists, create with provided GUID if missing
-            var conversationExists = await _context.Conversations
+            var conversationHasMessages = await _context.Messages
+                .AsNoTracking()
+                .AnyAsync(m => m.ConversationId == conversationGuid);
+            var conversationExists = conversationHasMessages || await _context.Conversations
                 .AsNoTracking()
                 .AnyAsync(c => c.Id == conversationGuid);
+
+            if (conversationHasMessages && !await IsConversationParticipantAsync(conversationGuid, currentUserId))
+            {
+                throw new HubException("Not authorized for this conversation");
+            }
 
             if (!conversationExists)
             {
@@ -50,7 +61,7 @@ namespace Sciencetopia.Hubs
                 Id = Guid.NewGuid(),
                 Content = normalizedContent,
                 SentTime = DateTimeOffset.UtcNow,
-                SenderId = senderId,
+                SenderId = currentUserId,
                 ReceiverId = receiverId,
                 ConversationId = conversationGuid,
                 IsRead = false
@@ -98,6 +109,12 @@ namespace Sciencetopia.Hubs
 
         public async Task<GroupedMessageDTO> GetOrStartConversation(string userId1, string userId2)
         {
+            var currentUserId = CurrentUserId();
+            if (!string.Equals(userId1, currentUserId, StringComparison.OrdinalIgnoreCase))
+            {
+                userId1 = currentUserId;
+            }
+
             // Check if a conversation already exists between these users
             var existingConversation = await _context.Conversations
                 .Include(c => c.Messages)
@@ -152,9 +169,16 @@ namespace Sciencetopia.Hubs
 
         public async Task JoinConversation(string conversationId)
         {
+            var currentUserId = CurrentUserId();
+
             if (!Guid.TryParse(conversationId, out var conversationGuid))
             {
                 throw new HubException("Invalid conversation ID format");
+            }
+
+            if (!await IsConversationParticipantAsync(conversationGuid, currentUserId))
+            {
+                throw new HubException("Not authorized for this conversation");
             }
 
             await Groups.AddToGroupAsync(Context.ConnectionId, conversationId);
@@ -237,13 +261,20 @@ namespace Sciencetopia.Hubs
 
         public async Task MarkMessagesAsRead(string conversationId, string userId)
         {
+            var currentUserId = CurrentUserId();
+
             if (!Guid.TryParse(conversationId, out var conversationGuid))
             {
                 throw new HubException("Invalid conversation ID format");
             }
 
+            if (!await IsConversationParticipantAsync(conversationGuid, currentUserId))
+            {
+                throw new HubException("Not authorized for this conversation");
+            }
+
             var messages = await _context.Messages
-                .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == userId && !m.IsRead)
+                .Where(m => m.ConversationId == conversationGuid && m.ReceiverId == currentUserId && !m.IsRead)
                 .ToListAsync();
 
             foreach (var message in messages)
@@ -255,21 +286,26 @@ namespace Sciencetopia.Hubs
 
             // Notify client of updated message count
             var receiverMessageCount = await _context.Messages
-                .Where(m => m.ReceiverId == userId && !m.IsRead)
+                .Where(m => m.ReceiverId == currentUserId && !m.IsRead)
                 .CountAsync();
 
             // Notify client of updated message count per conversation
             var conversationMessageCount = await _context.Messages
-                .Where(m => m.ReceiverId == userId && m.ConversationId == conversationGuid && !m.IsRead)
+                .Where(m => m.ReceiverId == currentUserId && m.ConversationId == conversationGuid && !m.IsRead)
                 .CountAsync();
 
-            await Clients.User(userId).SendAsync("updateMessages", receiverMessageCount);
-            await Clients.User(userId).SendAsync("updateConversationMessages", conversationId, conversationMessageCount);
+            await Clients.User(currentUserId).SendAsync("updateMessages", receiverMessageCount);
+            await Clients.User(currentUserId).SendAsync("updateConversationMessages", conversationId, conversationMessageCount);
         }
 
         // Sends a notification to a specific user
         public async Task SendNotificationToUsers(List<string> userIds, string content, string type, string data)
         {
+            if (Context.User?.IsInRole("administrator") != true)
+            {
+                throw new HubException("Not authorized to send notifications");
+            }
+
             var notifications = new List<Notification>();
 
             foreach (var userId in userIds)
@@ -312,12 +348,15 @@ namespace Sciencetopia.Hubs
         // Method to mark a notification as read, could be called from the client
         public async Task MarkNotificationAsRead(string notificationId)
         {
+            var currentUserId = CurrentUserId();
+
             if (!Guid.TryParse(notificationId, out var notificationGuid))
             {
                 throw new HubException("Invalid notification ID format");
             }
 
-            var notification = await _context.Notifications.FindAsync(notificationGuid);
+            var notification = await _context.Notifications
+                .FirstOrDefaultAsync(n => n.Id == notificationGuid && n.UserId == currentUserId);
             if (notification != null)
             {
                 notification.IsRead = true;
@@ -330,8 +369,10 @@ namespace Sciencetopia.Hubs
         // Additional methods as needed...
         public async Task MarkAllNotificationsAsRead(string userId)
         {
+            var currentUserId = CurrentUserId();
+
             var notifications = await _context.Notifications
-                .Where(n => n.UserId == userId && !n.IsRead)
+                .Where(n => n.UserId == currentUserId && !n.IsRead)
                 .ToListAsync();
 
             foreach (var notification in notifications)
@@ -341,7 +382,18 @@ namespace Sciencetopia.Hubs
 
             await _context.SaveChangesAsync();
 
-            await Clients.User(userId).SendAsync("UpdateNotifications");
+            await Clients.User(currentUserId).SendAsync("UpdateNotifications");
+        }
+
+        private string CurrentUserId()
+        {
+            return Context.UserIdentifier ?? throw new HubException("Authentication required");
+        }
+
+        private Task<bool> IsConversationParticipantAsync(Guid conversationId, string userId)
+        {
+            return _context.Messages.AsNoTracking()
+                .AnyAsync(m => m.ConversationId == conversationId && (m.SenderId == userId || m.ReceiverId == userId));
         }
     }
 }

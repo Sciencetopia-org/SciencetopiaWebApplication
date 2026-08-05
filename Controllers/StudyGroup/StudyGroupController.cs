@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Sciencetopia.Data;
 using Sciencetopia.Services;
+using Sciencetopia.Services.ContentSafety;
 using Sciencetopia.Models;
 
 namespace Sciencetopia.Controllers.StudyGroups;
@@ -36,12 +37,14 @@ public class StudyGroupController : ControllerBase
     private readonly StudyGroupService _studyGroupService;
     private readonly ApplicationDbContext _db;
     private readonly IMemoryCache _cache;
+    private readonly IContentModerationService _contentModeration;
 
-    public StudyGroupController(StudyGroupService studyGroupService, ApplicationDbContext db, IMemoryCache cache)
+    public StudyGroupController(StudyGroupService studyGroupService, ApplicationDbContext db, IMemoryCache cache, IContentModerationService contentModeration)
     {
         _studyGroupService = studyGroupService;
         _db = db;
         _cache = cache;
+        _contentModeration = contentModeration;
     }
 
     [HttpGet("GetAllStudyGroups")]
@@ -414,6 +417,19 @@ public class StudyGroupController : ControllerBase
         // If targetUserId is provided, use it; otherwise, use the authenticated user's ID
         string userIdToFetch = !string.IsNullOrEmpty(targetUserId) ? targetUserId : currentUserId;
 
+        // Enforce privacy: if viewing another user's groups, check their visibility setting
+        if (!string.IsNullOrEmpty(targetUserId) && targetUserId != currentUserId)
+        {
+            var targetPrivacy = await _db.Users.AsNoTracking()
+                .Where(u => u.Id == targetUserId)
+                .Select(u => new { u.ShowStudyGroupsPublicly })
+                .FirstOrDefaultAsync();
+            if (targetPrivacy != null && !targetPrivacy.ShowStudyGroupsPublicly)
+            {
+                return Ok(new List<StudyGroup>());
+            }
+        }
+
         // Fetch the study groups based on the provided or authenticated userId
         var groups = await _studyGroupService.GetStudyGroupByUser(userIdToFetch, currentUserId);
 
@@ -444,6 +460,19 @@ public class StudyGroupController : ControllerBase
         if (totalCount > 10)
         {
             return BadRequest("每个学习小组最多可添加 10 个标签。");
+        }
+
+        var moderation = await _contentModeration.ReviewTextAsync(
+            new[] { studyGroupDTO?.Name, studyGroupDTO?.Description }.Concat(studyGroupDTO?.NewTagNames ?? Enumerable.Empty<string>()),
+            HttpContext.RequestAborted);
+        if (!moderation.Allowed)
+        {
+            return BadRequest(new
+            {
+                message = "内容未通过审核，请修改后再发布。",
+                reason = moderation.Reason,
+                blockedCategories = moderation.BlockedCategories
+            });
         }
 
         var result = await _studyGroupService.CreateStudyGroupAsync(studyGroupDTO, userId);

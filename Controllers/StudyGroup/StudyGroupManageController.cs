@@ -4,18 +4,23 @@ using Sciencetopia.Models;
 using Sciencetopia.Authorization;
 using System.Threading.Tasks;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Sciencetopia.Services.ContentSafety;
 
 namespace Sciencetopia.Controllers.StudyGroups;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
     public class StudyGroupManageController : ControllerBase
     {
         private readonly StudyGroupService _studyGroupService;
+        private readonly IContentModerationService _contentModeration;
 
-    public StudyGroupManageController(StudyGroupService studyGroupService)
+    public StudyGroupManageController(StudyGroupService studyGroupService, IContentModerationService contentModeration)
     {
         _studyGroupService = studyGroupService;
+        _contentModeration = contentModeration;
     }
 
     [HttpPost("InviteMember/{studyGroupId}")]
@@ -112,6 +117,17 @@ namespace Sciencetopia.Controllers.StudyGroups;
             return BadRequest("NewName cannot be null or empty.");
         }
 
+        var moderation = await _contentModeration.ReviewTextAsync(new[] { request.NewName }, HttpContext.RequestAborted);
+        if (!moderation.Allowed)
+        {
+            return BadRequest(new
+            {
+                message = "内容未通过审核，请修改后再发布。",
+                reason = moderation.Reason,
+                blockedCategories = moderation.BlockedCategories
+            });
+        }
+
         var result = await _studyGroupService.RenameGroupAsync(studyGroupId, request.NewName);
         if (result)
         {
@@ -130,6 +146,17 @@ namespace Sciencetopia.Controllers.StudyGroups;
         if (string.IsNullOrEmpty(request.NewDescription))
         {
             return BadRequest("NewDescription cannot be null or empty.");
+        }
+
+        var moderation = await _contentModeration.ReviewTextAsync(new[] { request.NewDescription }, HttpContext.RequestAborted);
+        if (!moderation.Allowed)
+        {
+            return BadRequest(new
+            {
+                message = "内容未通过审核，请修改后再发布。",
+                reason = moderation.Reason,
+                blockedCategories = moderation.BlockedCategories
+            });
         }
 
         var result = await _studyGroupService.EditDescriptionAsync(studyGroupId, request.NewDescription);
@@ -178,6 +205,17 @@ namespace Sciencetopia.Controllers.StudyGroups;
         if (total > 10)
         {
             return BadRequest("每个学习小组最多可添加 10 个标签。");
+        }
+
+        var moderation = await _contentModeration.ReviewTextAsync(request?.NewTagNames ?? Enumerable.Empty<string>(), HttpContext.RequestAborted);
+        if (!moderation.Allowed)
+        {
+            return BadRequest(new
+            {
+                message = "内容未通过审核，请修改后再发布。",
+                reason = moderation.Reason,
+                blockedCategories = moderation.BlockedCategories
+            });
         }
 
         var ok = await _studyGroupService.UpdateGroupTagsAsync(studyGroupId, request?.TagIds, request?.NewTagNames, userId);

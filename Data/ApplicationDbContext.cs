@@ -6,7 +6,7 @@ using Sciencetopia.Models.Enums;
 
 namespace Sciencetopia.Data
 {
-    public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
+    public partial class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     {
         public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
             : base(options)
@@ -569,6 +569,10 @@ namespace Sciencetopia.Data
                   .IsUnique()
                   .HasDatabaseName("UX_Lesson_Stable_Current");
             });
+
+            // Ontology V2 (Phase 1, additive-only). Defined in ApplicationDbContext.OntologyV2.cs.
+            // Adds new tables only; no changes to existing entities. Nothing reads these yet.
+            ConfigureOntologyV2(builder);
         }
     }
 }

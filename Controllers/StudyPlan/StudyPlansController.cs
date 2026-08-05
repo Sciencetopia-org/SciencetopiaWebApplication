@@ -283,6 +283,20 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (string.IsNullOrEmpty(userId)) return Unauthorized();
 
             var subjectUserId = string.IsNullOrWhiteSpace(targetUserId) ? userId : targetUserId;
+
+            // Enforce privacy: if viewing another user's plans, check their visibility setting
+            if (!string.IsNullOrWhiteSpace(targetUserId) && targetUserId != userId)
+            {
+                var targetPrivacy = await _db.Users.AsNoTracking()
+                    .Where(u => u.Id == targetUserId)
+                    .Select(u => new { u.ShowStudyPlansPublicly })
+                    .FirstOrDefaultAsync();
+                if (targetPrivacy != null && !targetPrivacy.ShowStudyPlansPublicly)
+                {
+                    return Ok(new { total = 0, page, pageSize, items = Array.Empty<object>() });
+                }
+            }
+
             var normalizedScope = string.IsNullOrWhiteSpace(scope) ? "mine" : scope.Trim().ToLowerInvariant();
             var listVersion = _cache.TryGetValue<long>(GetStudyPlanListVersionCacheKey(subjectUserId), out var cachedVersion)
                 ? cachedVersion

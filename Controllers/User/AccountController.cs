@@ -13,6 +13,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Sciencetopia.Data;
 using Sciencetopia.Services.Plans;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Sciencetopia.Controllers.Users
 {
@@ -35,8 +36,9 @@ namespace Sciencetopia.Controllers.Users
         private readonly EmailTemplateService _emailTemplateService;
         private readonly IWebHostEnvironment _env;
         private readonly IPersonalPlanEnrollmentService _personalGroups;
+        private readonly ILogger<AccountController> _logger;
 
-        public AccountController(IConfiguration configuration, IHttpClientFactory httpClientFactory, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver, ApplicationDbContext dbContext, UserService userService, EmailTemplateService emailTemplateService, IWebHostEnvironment env, IPersonalPlanEnrollmentService personalGroups)
+        public AccountController(IConfiguration configuration, IHttpClientFactory httpClientFactory, UserManager<ApplicationUser> userManager, SignInManager<ApplicationUser> signInManager, IEmailSender emailSender, ISmsSender smsSender, BlobServiceClient blobServiceClient, IDriver driver, ApplicationDbContext dbContext, UserService userService, EmailTemplateService emailTemplateService, IWebHostEnvironment env, IPersonalPlanEnrollmentService personalGroups, ILogger<AccountController> logger)
         {
             _userManager = userManager;
             _signInManager = signInManager;
@@ -50,6 +52,7 @@ namespace Sciencetopia.Controllers.Users
             _httpClientFactory = httpClientFactory;
             _emailTemplateService = emailTemplateService;
             _personalGroups = personalGroups;
+            _logger = logger;
 
             // 从配置文件中加载微信 AppId 和 AppSecret
             _weChatAppId = configuration["WeChat:AppId"];
@@ -59,23 +62,36 @@ namespace Sciencetopia.Controllers.Users
         }
 
         [HttpPost("Register")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> Register(RegisterDTO model)
         {
             // 验证输入是否有效
             if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (string.IsNullOrWhiteSpace(model.UserName))
+            {
+                return BadRequest(new { success = false, error = "用户名是必填项。" });
+            }
+            if (string.IsNullOrWhiteSpace(model.Email))
+            {
+                return BadRequest(new { success = false, error = "邮箱是必填项。" });
+            }
+            if (string.IsNullOrWhiteSpace(model.Password))
+            {
+                return BadRequest(new { success = false, error = "密码是必填项。" });
+            }
 
             // 检查用户名是否已存在
             var existingUserByUsername = await _userManager.FindByNameAsync(model.UserName);
             if (existingUserByUsername != null)
             {
-                return BadRequest("该用户名已被使用，请选择其他用户名。");
+                return BadRequest(new { success = false, error = "该用户名已被使用，请选择其他用户名。" });
             }
 
             // 检查邮箱是否已存在
             var existingUserByEmail = await _userManager.FindByEmailAsync(model.Email);
             if (existingUserByEmail != null)
             {
-                return BadRequest("该邮箱已被使用，请使用其他邮箱。");
+                return BadRequest(new { success = false, error = "该邮箱已被使用，请使用其他邮箱。" });
             }
 
             // 创建用户 with RegisteredAt
@@ -91,7 +107,18 @@ namespace Sciencetopia.Controllers.Users
             if (result.Succeeded)
             {
                 // Assign the "user" role to the new user
-                await _userManager.AddToRoleAsync(user, "user");
+                try
+                {
+                    var roleResult = await _userManager.AddToRoleAsync(user, "user");
+                    if (!roleResult.Succeeded)
+                    {
+                        _logger.LogWarning("Failed to assign default user role to {UserId}: {Errors}", user.Id, string.Join("; ", roleResult.Errors.Select(e => e.Description)));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Default user role assignment failed for {UserId}. Registration will continue.", user.Id);
+                }
 
                 // 生成邮箱确认令牌
                 var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
@@ -112,11 +139,25 @@ namespace Sciencetopia.Controllers.Users
             { "FooterImageUrl", footerImagePath }
         });
 
-                // 发送确认邮件
-                await _emailSender.SendEmailAsync(model.Email, "确认您的邮箱", emailContent);
+                // 发送确认邮件。邮件失败不应让已经创建的账号表现为注册失败。
+                try
+                {
+                    await _emailSender.SendEmailAsync(model.Email, "确认您的邮箱", emailContent);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Registration confirmation email failed for {UserId} / {Email}. Registration will continue.", user.Id, model.Email);
+                }
 
                 // 添加用户节点到 Neo4j
-                await AddUserNodeToNeo4jAndCreateDefaultFavorite(user);
+                try
+                {
+                    await AddUserNodeToNeo4jAndCreateDefaultFavorite(user);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Default user graph/favorite initialization failed for {UserId}. Registration will continue.", user.Id);
+                }
 
                 // 登陆用户
                 await _signInManager.SignInAsync(user, isPersistent: false);
@@ -130,11 +171,13 @@ namespace Sciencetopia.Controllers.Users
                 ModelState.AddModelError(string.Empty, error.Description);
             }
 
-            return BadRequest(ModelState);
+            var errors = result.Errors.Select(error => error.Description).ToArray();
+            return BadRequest(new { success = false, error = string.Join("\n", errors), errors });
         }
 
         // POST: api/Account/Login
         [HttpPost("Login")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> Login(LoginDTO model)
         {
             if (!ModelState.IsValid) return BadRequest(ModelState);
@@ -165,6 +208,7 @@ namespace Sciencetopia.Controllers.Users
         }
 
         [HttpGet("ConfirmEmail")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> ConfirmEmail(string userId, string token)
         {
             if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(token))
@@ -254,6 +298,7 @@ namespace Sciencetopia.Controllers.Users
         }
 
         [HttpGet("ConfirmEmailChange")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> ConfirmEmailChange(string userId, string email, string token)
         {
             var user = await _userManager.FindByIdAsync(userId);
@@ -499,6 +544,7 @@ namespace Sciencetopia.Controllers.Users
         // }
 
         [HttpPost("ResetPassword")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> ResetPassword(ResetPasswordDTO model)
         {
             if (!ModelState.IsValid)
@@ -609,6 +655,7 @@ namespace Sciencetopia.Controllers.Users
         }
 
         [HttpPost("ForgotUsername")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> ForgotUsername(ForgotUsernameDTO model)
         {
             // 查找用户（通过电子邮件或电话号码）
@@ -646,6 +693,7 @@ namespace Sciencetopia.Controllers.Users
         }
 
         [HttpPost("ForgotPassword")]
+        [EnableRateLimiting("Authentication")]
         public async Task<IActionResult> ForgotPassword(ForgotPasswordDTO model)
         {
             // 查找用户（通过电子邮件或电话号码）

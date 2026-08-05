@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Neo4j.Driver;
 using Sciencetopia.Data;
@@ -123,6 +125,8 @@ namespace Sciencetopia.Controllers.SearchEngine
         }
 
         [HttpPost("ReindexVectors")]
+        [Authorize(Roles = "administrator")]
+        [EnableRateLimiting("ExpensiveOperations")]
         public async Task<IActionResult> ReindexVectorsAsync(
             [FromQuery] string? query = null,
             [FromQuery] int limit = 64,

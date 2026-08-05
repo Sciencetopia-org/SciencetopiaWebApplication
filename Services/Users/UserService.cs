@@ -30,9 +30,7 @@ public class UserService
             return string.Empty;
         }
 
-        // Generate and return the SAS URL for the user's avatar
-        var avatarSasUrl = GenerateBlobSasUri(_blobServiceClient, "avatars", $"{userId}.jpg");
-        return avatarSasUrl;
+        return GenerateBlobSasUriFromStoredUrl(user.AvatarUrl) ?? string.Empty;
     }
 
     public async Task<UserInformationDTO?> GetUserInfoByIdAsync(string userId)
@@ -48,6 +46,8 @@ public class UserService
             UserName = user.UserName,
             Email = user.Email,
             SelfIntroduction = user.SelfIntroduction,
+            ShowStudyPlansPublicly = user.ShowStudyPlansPublicly,
+            ShowStudyGroupsPublicly = user.ShowStudyGroupsPublicly,
         };
 
         return userInfo;
@@ -92,12 +92,31 @@ public class UserService
         {
             var avatarUrl = string.IsNullOrEmpty(user.AvatarUrl)
                 ? string.Empty
-                : GenerateBlobSasUri(_blobServiceClient, "avatars", $"{user.Id}.jpg");
+                : GenerateBlobSasUriFromStoredUrl(user.AvatarUrl) ?? string.Empty;
 
             result[user.Id] = new UserDisplayInfo(user.UserName ?? string.Empty, avatarUrl);
         }
 
         return result;
+    }
+
+    private string? GenerateBlobSasUriFromStoredUrl(string? avatarUrl, TimeSpan? lifetime = null)
+    {
+        if (string.IsNullOrWhiteSpace(avatarUrl) ||
+            !Uri.TryCreate(avatarUrl, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length < 2 ||
+            !string.Equals(segments[0], "avatars", StringComparison.OrdinalIgnoreCase))
+        {
+            return avatarUrl;
+        }
+
+        var blobName = string.Join('/', segments.Skip(1));
+        return GenerateBlobSasUri(_blobServiceClient, "avatars", blobName, lifetime);
     }
 
     private string GenerateBlobSasUri(BlobServiceClient blobServiceClient, string containerName, string blobName, TimeSpan? lifetime = null)

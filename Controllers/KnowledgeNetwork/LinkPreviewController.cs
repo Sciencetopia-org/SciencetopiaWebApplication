@@ -1,14 +1,10 @@
-using System;
-using System.IO;
-using System.Net.Http;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
 using HtmlAgilityPack;
-using PdfSharp.Pdf;
-using PdfSharp.Pdf.IO;
-using PdfSharp.Charting;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Sciencetopia.Controllers.KnowledgeNetwork;
 
@@ -16,6 +12,9 @@ namespace Sciencetopia.Controllers.KnowledgeNetwork;
 [ApiController]
 public class LinkPreviewController : ControllerBase
 {
+    private const int MaxUrlLength = 2048;
+    private const int MaxRedirects = 3;
+    private const int MaxPreviewBytes = 256 * 1024;
     private readonly IHttpClientFactory _clientFactory;
 
     public LinkPreviewController(IHttpClientFactory clientFactory)
@@ -24,160 +23,257 @@ public class LinkPreviewController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> Get(string url, string? title = null)
+    [EnableRateLimiting("LinkPreview")]
+    public async Task<IActionResult> Get(string url, string? title = null, CancellationToken ct = default)
     {
-        var extractedUrl = NormalizeUrl(url);
+        var extractedUrl = await NormalizeAndValidateUrlAsync(url, ct);
         if (extractedUrl == null)
         {
-            // Be tolerant: return minimal preview so FE can still render a clickable link
-            return Ok(new { Title = title ?? url, Description = string.Empty, Image = string.Empty });
+            return BadRequest(new { message = "URL is not allowed for link preview." });
         }
 
-        var client = _clientFactory.CreateClient();
-        var response = await client.GetAsync(extractedUrl);
-        if (!response.IsSuccessStatusCode)
+        try
         {
-            // Return minimal preview instead of 4xx to keep UI functional
-            return Ok(new { Title = title ?? extractedUrl.ToString(), Description = string.Empty, Image = string.Empty });
-        }
-
-        // If the content is PDF and title was not provided, extract from PDF
-        if (response.Content.Headers.ContentType?.MediaType == "application/pdf")
-        {
-            var pdfStream = await response.Content.ReadAsStreamAsync();
-            string pdfTitle = title ?? string.Empty;
-
-            if (title == null)
+            var response = await FetchWithValidatedRedirectsAsync(extractedUrl, ct);
+            if (response == null)
             {
-                if (extractedUrl.AbsolutePath.EndsWith(".pdf"))
-                {
-                    pdfTitle = await ExtractTitleFromPdfUsingTika(pdfStream);
-                }
-                else
-                {
-                    pdfTitle = ExtractTitleFromPdfMetadata(pdfStream);
-                    if (string.IsNullOrEmpty(pdfTitle))
-                    {
-                        pdfTitle = await ExtractTitleFromPdfUsingTika(pdfStream);
-                    }
-                }
+                return Ok(MinimalPreview(title ?? extractedUrl.ToString()));
             }
 
-            var pdfPreview = new
+            using (response)
             {
-                Title = pdfTitle
-            };
+                if (!response.IsSuccessStatusCode || !IsHtmlContent(response.Content.Headers.ContentType))
+                {
+                    return Ok(MinimalPreview(title ?? extractedUrl.ToString()));
+                }
 
-            return Ok(pdfPreview);
+                var contentBytes = await ReadLimitedAsync(response.Content, ct);
+                if (contentBytes == null)
+                {
+                    return StatusCode(StatusCodes.Status413PayloadTooLarge, new { message = "Preview response is too large." });
+                }
+
+                var html = DecodeHtml(contentBytes, response.Content.Headers.ContentType);
+                var preview = BuildPreview(html, response.RequestMessage?.RequestUri ?? extractedUrl, title);
+                return Ok(preview);
+            }
         }
-
-        // Handle HTML content
-        var contentBytes = await response.Content.ReadAsByteArrayAsync();
-        var utf8String = Encoding.UTF8.GetString(contentBytes);
-
-        var doc = new HtmlDocument();
-        doc.LoadHtml(utf8String);
-
-        var metaCharset = doc.DocumentNode.SelectSingleNode("//meta[@http-equiv='Content-Type']")
-            ?.GetAttributeValue("content", string.Empty);
-        var charset = metaCharset?.Split("charset=")[1];
-
-        if (!string.IsNullOrEmpty(charset))
+        catch (OperationCanceledException)
         {
-            var correctEncoding = Encoding.GetEncoding(charset);
-            var correctString = correctEncoding.GetString(contentBytes);
-            doc = new HtmlDocument();
-            doc.LoadHtml(correctString);
+            return StatusCode(StatusCodes.Status504GatewayTimeout, new { message = "Preview request timed out." });
         }
-
-        string extractedTitle = title ??
-            doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']")?.GetAttributeValue("content", string.Empty)
-            ?? string.Empty;
-        if (string.IsNullOrEmpty(extractedTitle) && title == null)
+        catch
         {
-            extractedTitle = doc.DocumentNode.SelectSingleNode("//title")?.InnerText ?? string.Empty;
+            return Ok(MinimalPreview(title ?? extractedUrl.ToString()));
         }
-
-        var description = doc.DocumentNode.SelectSingleNode("//meta[@property='og:description']")?.GetAttributeValue("content", string.Empty);
-        if (string.IsNullOrEmpty(description))
-        {
-            description = doc.DocumentNode.SelectSingleNode("//meta[@name='description']")?.GetAttributeValue("content", string.Empty);
-        }
-
-        var image = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']")?.GetAttributeValue("content", string.Empty);
-
-        var preview = new
-        {
-            Title = extractedTitle,
-            Description = description,
-            Image = image
-        };
-
-        return Ok(preview);
     }
 
-    private Uri? NormalizeUrl(string text)
+    private async Task<HttpResponseMessage?> FetchWithValidatedRedirectsAsync(Uri initialUrl, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        var s = text.Trim();
-        try { s = Uri.UnescapeDataString(s); } catch { /* ignore */ }
-
-        if (s.StartsWith("//")) s = "https:" + s;
-        if (!s.Contains("://"))
+        var current = initialUrl;
+        for (var redirect = 0; redirect <= MaxRedirects; redirect++)
         {
-            // If looks like a domain or path, default to https
-            if (Regex.IsMatch(s, @"^[\w.-]+(\.[\w.-]+)+(/.*)?$"))
+            current = await NormalizeAndValidateUrlAsync(current.ToString(), ct) ?? throw new InvalidOperationException("Redirect URL is not allowed.");
+            var client = _clientFactory.CreateClient("LinkPreview");
+            using var request = new HttpRequestMessage(HttpMethod.Get, current);
+            request.Headers.UserAgent.ParseAdd("SciencetopiaLinkPreview/1.0");
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/xhtml+xml"));
+
+            var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!IsRedirect(response.StatusCode))
             {
-                s = "https://" + s;
+                return response;
             }
+
+            var location = response.Headers.Location;
+            response.Dispose();
+            if (location == null)
+            {
+                return null;
+            }
+
+            current = location.IsAbsoluteUri ? location : new Uri(current, location);
         }
-        if (Uri.TryCreate(s, UriKind.Absolute, out var uri)) return uri;
+
         return null;
     }
 
-    private string ExtractTitleFromPdfMetadata(Stream pdfStream)
+    internal static async Task<Uri?> NormalizeAndValidateUrlAsync(string? text, CancellationToken ct = default)
     {
-        try
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var raw = text.Trim();
+        if (raw.Length > MaxUrlLength || HasControlCharacter(raw)) return null;
+        if (raw.StartsWith("//", StringComparison.Ordinal)) raw = "https:" + raw;
+        if (!raw.Contains("://", StringComparison.Ordinal))
         {
-            using (var memoryStream = new MemoryStream())
+            if (Regex.IsMatch(raw, @"^[A-Za-z0-9.-]+(\.[A-Za-z0-9.-]+)+(:[0-9]{1,5})?(/.*)?$"))
             {
-                pdfStream.CopyTo(memoryStream);
-                memoryStream.Position = 0;
-
-                using (var document = PdfReader.Open(memoryStream, PdfDocumentOpenMode.Import))
-                {
-                    return document.Info.Title;
-                }
+                raw = "https://" + raw;
             }
         }
-        catch (Exception)
+
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri)) return null;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return null;
+        if (string.IsNullOrWhiteSpace(uri.Host)) return null;
+        if (!string.IsNullOrEmpty(uri.UserInfo)) return null;
+        if (uri.Port is <= 0 or > 65535) return null;
+        if (IsForbiddenHostName(uri.Host)) return null;
+
+        IPAddress[] addresses;
+        try
         {
-            return string.Empty;
+            addresses = await Dns.GetHostAddressesAsync(uri.Host, ct);
         }
+        catch
+        {
+            return null;
+        }
+
+        if (addresses.Length == 0 || addresses.Any(IsForbiddenAddress)) return null;
+        return uri;
     }
 
-    private async Task<string> ExtractTitleFromPdfUsingTika(Stream pdfStream)
+    internal static bool IsForbiddenAddress(IPAddress address)
     {
-        using (var client = _clientFactory.CreateClient())
+        if (address.IsIPv4MappedToIPv6)
         {
-            var content = new StreamContent(pdfStream);
-            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/pdf");
-
-            var response = await client.PutAsync("http://localhost:9998/tika", content);
-            response.EnsureSuccessStatusCode();
-
-            var text = await response.Content.ReadAsStringAsync();
-
-            return ExtractTitleFromText(text);
+            address = address.MapToIPv4();
         }
+
+        if (IPAddress.IsLoopback(address)) return true;
+
+        var bytes = address.GetAddressBytes();
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            var first = bytes[0];
+            var second = bytes[1];
+            return first == 0
+                || first == 10
+                || first == 127
+                || (first == 100 && second is >= 64 and <= 127)
+                || (first == 169 && second == 254)
+                || (first == 172 && second is >= 16 and <= 31)
+                || (first == 192 && second == 168)
+                || (first == 192 && second == 0)
+                || (first == 192 && second == 0 && bytes[2] == 2)
+                || (first == 198 && second is 18 or 19)
+                || (first == 203 && second == 0 && bytes[2] == 113)
+                || first >= 224
+                || address.Equals(IPAddress.Parse("169.254.169.254"));
+        }
+
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            return address.Equals(IPAddress.IPv6None)
+                || address.Equals(IPAddress.IPv6Loopback)
+                || address.IsIPv6LinkLocal
+                || address.IsIPv6Multicast
+                || (bytes[0] & 0xfe) == 0xfc;
+        }
+
+        return true;
     }
 
-    private string ExtractTitleFromText(string text)
+    private static bool IsForbiddenHostName(string host)
+    {
+        var normalized = host.TrimEnd('.').ToLowerInvariant();
+        return normalized == "localhost"
+            || normalized == "host.docker.internal"
+            || normalized.EndsWith(".local", StringComparison.Ordinal)
+            || normalized.EndsWith(".internal", StringComparison.Ordinal)
+            || normalized.EndsWith(".svc", StringComparison.Ordinal)
+            || normalized.EndsWith(".cluster.local", StringComparison.Ordinal)
+            || normalized is "metadata.google.internal" or "169.254.169.254";
+    }
+
+    private static bool IsRedirect(HttpStatusCode statusCode)
+        => statusCode is HttpStatusCode.Moved
+            or HttpStatusCode.Redirect
+            or HttpStatusCode.RedirectMethod
+            or HttpStatusCode.TemporaryRedirect
+            or HttpStatusCode.PermanentRedirect;
+
+    private static bool IsHtmlContent(MediaTypeHeaderValue? contentType)
+    {
+        var mediaType = contentType?.MediaType;
+        return string.Equals(mediaType, "text/html", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(mediaType, "application/xhtml+xml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<byte[]?> ReadLimitedAsync(HttpContent content, CancellationToken ct)
+    {
+        await using var stream = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(chunk.AsMemory(0, chunk.Length), ct)) > 0)
+        {
+            if (buffer.Length + read > MaxPreviewBytes) return null;
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+
+    private static string DecodeHtml(byte[] contentBytes, MediaTypeHeaderValue? contentType)
+    {
+        var charset = contentType?.CharSet;
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try { return Encoding.GetEncoding(charset.Trim('"')).GetString(contentBytes); } catch { }
+        }
+
+        return Encoding.UTF8.GetString(contentBytes);
+    }
+
+    private static object BuildPreview(string html, Uri baseUri, string? titleOverride)
     {
         var doc = new HtmlDocument();
-        doc.LoadHtml(text);
+        doc.LoadHtml(html);
 
-        var titleNode = doc.DocumentNode.SelectSingleNode("//body//div[@class='page']//p/following-sibling::p[1]");
-        return titleNode?.InnerText.Trim() ?? "Untitled PDF";
+        var extractedTitle = titleOverride
+            ?? ReadMeta(doc, "og:title")
+            ?? CleanText(doc.DocumentNode.SelectSingleNode("//title")?.InnerText, 200);
+        var description = ReadMeta(doc, "og:description")
+            ?? ReadNamedMeta(doc, "description");
+        var image = ResolveSafeRemoteUrl(ReadMeta(doc, "og:image"), baseUri);
+
+        return new
+        {
+            Title = CleanText(extractedTitle, 200),
+            Description = CleanText(description, 500),
+            Image = image
+        };
     }
+
+    private static object MinimalPreview(string title)
+        => new { Title = CleanText(title, 200), Description = string.Empty, Image = string.Empty };
+
+    private static string? ReadMeta(HtmlDocument doc, string property)
+        => doc.DocumentNode.SelectSingleNode($"//meta[@property='{property}']")?.GetAttributeValue("content", string.Empty);
+
+    private static string? ReadNamedMeta(HtmlDocument doc, string name)
+        => doc.DocumentNode.SelectSingleNode($"//meta[@name='{name}']")?.GetAttributeValue("content", string.Empty);
+
+    private static string ResolveSafeRemoteUrl(string? value, Uri baseUri)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        if (!Uri.TryCreate(baseUri, value, out var uri)) return string.Empty;
+        return uri.Scheme is "http" or "https" && string.IsNullOrEmpty(uri.UserInfo) ? uri.ToString() : string.Empty;
+    }
+
+    private static string CleanText(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var cleaned = WebUtility.HtmlDecode(value)
+            .Where(ch => !char.IsControl(ch) || ch is '\r' or '\n' or '\t')
+            .Aggregate(new StringBuilder(), (builder, ch) => builder.Append(ch))
+            .ToString()
+            .Trim();
+        return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
+    }
+
+    private static bool HasControlCharacter(string value)
+        => value.Any(ch => char.IsControl(ch));
 }

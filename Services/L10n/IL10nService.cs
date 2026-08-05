@@ -3,6 +3,8 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using Sciencetopia.Data;
 using Sciencetopia.Models.L10n;
+using Sciencetopia.Models.Ontology;
+using Sciencetopia.Services.Ontology;
 
 namespace Sciencetopia.Services.L10n
 {
@@ -31,6 +33,14 @@ namespace Sciencetopia.Services.L10n
                          string value, bool isLongText = false,
                          bool primary = true, int? sortOrder = null);
         Task RemoveForTagAsync(Guid tagId, Guid l10nItemId);
+
+        // --- Ontology V2 generalized read shim (Phase 2) ---
+        // Resolves localized text for any entity via the generalized EntityL10nSets binding.
+        // Gated by OntologyOptions.L10nV2Enabled: when the flag is ON, EntityL10nSets is tried
+        // first for supported (entityType, purpose); when OFF, EntityL10nSets is never consulted.
+        // In both cases, a legacy fallback to the existing node/tag read path is used where
+        // applicable (entityType "KnowledgeNode" or "Tag"). Read-only; no writes.
+        Task<string?> GetLocalizedForEntityAsync(string entityType, Guid entityStableId, string purpose, string? lang);
     }
 
         public class L10nService : IL10nService
@@ -38,10 +48,97 @@ namespace Sciencetopia.Services.L10n
         private readonly ApplicationDbContext _db;
         private readonly IMemoryCache _cache;
         private readonly IOptions<L10nOptions> _opts;
+        private readonly IOptions<OntologyOptions> _ontology;
 
-        public L10nService(ApplicationDbContext db, IMemoryCache cache, IOptions<L10nOptions> opts)
+        public L10nService(ApplicationDbContext db, IMemoryCache cache, IOptions<L10nOptions> opts,
+                           IOptions<OntologyOptions> ontology)
         {
-            _db = db; _cache = cache; _opts = opts;
+            _db = db; _cache = cache; _opts = opts; _ontology = ontology;
+        }
+
+        // Entity types whose localized text can be stored in EntityL10nSets (Phase 1 set).
+        private static readonly HashSet<string> SupportedV2EntityTypes = new(StringComparer.Ordinal)
+        {
+            EntityL10nTypes.Concept, EntityL10nTypes.ConceptPage, EntityL10nTypes.ConceptScheme,
+            EntityL10nTypes.TagFacet, EntityL10nTypes.TagValue, EntityL10nTypes.Resource,
+            EntityL10nTypes.StudyPlan, EntityL10nTypes.Lesson, EntityL10nTypes.StudyGroup
+        };
+
+        // Legacy entity types that have an existing (pre-V2) localized read path to fall back to.
+        // NOT V2-storable; recognized only as fallback routes (see GetLocalizedForEntityAsync).
+        private const string LegacyKnowledgeNode = "KnowledgeNode";
+        private const string LegacyTag = "Tag";
+
+        // Maps an EntityL10nPurpose to the L10nItem.FieldKey used in storage. Returns null for an
+        // unsupported purpose (caller fails safe with null). Label/Description map to the existing
+        // "name"/"description" field keys; other purposes use their lowercase purpose string.
+        private static string? MapPurposeToFieldKey(string purpose) => purpose switch
+        {
+            EntityL10nPurposes.Label => "name",
+            EntityL10nPurposes.Alias => "name",
+            EntityL10nPurposes.Description => "description",
+            EntityL10nPurposes.Title => "title",
+            EntityL10nPurposes.Summary => "summary",
+            EntityL10nPurposes.Overview => "overview",
+            EntityL10nPurposes.Instruction => "instruction",
+            EntityL10nPurposes.UiDisplay => "ui_display",
+            EntityL10nPurposes.Legacy => "legacy",
+            _ => null
+        };
+
+        // Resolves a localized value from a single L10n set using the SAME locale fallback as the
+        // legacy read path: exact-lang Primary (by SortOrder) -> LangCode null Primary -> null.
+        private async Task<string?> ResolveFromSetAsync(Guid setId, string fieldKey, string? lang)
+        {
+            var q = from si in _db.L10nSetItems.AsNoTracking()
+                    join i in _db.L10nItems on si.L10nItemId equals i.L10nItemId
+                    where si.L10nSetId == setId && i.FieldKey == fieldKey
+                    select i;
+
+            L10nItem? item = null;
+            if (!string.IsNullOrWhiteSpace(lang))
+                item = await q.Where(i => i.LangCode == lang && i.Kind == L10nItemKind.Primary)
+                              .OrderBy(i => i.SortOrder).FirstOrDefaultAsync();
+            item ??= await q.Where(i => i.LangCode == null && i.Kind == L10nItemKind.Primary)
+                            .OrderBy(i => i.SortOrder).FirstOrDefaultAsync();
+
+            return item == null ? null : (item.Content ?? item.Text);
+        }
+
+        // entityStableId = the SEMANTIC StableId of the target entity (NOT a row/version Id).
+        // For legacy node/tag fallback this is matched against StableId (the legacy path also
+        // accepts a version Id, but callers should pass the StableId).
+        public async Task<string?> GetLocalizedForEntityAsync(string entityType, Guid entityStableId, string purpose, string? lang)
+        {
+            var fieldKey = MapPurposeToFieldKey(purpose);
+            if (fieldKey == null) return null; // unsupported purpose -> fail safe (no throw)
+
+            // V2 path: only when the flag is ON and (entityType, purpose) are supported for V2 storage.
+            if (_ontology.Value.L10nV2Enabled && SupportedV2EntityTypes.Contains(entityType))
+            {
+                var setId = await _db.EntityL10nSets.AsNoTracking()
+                    .Where(e => e.EntityType == entityType && e.EntityStableId == entityStableId && e.Purpose == purpose)
+                    .OrderBy(e => e.CreatedAt)
+                    .Select(e => (Guid?)e.L10nSetId)
+                    .FirstOrDefaultAsync();
+
+                if (setId.HasValue)
+                {
+                    var v2 = await ResolveFromSetAsync(setId.Value, fieldKey, lang);
+                    if (v2 != null) return v2; // V2 hit
+                }
+                // V2 miss -> fall through to legacy fallback below.
+            }
+
+            // Legacy fallback where applicable. Reuses the existing (unchanged) read paths so locale
+            // fallback and caching are identical to legacy behavior. Other entity types have no
+            // pre-V2 localized store, so they return null.
+            return entityType switch
+            {
+                LegacyKnowledgeNode => await GetLocalizedAsync(entityStableId, fieldKey, lang),
+                LegacyTag => await GetLocalizedForTagAsync(entityStableId, fieldKey, lang),
+                _ => null
+            };
         }
 
         private static string CacheKey(Guid nodeId, string fieldKey, string? lang)

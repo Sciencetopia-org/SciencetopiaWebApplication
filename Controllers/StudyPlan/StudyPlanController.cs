@@ -8,6 +8,7 @@ using System.Security.Claims;
 using Sciencetopia.DTOs;
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
+using Sciencetopia.Services.ContentSafety;
 
 namespace Sciencetopia.Controllers.StudyPlan
 {
@@ -20,17 +21,20 @@ namespace Sciencetopia.Controllers.StudyPlan
         private readonly PermissionService _permissionService;
         private readonly IResourceProgressService _progressService;
         private readonly ILogger<StudyPlanController> _logger;
+        private readonly IContentModerationService _contentModeration;
 
         public StudyPlanController(
             StudyPlanService studyPlanService,
             PermissionService permissionService,
             IResourceProgressService progressService,
-            ILogger<StudyPlanController> logger)
+            ILogger<StudyPlanController> logger,
+            IContentModerationService contentModeration)
         {
             _studyPlanService = studyPlanService;
             _permissionService = permissionService;
             _progressService = progressService;
             _logger = logger;
+            _contentModeration = contentModeration;
         }
 
         [HttpPost("SaveStudyPlan")]
@@ -43,6 +47,17 @@ namespace Sciencetopia.Controllers.StudyPlan
             if (string.IsNullOrEmpty(userId))
             {
                 return Unauthorized("User is not authenticated.");
+            }
+
+            var moderation = await _contentModeration.ReviewTextAsync(ExtractStudyPlanText(studyPlanDTO), HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
             }
 
             var id = await _studyPlanService.SaveStudyPlanAsync(studyPlanDTO, userId, autoTag);
@@ -248,6 +263,17 @@ namespace Sciencetopia.Controllers.StudyPlan
                 return Unauthorized("User is not authenticated.");
             }
 
+            var moderation = await _contentModeration.ReviewTextAsync(ExtractStudyPlanText(studyPlanDTO), HttpContext.RequestAborted);
+            if (!moderation.Allowed)
+            {
+                return BadRequest(new
+                {
+                    message = "内容未通过审核，请修改后再发布。",
+                    reason = moderation.Reason,
+                    blockedCategories = moderation.BlockedCategories
+                });
+            }
+
             var (success, planId) = await _studyPlanService.UpdateStudyPlanAsync(studyPlanDTO, userId, createNewVersion);
             if (!success)
             {
@@ -361,6 +387,39 @@ namespace Sciencetopia.Controllers.StudyPlan
             }
 
             return Ok("Privacy updated successfully.");
+        }
+
+        private static IEnumerable<string?> ExtractStudyPlanText(StudyPlanDTO? dto)
+        {
+            var detail = dto?.StudyPlan;
+            if (detail == null)
+            {
+                yield break;
+            }
+
+            yield return detail.Title;
+            yield return detail.Introduction?.Description;
+
+            foreach (var tag in detail.Tags ?? Enumerable.Empty<TagDTO>())
+            {
+                yield return tag.Name;
+            }
+
+            foreach (var lesson in EnumerateLessons(detail))
+            {
+                yield return lesson.Name;
+                yield return lesson.Description;
+
+                foreach (var tag in lesson.Tags ?? Enumerable.Empty<TagDTO>())
+                {
+                    yield return tag.Name;
+                }
+
+                foreach (var resource in lesson.Resources ?? Enumerable.Empty<ResourceDTO>())
+                {
+                    yield return resource.Name;
+                }
+            }
         }
     }
 }

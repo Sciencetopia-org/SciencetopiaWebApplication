@@ -537,6 +537,12 @@ namespace SciencetopiaWebApplication.Migrations
                     b.Property<string>("SelfIntroduction")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<bool>("ShowStudyGroupsPublicly")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("ShowStudyPlansPublicly")
+                        .HasColumnType("bit");
+
                     b.Property<bool>("TwoFactorEnabled")
                         .HasColumnType("bit");
 
@@ -991,6 +997,841 @@ namespace SciencetopiaWebApplication.Migrations
                         .HasDatabaseName("IX_TagL10nSets_Tag");
 
                     b.ToTable("TagL10nSets", "L10n");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.Concept", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<Guid?>("MergedIntoConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StableId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Draft");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MergedIntoConceptId");
+
+                    b.HasIndex("StableId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_Concepts_StableId");
+
+                    b.HasIndex("Status")
+                        .HasDatabaseName("IX_Concepts_Status");
+
+                    b.ToTable("Concepts", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptPage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ContentStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Draft");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<bool>("IsRenderable")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("PageType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid?>("SchemeId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StableId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId")
+                        .HasDatabaseName("IX_ConceptPages_Concept");
+
+                    b.HasIndex("SchemeId");
+
+                    b.HasIndex("StableId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ConceptPages_StableId");
+
+                    b.ToTable("ConceptPages", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptPlacement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<int>("DisplayPriority")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Level")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<int>("OrderIndex")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("ParentConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<Guid>("SchemeId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId");
+
+                    b.HasIndex("ParentConceptId")
+                        .HasDatabaseName("IX_ConceptPlacements_Parent");
+
+                    b.HasIndex("SchemeId", "ConceptId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ConceptPlacements_Scheme_Concept");
+
+                    b.ToTable("ConceptPlacements", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptRelation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<Guid>("FromConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Reason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RelationType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<Guid>("ToConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ToConceptId")
+                        .HasDatabaseName("IX_ConceptRelations_To");
+
+                    b.HasIndex("FromConceptId", "ToConceptId", "RelationType")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ConceptRelations_From_To_Type");
+
+                    b.ToTable("ConceptRelations", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptScheme", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<bool>("IsDefault")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("SchemeType")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<Guid>("StableId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<int>("Version")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(1);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsDefault")
+                        .HasDatabaseName("IX_ConceptSchemes_IsDefault");
+
+                    b.HasIndex("Key")
+                        .HasDatabaseName("IX_ConceptSchemes_Key");
+
+                    b.HasIndex("StableId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ConceptSchemes_StableId");
+
+                    b.ToTable("ConceptSchemes", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.EntityL10nSet", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<Guid>("EntityStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EntityType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid>("L10nSetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("label");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("L10nSetId")
+                        .HasDatabaseName("IX_EntityL10nSets_Set");
+
+                    b.HasIndex("EntityType", "EntityStableId", "Purpose")
+                        .HasDatabaseName("IX_EntityL10nSets_Entity_Purpose");
+
+                    b.ToTable("EntityL10nSets", "L10n");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.LessonConceptAssertion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("ExpectedMastery")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("Importance")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<Guid>("LessonStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("LessonVersionNumber")
+                        .HasColumnType("int");
+
+                    b.Property<int>("OrderIndex")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId")
+                        .HasDatabaseName("IX_LessonConceptAssertions_Concept");
+
+                    b.HasIndex("LessonStableId", "LessonVersionNumber")
+                        .HasDatabaseName("IX_LessonConceptAssertions_Lesson");
+
+                    b.ToTable("LessonConceptAssertions", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.OntologyProposal", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("PayloadJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ProposalType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("Reason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValue("pending");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProposalType", "Status")
+                        .HasDatabaseName("IX_OntologyProposals_Type_Status");
+
+                    b.ToTable("OntologyProposals", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ResourceConceptAssertion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<string>("Coverage")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<bool>("IsPrimary")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LevelRelation")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<double?>("Weight")
+                        .HasColumnType("float");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ResourceId")
+                        .HasDatabaseName("IX_ResourceConceptAssertions_Resource");
+
+                    b.HasIndex("ConceptId", "ResourceId")
+                        .HasDatabaseName("IX_ResourceConceptAssertions_Concept_Resource");
+
+                    b.ToTable("ResourceConceptAssertions", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.StudyGroupConceptInterest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("Intensity")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<Guid>("StudyGroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId")
+                        .HasDatabaseName("IX_StudyGroupConceptInterests_Concept");
+
+                    b.HasIndex("StudyGroupId")
+                        .HasDatabaseName("IX_StudyGroupConceptInterests_Group");
+
+                    b.ToTable("StudyGroupConceptInterests", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.StudyPlanConceptAssertion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("Importance")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<Guid>("StudyPlanStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TargetMastery")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId")
+                        .HasDatabaseName("IX_StudyPlanConceptAssertions_Concept");
+
+                    b.HasIndex("StudyPlanStableId")
+                        .HasDatabaseName("IX_StudyPlanConceptAssertions_Plan");
+
+                    b.ToTable("StudyPlanConceptAssertions", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagAssignment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("Role")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid>("TagValueId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("TargetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TargetType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TagValueId")
+                        .HasDatabaseName("IX_TagAssignments_Value");
+
+                    b.HasIndex("TargetType", "TargetId")
+                        .HasDatabaseName("IX_TagAssignments_Target");
+
+                    b.ToTable("TagAssignments", "KnowledgeGraph");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagConceptMapping", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("MappingType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<Guid>("TagValueId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConceptId")
+                        .HasDatabaseName("IX_TagConceptMappings_Concept");
+
+                    b.HasIndex("TagValueId", "ConceptId", "MappingType")
+                        .IsUnique()
+                        .HasDatabaseName("UX_TagConceptMappings_Value_Concept_Type");
+
+                    b.ToTable("TagConceptMappings", "KnowledgeGraph");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagFacet", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("FacetType")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Key")
+                        .IsUnique()
+                        .HasDatabaseName("UX_TagFacets_Key");
+
+                    b.ToTable("TagFacets", "KnowledgeGraph");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagMigrationRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Action")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTimeOffset?>("AppliedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("float");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<Guid?>("NewConceptId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("NewTagValueId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("OldName")
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.Property<Guid?>("OldStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("OldTagId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReviewStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("Pending");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OldStableId")
+                        .HasDatabaseName("IX_TagMigrationRecords_OldStableId");
+
+                    b.HasIndex("ReviewStatus")
+                        .HasDatabaseName("IX_TagMigrationRecords_ReviewStatus");
+
+                    b.ToTable("TagMigrationRecords", "Ontology");
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagValue", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<Guid>("FacetId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("LegacyTagStableId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("StableId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier")
+                        .HasDefaultValueSql("NEWID()");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasDefaultValueSql("SYSUTCDATETIME()");
+
+                    b.Property<string>("ValueType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)")
+                        .HasDefaultValue("custom");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FacetId")
+                        .HasDatabaseName("IX_TagValues_Facet");
+
+                    b.HasIndex("LegacyTagStableId")
+                        .HasDatabaseName("IX_TagValues_LegacyTag");
+
+                    b.HasIndex("StableId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_TagValues_StableId");
+
+                    b.ToTable("TagValues", "KnowledgeGraph");
                 });
 
             modelBuilder.Entity("Sciencetopia.Models.StudyGroupEmbedding", b =>
@@ -1760,6 +2601,132 @@ namespace SciencetopiaWebApplication.Migrations
                         .WithMany()
                         .HasForeignKey("TagId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.Concept", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("MergedIntoConceptId")
+                        .OnDelete(DeleteBehavior.NoAction);
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptPage", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.Ontology.ConceptScheme", null)
+                        .WithMany()
+                        .HasForeignKey("SchemeId")
+                        .OnDelete(DeleteBehavior.NoAction);
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptPlacement", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ParentConceptId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("Sciencetopia.Models.Ontology.ConceptScheme", null)
+                        .WithMany()
+                        .HasForeignKey("SchemeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ConceptRelation", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("FromConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ToConceptId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.LessonConceptAssertion", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.ResourceConceptAssertion", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.StudyGroupConceptInterest", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.StudyPlanConceptAssertion", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagAssignment", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.TagValue", null)
+                        .WithMany()
+                        .HasForeignKey("TagValueId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagConceptMapping", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.Concept", null)
+                        .WithMany()
+                        .HasForeignKey("ConceptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Sciencetopia.Models.Ontology.TagValue", null)
+                        .WithMany()
+                        .HasForeignKey("TagValueId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Sciencetopia.Models.Ontology.TagValue", b =>
+                {
+                    b.HasOne("Sciencetopia.Models.Ontology.TagFacet", null)
+                        .WithMany()
+                        .HasForeignKey("FacetId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 

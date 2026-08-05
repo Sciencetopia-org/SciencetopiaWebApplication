@@ -8,6 +8,7 @@ using Sciencetopia.Data;
 using Sciencetopia.Services;
 using Sciencetopia.Services.KnowledgeGraph;
 using Sciencetopia.Services.Messaging;
+using Sciencetopia.Services.ContentSafety;
 using Sciencetopia.Models;
 using Sciencetopia.Hubs;
 using Sciencetopia.Authorization;
@@ -19,6 +20,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.IO.Compression;
 using Microsoft.Extensions.Caching.Memory;
+using System.Threading.RateLimiting;
 // Modular backend moved into its own project
 
 var builder = WebApplication.CreateBuilder(args);
@@ -74,6 +76,69 @@ builder.Services.AddScoped<IStudyPlanRepository, StudyPlanRepository>();
 builder.Services.AddScoped<Sciencetopia.Services.PlanSharingService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("PythonService", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(builder.Configuration.GetValue<int?>("PythonService:TimeoutSeconds") ?? 30);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("SciencetopiaBackend/1.0");
+});
+builder.Services.AddHttpClient("LinkPreview", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(builder.Configuration.GetValue<int?>("LinkPreview:TimeoutSeconds") ?? 5);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    AllowAutoRedirect = false,
+    UseCookies = false
+});
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("GeneralApi", context =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartitionKey(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = builder.Environment.IsDevelopment() ? 600 : 300,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 20
+        }));
+
+    options.AddPolicy("Authentication", context =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartitionKey(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = builder.Environment.IsDevelopment() ? 30 : 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 5
+        }));
+
+    options.AddPolicy("ExpensiveOperations", context =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartitionKey(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = builder.Environment.IsDevelopment() ? 20 : 5,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 2
+        }));
+
+    options.AddPolicy("AiOperations", context =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartitionKey(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = builder.Environment.IsDevelopment() ? 30 : 10,
+            Window = TimeSpan.FromMinutes(10),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 2
+        }));
+
+    options.AddPolicy("LinkPreview", context =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartitionKey(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = builder.Environment.IsDevelopment() ? 120 : 30,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 5
+        }));
+});
 builder.Services.AddResponseCompression(options =>
 {
     options.EnableForHttps = true;
@@ -100,6 +165,10 @@ builder.Services.AddScoped<IGraphSyncService, GraphSyncService>();
 builder.Services.AddScoped<StudyPlanVersioningService>();
 // L10n services
 builder.Services.Configure<Sciencetopia.Services.L10n.L10nOptions>(builder.Configuration.GetSection("L10n"));
+// Ontology V2 feature flags (Phase 1: bound from config, all default false; nothing reads them yet).
+builder.Services.Configure<Sciencetopia.Services.Ontology.OntologyOptions>(builder.Configuration.GetSection("Ontology"));
+builder.Services.AddScoped<Sciencetopia.Services.Ontology.Phase3.OntologyPhase3DryRunService>();
+builder.Services.AddScoped<Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairService>();
 builder.Services.AddScoped<Sciencetopia.Services.L10n.IL10nService, Sciencetopia.Services.L10n.L10nService>();
 builder.Services.AddSingleton<Sciencetopia.Middleware.ILanguageContext, Sciencetopia.Middleware.LanguageContext>();
 builder.Services.Configure<DraftFreezeOptions>(builder.Configuration.GetSection("KnowledgeGraph:DraftFreeze"));
@@ -134,7 +203,8 @@ builder.Services.AddAuthentication(options =>
         ValidateIssuerSigningKey = true,
         ValidIssuer = builder.Configuration["Jwt:Issuer"],
         ValidAudience = builder.Configuration["Jwt:Audience"],
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]))
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key is not configured."))),
+        ClockSkew = TimeSpan.FromMinutes(2)
     };
 });
 
@@ -164,6 +234,8 @@ builder.Services.AddSingleton(x =>
     return new BlobServiceClient(connectionString);
 });
 builder.Services.AddSingleton<MessageAttachmentService>();
+builder.Services.Configure<ContentModerationOptions>(builder.Configuration.GetSection("ContentModeration"));
+builder.Services.AddScoped<IContentModerationService, ContentModerationService>();
 
 // // 注册您的 DataSyncService 作为后台服务
 // builder.Services.AddHostedService<DataSyncService>();
@@ -220,12 +292,28 @@ builder.Services.AddSwaggerGen(c =>
 // Setup CORS in .NET Web API
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("VueCorsPolicy", builder =>
+    options.AddPolicy("VueCorsPolicy", policy =>
     {
-        builder.WithOrigins("http://localhost:8088", "http://localhost:8848")  // Allow both origins
-               .AllowAnyMethod()
-               .AllowAnyHeader()
-               .AllowCredentials();
+        var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+        var allowedOrigins = configuredOrigins
+            .Where(origin => !string.IsNullOrWhiteSpace(origin))
+            .Select(origin => origin.Trim())
+            .ToArray();
+
+        if (allowedOrigins.Length > 0)
+        {
+            policy.WithOrigins(allowedOrigins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
+        else if (builder.Environment.IsDevelopment())
+        {
+            policy.WithOrigins("http://localhost:8088", "http://localhost:8848")
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
     });
 });
 
@@ -300,6 +388,128 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 
 var app = builder.Build();
 
+var malformedTagRepairPlanMode = args.Contains("--ontology-repair-malformed-tags-plan", StringComparer.OrdinalIgnoreCase);
+var malformedTagRepairApplyMode = args.Contains("--ontology-repair-malformed-tags-apply", StringComparer.OrdinalIgnoreCase);
+if (malformedTagRepairPlanMode || malformedTagRepairApplyMode)
+{
+    if (malformedTagRepairPlanMode && malformedTagRepairApplyMode)
+    {
+        Console.Error.WriteLine("Choose exactly one malformed-tag repair mode: plan or apply.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    var preflight = Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairCli.ValidateConfiguration(app.Configuration);
+    if (!preflight.IsValid)
+    {
+        Console.Error.WriteLine("Malformed-tag repair configuration error:");
+        foreach (var error in preflight.Errors) Console.Error.WriteLine($"- {error}");
+        Console.Error.WriteLine("No SQL or Neo4j writes were attempted. The repair service was not resolved.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    var outputRoot = GetArgValue(args, "--output-root")
+        ?? Path.Combine(app.Environment.ContentRootPath, "..", "artifacts");
+    outputRoot = Path.GetFullPath(outputRoot);
+
+    if (malformedTagRepairApplyMode)
+    {
+        var planFile = GetArgValue(args, "--plan-file");
+        var suppliedHash = GetArgValue(args, "--plan-hash") ?? string.Empty;
+        var confirmed = args.Contains("--confirm-neo4j-write", StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(planFile))
+        {
+            Console.Error.WriteLine("Apply requires --plan-file <path>.");
+            Console.Error.WriteLine("No SQL or Neo4j writes were attempted. The repair service was not resolved.");
+            Environment.ExitCode = 2;
+            return;
+        }
+
+        planFile = Path.GetFullPath(planFile);
+        Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairPlan plan;
+        try
+        {
+            plan = Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairArtifacts.ReadPlan(planFile);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Unable to read repair plan: {ex.Message}");
+            Console.Error.WriteLine("No SQL or Neo4j writes were attempted. The repair service was not resolved.");
+            Environment.ExitCode = 2;
+            return;
+        }
+
+        var request = new Sciencetopia.Services.Ontology.TagRepair.TagRepairApplyRequest(planFile, suppliedHash, confirmed);
+        var applyGuard = Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairCli.ValidateApplyRequest(request, plan);
+        if (!applyGuard.IsValid)
+        {
+            Console.Error.WriteLine("Malformed-tag repair apply was blocked:");
+            foreach (var error in applyGuard.Errors) Console.Error.WriteLine($"- {error}");
+            Console.Error.WriteLine("No SQL or Neo4j writes were attempted. The repair service was not resolved.");
+            Environment.ExitCode = 2;
+            return;
+        }
+
+        using var applyScope = app.Services.CreateScope();
+        var applyService = applyScope.ServiceProvider.GetRequiredService<Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairService>();
+        var outcome = await applyService.ApplyAsync(request);
+        Console.WriteLine(outcome.Succeeded ? "Malformed-tag repair applied and verified." : "Malformed-tag repair failed closed; the Neo4j transaction was rolled back.");
+        Console.WriteLine($"Result: {outcome.ResultPath}");
+        Environment.ExitCode = outcome.ExitCode;
+        return;
+    }
+
+    using var planScope = app.Services.CreateScope();
+    var planService = planScope.ServiceProvider.GetRequiredService<Sciencetopia.Services.Ontology.TagRepair.MalformedTagRepairService>();
+    var (repairPlan, repairOutputDirectory) = await planService.PlanAsync(outputRoot);
+    Console.WriteLine("Malformed-tag repair plan complete. No database writes were performed.");
+    Console.WriteLine($"Output: {repairOutputDirectory}");
+    Console.WriteLine($"Plan hash: {repairPlan.PlanHash}");
+    Console.WriteLine($"Records: {repairPlan.Summary.PlannedRecordCount}; blocking errors: {repairPlan.Summary.BlockingValidationErrorCount}");
+    return;
+}
+
+if (args.Contains("--ontology-phase3-dry-run", StringComparer.OrdinalIgnoreCase))
+{
+    var preflight = Sciencetopia.Services.Ontology.Phase3.Phase3CliPreflight.ValidateNeo4jConfiguration(app.Configuration);
+    if (!preflight.IsValid)
+    {
+        Console.Error.WriteLine("Ontology Phase 3 dry-run configuration error.");
+        Console.Error.WriteLine("Neo4j configuration is required before the dry-run service can be resolved:");
+        foreach (var error in preflight.Errors)
+        {
+            Console.Error.WriteLine($"- {error}");
+        }
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("PowerShell setup example (placeholders only):");
+        Console.Error.WriteLine("$env:Neo4j__Uri = \"bolt://localhost:7687\"");
+        Console.Error.WriteLine("$env:Neo4j__User = \"neo4j\"");
+        Console.Error.WriteLine("$env:Neo4j__Password = \"<password>\"");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("No SQL or Neo4j writes were attempted. The dry-run service was not resolved.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    var outputRoot = GetArgValue(args, "--output-root")
+        ?? Path.Combine(app.Environment.ContentRootPath, "..", "artifacts");
+    outputRoot = Path.GetFullPath(outputRoot);
+
+    using var scope = app.Services.CreateScope();
+    var runner = scope.ServiceProvider.GetRequiredService<Sciencetopia.Services.Ontology.Phase3.OntologyPhase3DryRunService>();
+    var (summary, outputDir) = await runner.RunAsync(outputRoot);
+
+    Console.WriteLine("Ontology Phase 3 dry-run complete.");
+    Console.WriteLine($"Output: {outputDir}");
+    Console.WriteLine($"SQL tags: {summary.SqlTagsTotal}");
+    Console.WriteLine($"Neo4j tags: {summary.Neo4jTagsTotal}");
+    Console.WriteLine($"Quarantine records: {summary.QuarantineCount}");
+    Console.WriteLine("No SQL writes, Neo4j writes, migrations, API routes, or frontend changes were performed by this command.");
+    return;
+}
+
 // Apply CORS dynamically based on request path or origin
 app.UseCors("VueCorsPolicy");
 if (!app.Environment.IsDevelopment())
@@ -310,14 +520,20 @@ app.UseMiddleware<Sciencetopia.Middleware.LanguageResolutionMiddleware>();
 
 app.Use(async (context, next) =>
 {
-    if (context.Request.Method == "OPTIONS")
+    context.Response.Headers.TryAdd("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.TryAdd("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers.TryAdd("X-Frame-Options", "DENY");
+    context.Response.Headers.TryAdd("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    var csp = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
+              "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; " +
+              "font-src 'self' data:; connect-src 'self' ws: wss:; upgrade-insecure-requests";
+    if (app.Environment.IsDevelopment())
     {
-        context.Response.Headers.Append("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        context.Response.Headers.Append("Access-Control-Allow-Headers", "Content-Type, Authorization");
-         context.Response.Headers.Append("Access-Control-Allow-Origin", "http://localhost:8088");
-        context.Response.Headers.Append("Access-Control-Allow-Credentials", "true");
-        context.Response.StatusCode = 204; // No Content
-        return;
+        context.Response.Headers.TryAdd("Content-Security-Policy-Report-Only", csp);
+    }
+    else
+    {
+        context.Response.Headers.TryAdd("Content-Security-Policy", csp);
     }
     await next();
 });
@@ -370,9 +586,37 @@ app.UseAuthentication();
 
 app.UseAuthorization();
 
-app.MapControllers();
+app.UseRateLimiter();
 
-app.MapHub<ChatHub>("/chathub"); // Map your ChatHub
-app.MapHub<Sciencetopia.Hubs.StudyHub>("/hubs/study");
+app.MapControllers().RequireRateLimiting("GeneralApi");
+
+app.MapHub<ChatHub>("/chathub").RequireRateLimiting("GeneralApi"); // Map your ChatHub
+app.MapHub<Sciencetopia.Hubs.StudyHub>("/hubs/study").RequireRateLimiting("GeneralApi");
 
 app.Run();
+
+static string GetRateLimitPartitionKey(HttpContext context)
+{
+    var userId = context.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+    if (!string.IsNullOrWhiteSpace(userId))
+    {
+        return $"user:{userId}";
+    }
+
+    return $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+}
+
+static string? GetArgValue(string[] args, string name)
+{
+    for (var i = 0; i < args.Length; i++)
+    {
+        if (!string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        return i + 1 < args.Length ? args[i + 1] : null;
+    }
+
+    return null;
+}

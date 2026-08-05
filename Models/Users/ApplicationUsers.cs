@@ -13,6 +13,8 @@ namespace Sciencetopia.Models
         public DateTime? LastUsernameChangeDate { get; set; }
         public string? WeChatOpenId { get; set; }
         public DateTime RegisteredAt { get; set; }
+        public bool ShowStudyPlansPublicly { get; set; } = true;
+        public bool ShowStudyGroupsPublicly { get; set; } = true;
         // The Id, UserName, Email, and Password are already included in IdentityUser
     }
 }
